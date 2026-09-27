@@ -105,6 +105,7 @@ wifit3 automatically handles hardware configuration within the app, after clicki
 - **Linux:** Prompts once via `pkexec`/`sudo` to write udev permissions and blocklists in `/etc/modprobe.d/`.
 - **macOS:** No installation required; plug in the device and select *Allow* in the authorization dialog.
 - **Windows:** Prompts once via UAC to install WinUSB for the device.
+- **VirtualBox:** Add your device(s) to VirtualBox's `USB Filters` *before* plugging in.
 
 ## Uninstalling
 Return the previously-installed device to your operating system's Wi-Fi stack:
