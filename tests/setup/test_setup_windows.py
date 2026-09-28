@@ -2,6 +2,8 @@
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 import wifit3.setup.windows as win
 from wifit3.models import DeviceID
 from wifit3.setup.base import SetupResult
@@ -48,6 +50,12 @@ class _Restore:
 def _pending(launched=True, win_error=0):
     run = win._ElevatedRun(launched=launched, win_error=win_error, exit_code=None, hproc=1)
     return win._PendingInstall(logpath=Path("wdi.log"), run=run)
+
+
+@pytest.fixture(autouse=True)
+def _offline_bus(monkeypatch):
+    """_enum_usb_nodes calls into setupapi via ctypes.WinDLL, which only exists on Windows."""
+    monkeypatch.setattr(win, "_enum_usb_nodes", lambda vid, pid: [])
 
 
 def test_requires_setup_true_when_present_and_not_winusb_bound(monkeypatch):
