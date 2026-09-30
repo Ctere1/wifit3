@@ -1,6 +1,7 @@
 """Render AccessPoint security info as Rich-markup for the UI."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional
 
@@ -97,57 +98,72 @@ def _detail_markup(
     return f" [{muted}]({'·'.join(inner_parts)})[/{muted}]"
 
 
-def format_encryption_markup(
-    ap: AccessPoint, detailed: bool = False, muted: str = "dim"
-) -> str:
-    """Return Rich-markup for the ENCRYPT cell.
-    ``detailed=False`` (scanner) drops the pairwise cipher entirely.
-    ``muted`` overrides the default Rich ``"dim"`` attribute."""
-    akms_tok = _simplified_akms(ap.akms)
-    cipher = ap.pairwise_cipher
-    show_cipher = detailed and cipher is not None
-    enc_type = EncryptionType.from_ap(ap)
+@dataclass(frozen=True, slots=True)
+class EncryptionSummary:
+    """The plain facts behind the ENCRYPT cell, so a table row can be diffed
+    without building markup first."""
+    type: EncryptionType
+    akms: str
+    cipher: Optional[str]
+    wep_ivs: int
+    raw: str
 
-    # WPA3 Transition (SAE + PSK): render as WPA3→2.
-    if enc_type is EncryptionType.WPA3_TRANSITION:
-        head = f"[bright_red]WPA3[/bright_red]→[{_ATTACKABLE}]2[/{_ATTACKABLE}]"
-        if not detailed:
-            return head
-        return head + _detail_markup(akms_tok, cipher, show_cipher, muted)
+    @classmethod
+    def from_ap(cls, ap: AccessPoint) -> "EncryptionSummary":
+        return cls(
+            type=EncryptionType.from_ap(ap),
+            akms=_simplified_akms(ap.akms),
+            cipher=ap.pairwise_cipher,
+            wep_ivs=ap.wep.unique_ivs if ap.wep else 0,
+            raw=(ap.encryption or "").upper(),
+        )
 
-    # Pure WPA3-SAE: no usable attack yet.
-    if enc_type is EncryptionType.WPA3:
-        head = "[bright_red]WPA3[/bright_red]"
-        return head + _detail_markup(akms_tok, cipher, show_cipher, muted)
+    def markup(self, detailed: bool = False, muted: str = "dim") -> str:
+        """Rich-markup for the ENCRYPT cell.
+        ``detailed=False`` (scanner) drops the pairwise cipher entirely."""
+        show_cipher = detailed and self.cipher is not None
+        detail = _detail_markup(self.akms, self.cipher, show_cipher, muted)
 
-    # OWE (Enhanced Open): no attack yet.
-    if enc_type is EncryptionType.OWE:
-        return f"[{_NO_ATTACK_YET}]OWE[/{_NO_ATTACK_YET}]"
+        # WPA3 Transition (SAE + PSK): render as WPA3→2.
+        if self.type is EncryptionType.WPA3_TRANSITION:
+            head = f"[bright_red]WPA3[/bright_red]→[{_ATTACKABLE}]2[/{_ATTACKABLE}]"
+            return head if not detailed else head + detail
 
-    # Any RSN-based modern WPA2: attackable.
-    if enc_type is EncryptionType.WPA2:
-        head = f"[{_ATTACKABLE}]WPA2[/{_ATTACKABLE}]"
-        return head + _detail_markup(akms_tok, cipher, show_cipher, muted)
+        # Pure WPA3-SAE: no usable attack yet.
+        if self.type is EncryptionType.WPA3:
+            return "[bright_red]WPA3[/bright_red]" + detail
 
-    if enc_type is EncryptionType.OPEN:
-        return f"[{muted}]OPEN[/{muted}]"
+        # OWE (Enhanced Open): no attack yet.
+        if self.type is EncryptionType.OWE:
+            return f"[{_NO_ATTACK_YET}]OWE[/{_NO_ATTACK_YET}]"
 
-    if enc_type is EncryptionType.WEP:
-        # Attackable now (IV capture → replay → crack).
-        head = f"[{_ATTACKABLE}]WEP[/{_ATTACKABLE}]"
-        if detailed:
-            return head
-        n = ap.wep.unique_ivs if ap.wep else 0
-        return head + f"[{muted}]·{_format_iv_count(n)} IVs[/{muted}]"
+        # Any RSN-based modern WPA2: attackable.
+        if self.type is EncryptionType.WPA2:
+            return f"[{_ATTACKABLE}]WPA2[/{_ATTACKABLE}]" + detail
 
-    if enc_type is EncryptionType.WPA1:
-        # Legacy WPA1 vendor IE: TKIP universal. Out of scope for wifit3.
-        head = f"[{_OUT_OF_SCOPE}]WPA[/{_OUT_OF_SCOPE}]"
-        tail = f" [{muted}](PSK·TKIP)[/{muted}]" if detailed else f" [{muted}](PSK)[/{muted}]"
-        return head + tail
+        if self.type is EncryptionType.OPEN:
+            return f"[{muted}]OPEN[/{muted}]"
 
-    # Unknown: show raw string muted.
-    return f"[{muted}]{(ap.encryption or '').upper()}[/{muted}]"
+        if self.type is EncryptionType.WEP:
+            # Attackable now (IV capture → replay → crack).
+            head = f"[{_ATTACKABLE}]WEP[/{_ATTACKABLE}]"
+            if detailed:
+                return head
+            return head + f"[{muted}]·{_format_iv_count(self.wep_ivs)} IVs[/{muted}]"
+
+        if self.type is EncryptionType.WPA1:
+            # Legacy WPA1 vendor IE: TKIP universal. Out of scope for wifit3.
+            head = f"[{_OUT_OF_SCOPE}]WPA[/{_OUT_OF_SCOPE}]"
+            tail = f" [{muted}](PSK·TKIP)[/{muted}]" if detailed else f" [{muted}](PSK)[/{muted}]"
+            return head + tail
+
+        # Unknown: show raw string muted.
+        return f"[{muted}]{self.raw}[/{muted}]"
+
+
+def format_encryption_markup(ap: AccessPoint, detailed: bool = False, muted: str = "dim") -> str:
+    """Return Rich-markup for the ENCRYPT cell."""
+    return EncryptionSummary.from_ap(ap).markup(detailed=detailed, muted=muted)
 
 
 def wep_key_ascii(key_hex: str) -> str:

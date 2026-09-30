@@ -3,7 +3,9 @@ import pytest
 from wifit3.ui.app import WifiteApp
 from wifit3.ui.screens.splash import SplashView
 from wifit3.ui.screens.scanner import ScannerView
-from textual.widgets import RichLog, DataTable
+from textual.widgets import RichLog
+
+from wifit3.ui.ap_table import APTable
 
 
 
@@ -32,7 +34,7 @@ async def test_app_layout_and_boot():
         assert isinstance(pilot.app.screen, ScannerView)
         
         # Check Scanner Screen Components
-        table = pilot.app.screen.query_one("#ap-table", DataTable)
+        table = pilot.app.screen.query_one("#ap-table", APTable)
         assert table is not None
         log = pilot.app.screen.query_one("#system-log", RichLog)
         assert log is not None

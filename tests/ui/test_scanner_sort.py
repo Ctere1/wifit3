@@ -4,11 +4,11 @@ and tie-breaking.
 from typing import List, Optional
 import pytest
 from textual.app import App
-from textual.widgets import DataTable
 
 from wifit3.models import AccessPoint
 from wifit3.persist.config import Config
 from wifit3.persist.vault import Vault
+from wifit3.ui.ap_table import APTable
 from wifit3.ui.screens.scanner import ScannerView
 
 
@@ -91,13 +91,12 @@ async def test_sort_aps_short_circuits_when_order_unchanged():
     async with app.run_test() as pilot:
         await pilot.pause(0)
         scanner = app.screen
-        table = scanner.query_one("#ap-table", DataTable)
+        table = scanner.query_one("#ap-table", APTable)
 
         scanner.refresh_table()
 
         # Re-running sort when data has not moved returns False (no-op short circuit)
-        order_changed = table.sort_aps("signal", lambda bssid, val: (0, scanner.ap_cache[bssid].signal), reverse=True)
-        assert order_changed is False
+        assert table.resort() is False
 
 
 @pytest.mark.asyncio
@@ -117,15 +116,14 @@ async def test_sort_channel_ascending_breaks_ties_with_stronger_power():
     async with app.run_test() as pilot:
         await pilot.pause(0)
         scanner = app.screen
-        table = scanner.query_one("#ap-table", DataTable)
+        table = scanner.query_one("#ap-table", APTable)
 
-        scanner._sort_idx = next(i for i, (col, _) in enumerate(scanner._COLUMNS) if col == "channel")
-        scanner._sort_reverse = False  # Ascending
+        table.sort_column = "channel"
+        table.sort_reverse = False  # Ascending
 
         scanner.refresh_table()
 
-        ordered_keys = [r.value for r in list(table._row_locations)]
-        assert ordered_keys == [
+        assert table.ordered_bssids == [
             "aa:bb:cc:00:00:01",  # Channel 1
             "aa:bb:cc:00:00:03",  # Channel 6 strong (-35)
             "aa:bb:cc:00:00:02",  # Channel 6 weak (-80)
@@ -142,15 +140,14 @@ async def test_sort_ssid_ascending_sinks_hidden_networks():
     async with app.run_test() as pilot:
         await pilot.pause(0)
         scanner = app.screen
-        table = scanner.query_one("#ap-table", DataTable)
+        table = scanner.query_one("#ap-table", APTable)
 
-        scanner._sort_idx = next(i for i, (col, _) in enumerate(scanner._COLUMNS) if col == "ssid")
-        scanner._sort_reverse = False  # Ascending
+        table.sort_column = "ssid"
+        table.sort_reverse = False  # Ascending
 
         scanner.refresh_table()
 
-        ordered_keys = [r.value for r in list(table._row_locations)]
-        assert ordered_keys == [
+        assert table.ordered_bssids == [
             "aa:bb:cc:00:00:01",  # Alpha
             "aa:bb:cc:00:00:02",  # Bravo
             "aa:bb:cc:00:00:03",  # Hidden sinks to bottom despite strong signal
@@ -166,29 +163,30 @@ async def test_cursor_tracking_pins_highlight_on_resort():
     async with app.run_test() as pilot:
         await pilot.pause(0)
         scanner = app.screen
-        table = scanner.query_one("#ap-table", DataTable)
+        table = scanner.query_one("#ap-table", APTable)
 
-        scanner._sort_idx = next(i for i, (col, _) in enumerate(scanner._COLUMNS) if col == "signal")
-        scanner._sort_reverse = True
+        table.sort_column = "signal"
+        table.sort_reverse = True
         scanner.refresh_table()
 
         # Cursor starts on row 0 (ap1)
-        assert table.cursor_coordinate.row == 0
+        assert table.cursor_row == 0
 
         # Move cursor to ap2 (row 1)
-        table.move_cursor(row=1, animate=False)
-        assert table.cursor_coordinate.row == 1
+        table.move_cursor(1)
+        assert table.cursor_row == 1
 
         # Now ap2's signal jumps to -20 (stronger than ap1)
         ap2.signal_by_card["card0"] = -20
         scanner.refresh_table()
 
-        # ap2 jumped to row 0, and cursor highlight must follow it to row 0
-        assert [r.value for r in list(table._row_locations)] == [
+        # ap2 jumped to row 0, and the cursor follows the AP, not the row index
+        assert table.ordered_bssids == [
             "aa:bb:cc:00:00:02",
             "aa:bb:cc:00:00:01",
         ]
-        assert table.cursor_coordinate.row == 0
+        assert table.cursor_bssid == ap2.bssid
+        assert table.cursor_row == 0
 
 
 @pytest.mark.asyncio
