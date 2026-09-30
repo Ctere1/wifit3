@@ -107,6 +107,9 @@ class WifiteApp(App):
     /* App CSS outranks a widget's DEFAULT_CSS, so lower the global min-width for the
        EvilTwin modal's compact BSSID buttons from here, not the modal. */
     EvilTwinInputModal #bssid-btns Button { min-width: 4; }
+    /* File/path picker buttons are 1 space each side. */
+    PathInput Button { min-width: 6; margin-right: 0; }
+    PathPickerModal #picker-roots Button { min-width: 0; margin-right: 1; }
     """
 
     active_jobs: reactive[List[JobState]] = reactive([], always_update=True)

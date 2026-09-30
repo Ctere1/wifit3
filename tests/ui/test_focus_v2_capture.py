@@ -48,3 +48,26 @@ def test_campaign_visibility_for_wpa2():
     # These should be hidden
     assert WepCampaign.visible(ap) is False
     assert WpsCampaign.visible(ap) is False
+
+
+def test_save_line_joins_natively_instead_of_gluing_a_slash(monkeypatch):
+    """The line used to be f'{captures_dir}/{name}', which mixed separators once the
+    save directory was absolute."""
+    import os
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from wifit3.persist.config import Config
+    from wifit3.ui.screens.focus_v2.screen import _save_line
+
+    result = SimpleNamespace(
+        was_new=True,
+        path=Path("ignored/AP_30-85-a9-a9-a9-a9_1700000000_pmkid.hc22000"))
+
+    monkeypatch.setattr(Config, "captures_dir", str(Path("/tmp/loot").resolve()))
+    line = _save_line(result)
+    assert "/" not in line.replace("[dim]", "").replace("[/dim]", "") or os.sep == "/"
+    assert str(Path(Config.captures_dir)) in line
+
+    monkeypatch.setattr(Config, "captures_dir", "captures")
+    assert f"captures{os.sep}AP" in _save_line(result)

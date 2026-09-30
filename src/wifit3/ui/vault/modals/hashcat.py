@@ -2,6 +2,8 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label
+
+from wifit3.ui.path_picker import PathInput
 import shutil
 import sys
 
@@ -46,10 +48,12 @@ class HashcatConfigModal(ModalScreen[dict]):
             yield Label("Launch Hashcat", classes="text-bold")
             
             yield Label("Hashcat Executable Path:", classes="hashcat-label")
-            yield Input(value=_default_hashcat_path(), id="hashcat-exe")
+            yield PathInput(_default_hashcat_path(), title="Select hashcat executable",
+                            id="hashcat-exe")
             
             yield Label("Wordlist Path:", classes="hashcat-label")
-            yield Input(placeholder="e.g. D:\\wordlists\\Top29Million.txt", id="hashcat-wordlist")
+            yield PathInput(placeholder="e.g. D:\\wordlists\\Top29Million.txt",
+                            title="Select wordlist", id="hashcat-wordlist")
             
             with Horizontal(id="hashcat-buttons"):
                 yield Button("Cancel", variant="error", id="hashcat-cancel")

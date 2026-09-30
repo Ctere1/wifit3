@@ -13,6 +13,7 @@ from textual.theme import Theme
 from textual.widgets import Button, Checkbox, Input, Label, Select
 
 from wifit3.persist.config import Config
+from wifit3.ui.path_picker import PathInput
 
 
 class ThemeSetting(VerticalGroup):
@@ -80,7 +81,8 @@ class CapturesDirSetting(VerticalGroup):
     """
     def compose(self) -> ComposeResult:
         self.border_title = "Save directory"
-        yield Input(Config.captures_dir, id="captures_dir")
+        yield PathInput(Config.captures_dir, directories_only=True, prefer_relative=True,
+                        title="Save directory", id="captures_dir")
 
 
 class SaveFooter(Horizontal):

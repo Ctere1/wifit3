@@ -22,6 +22,7 @@ import re
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Set
 
 from rich.markup import escape
@@ -115,7 +116,7 @@ def _save_line(result) -> str:
     name = result.path.name
     m = _FILENAME_MIDDLE.search(name)
     short = f"{name[:m.start()]}_…_{name[m.end():]}" if m else name
-    return f"[dim]{verb}: {Config.captures_dir}/{escape(short)}[/dim]"
+    return f"[dim]{verb}: {escape(str(Path(Config.captures_dir) / short))}[/dim]"
 
 
 def _wep_key_chip(key_hex) -> str:

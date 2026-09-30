@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from wifit3.dot11 import str_to_mac
@@ -77,7 +79,7 @@ class EvilTwinCampaign(Campaign):
         from wifit3.persist.config import Config
         if self.captured:
             return ["[black bold on green] ✓ Captured [/black bold on green] crackable M2",
-                    f"[dim]saved to {Config.captures_dir}/[/dim]"]
+                    f"[dim]saved to {Path(Config.captures_dir)}{os.sep}[/dim]"]
         stats = getattr(self.fakeap, "stats", None)
         if stats is None:
             return [f"[bold cyan]EvilTwin arming…[/bold cyan] on CH {self.twin_channel}"]
