@@ -22,6 +22,8 @@ class Config:
     scanner_sort_reverse: bool = True
     scanner_sort_delay: float = 2.0
     silenced_bssids: list[str] = []
+    hashcat_path: str | None = None
+    wordlist_path: str | None = None
 
     @classmethod
     def is_silenced(cls, bssid: str) -> bool:
@@ -48,6 +50,8 @@ class Config:
             pass
         raw = data.get("silenced_bssids", cls.silenced_bssids)
         cls.silenced_bssids = [str(x).lower() for x in raw] if isinstance(raw, list) else cls.silenced_bssids
+        cls.hashcat_path = _optional_str(data.get("hashcat_path"), cls.hashcat_path)
+        cls.wordlist_path = _optional_str(data.get("wordlist_path"), cls.wordlist_path)
 
     @classmethod
     def save(cls) -> None:
@@ -61,11 +65,23 @@ class Config:
             f"scanner_sort_delay = {_fmt(cls.scanner_sort_delay)}\n"
             f"silenced_bssids = {_fmt(cls.silenced_bssids)}\n"
         )
+        # TOML has no null: an unset path is an absent key, not an empty string.
+        for key in ("hashcat_path", "wordlist_path"):
+            value = getattr(cls, key)
+            if value:
+                text += f"{key} = {_fmt(value)}\n"
         try:
             _PATH.parent.mkdir(parents=True, exist_ok=True)
             _PATH.write_text(text, encoding="utf-8")
         except OSError as e:
             raise ConfigError(f"Failed to save config at {_PATH}: {e}") from e
+
+
+def _optional_str(raw: object, current: str | None) -> str | None:
+    """A non-empty string from the file, else whatever is already set."""
+    if raw is None:
+        return current
+    return str(raw) or None
 
 
 def _fmt(v: object) -> str:

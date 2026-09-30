@@ -3,12 +3,16 @@ from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label
 
+from wifit3.persist.config import Config, ConfigError
 from wifit3.ui.path_picker import PathInput
 import shutil
 import sys
 
 
 def _default_hashcat_path() -> str:
+    """A saved path wins; otherwise find hashcat on PATH, then guess per platform."""
+    if Config.hashcat_path:
+        return Config.hashcat_path
     if found := shutil.which("hashcat"):
         return found
     if sys.platform == "win32":
@@ -52,8 +56,9 @@ class HashcatConfigModal(ModalScreen[dict]):
                             id="hashcat-exe")
             
             yield Label("Wordlist Path:", classes="hashcat-label")
-            yield PathInput(placeholder="e.g. D:\\wordlists\\Top29Million.txt",
-                            title="Select wordlist", id="hashcat-wordlist")
+            yield PathInput(Config.wordlist_path or "", title="Select wordlist",
+                            placeholder="e.g. D:\\wordlists\\Top29Million.txt",
+                            id="hashcat-wordlist")
             
             with Horizontal(id="hashcat-buttons"):
                 yield Button("Cancel", variant="error", id="hashcat-cancel")
@@ -68,7 +73,17 @@ class HashcatConfigModal(ModalScreen[dict]):
             if not exe or not wordlist:
                 self.notify("Please provide both executable and wordlist paths", severity="error")
                 return
+            self._remember(exe, wordlist)
             self.dismiss({
                 "hashcat_exe": exe,
                 "wordlist": wordlist
             })
+
+    def _remember(self, exe: str, wordlist: str) -> None:
+        """Persist both paths so the next job starts pre-filled."""
+        Config.hashcat_path = exe
+        Config.wordlist_path = wordlist
+        try:
+            Config.save()
+        except ConfigError as e:
+            self.notify(str(e), title="Config Error", severity="warning")

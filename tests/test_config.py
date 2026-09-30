@@ -8,7 +8,8 @@ from wifit3.persist.config import Config, ConfigError
 _DEFAULTS = {n: getattr(Config, n)
              for n in (
                  "theme", "scanner_sort", "scanner_sort_reverse", "scanner_sort_delay",
-                 "silenced_bssids", "log_level", "captures_dir", "save_pcap")}
+                 "silenced_bssids", "log_level", "captures_dir", "save_pcap",
+                 "hashcat_path", "wordlist_path")}
 
 
 @pytest.fixture(autouse=True)
@@ -138,3 +139,38 @@ def test_scanner_sort_delay_save_load_roundtrip(config_path):
     Config.scanner_sort_delay = 1.0
     Config.load()
     assert Config.scanner_sort_delay == 5.0
+
+
+def test_tool_paths_default_to_unset(config_path):
+    assert Config.hashcat_path is None and Config.wordlist_path is None
+
+
+def test_unset_tool_paths_are_omitted_from_the_file(config_path):
+    """TOML has no null, so 'not configured' has to be an absent key -- never the string
+    'None', which would then load back as a real (broken) path."""
+    Config.save()
+    text = config_path.read_text()
+    assert "hashcat_path" not in text and "wordlist_path" not in text
+
+
+def test_tool_paths_round_trip_when_set(config_path):
+    Config.hashcat_path = r"D:\tools\hashcat\hashcat.exe"
+    Config.wordlist_path = r"D:\wordlists\Top29Million.txt"
+    Config.save()
+    Config.hashcat_path = Config.wordlist_path = None
+    Config.load()
+    assert Config.hashcat_path == r"D:\tools\hashcat\hashcat.exe"
+    assert Config.wordlist_path == r"D:\wordlists\Top29Million.txt"
+
+
+def test_empty_tool_path_loads_as_unset(config_path):
+    config_path.write_text("hashcat_path = ''\n")
+    Config.load()
+    assert Config.hashcat_path is None
+
+
+def test_load_without_tool_paths_keeps_whatever_is_set(config_path):
+    config_path.write_text('theme = "gruvbox"\n')
+    Config.hashcat_path = "/usr/bin/hashcat"
+    Config.load()
+    assert Config.hashcat_path == "/usr/bin/hashcat"
