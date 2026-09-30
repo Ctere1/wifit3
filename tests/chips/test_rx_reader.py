@@ -213,3 +213,38 @@ async def test_reader_skips_falsy_buffers(monkeypatch):
         assert dispatched == [b"real"]
     finally:
         await r.stop()
+
+
+@pytest.mark.asyncio
+async def test_reader_backs_off_on_a_run_of_zero_length_reads(monkeypatch):
+    """A device streaming ZLPs must not spin the core: reads return instantly, so the
+    reader sleeps once it has seen EMPTY_SPIN_LIMIT of them in a row (issue #66)."""
+    monkeypatch.setattr(rx_reader, "EMPTY_SPIN_LIMIT", 3)
+    loop = asyncio.get_running_loop()
+    slept = []
+    reads = 0
+
+    real_sleep = rx_reader.time.sleep
+
+    def fake_sleep(seconds):
+        slept.append(seconds)
+        real_sleep(0)
+
+    monkeypatch.setattr(rx_reader.time, "sleep", fake_sleep)
+
+    def read_once():
+        nonlocal reads
+        reads += 1
+        return b""
+
+    r = RxReaderThread(loop, read_once, lambda buf: None, name="test")
+    r.start()
+    try:
+        while reads < 20:
+            await asyncio.sleep(0.01)
+    finally:
+        monkeypatch.setattr(rx_reader.time, "sleep", real_sleep)
+        await r.stop()
+
+    assert slept, "reader spun on zero-length reads without backing off"
+    assert set(slept) == {rx_reader.EMPTY_BACKOFF}

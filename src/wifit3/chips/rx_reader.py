@@ -16,6 +16,8 @@ PAUSE_POLL = 0.003     # wait while paused (seconds)
 MAX_BATCH_SIZE = 64    # frame buffers per batch
 MAX_BATCH_WAIT = 0.1   # wait time per batch
 MAX_BACKLOG = 256      # backlog = produced - consumed
+EMPTY_SPIN_LIMIT = 8   # consecutive zero-length reads before backing off
+EMPTY_BACKOFF = 0.001  # wait after a zero-length read run (seconds)
 
 
 class RxReaderThread:
@@ -82,6 +84,7 @@ class RxReaderThread:
     def _run(self) -> None:
         """Loops over blocking reads, batches & submits buffers."""
         consec_errors = 0
+        consec_empty = 0
         batch: list[bytes] = []
         next_drain = time.monotonic() + MAX_BATCH_WAIT
         while self._running:
@@ -100,8 +103,13 @@ class RxReaderThread:
             consec_errors = 0
             if buf:
                 batch.append(buf)
-            elif not batch:
-                continue  # discard "falsy" buffers
+                consec_empty = 0
+            else:
+                consec_empty += 1
+                if consec_empty >= EMPTY_SPIN_LIMIT:
+                    time.sleep(EMPTY_BACKOFF)
+                if not batch:
+                    continue
             now = time.monotonic()
             if len(batch) < MAX_BATCH_SIZE and now < next_drain:
                 continue  # batch not full, still have time
