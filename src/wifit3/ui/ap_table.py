@@ -295,6 +295,8 @@ class APTable(ScrollView, can_focus=True):
         self._widths: List[int] = [0] * len(COLUMNS)
         self._options_by_width: Dict[int, ConsoleOptions] = {}
         self._header: Optional[Strip] = None
+        self._dirty: List[str] = []
+        self._widths_stale = True
         self._cursor_bssid: Optional[str] = None
         self._foreground: str = ""
 
@@ -329,7 +331,8 @@ class APTable(ScrollView, can_focus=True):
         incoming = {row.bssid: row for row in rows}
         dropped = [bssid for bssid in self._rows if bssid not in incoming]
         for bssid in dropped:
-            del self._rows[bssid]
+            del self._rows[bssid]          # may have held a column's widest cell
+            self._widths_stale = True
         structural = bool(dropped)
         dirty: List[str] = []
 
@@ -337,9 +340,11 @@ class APTable(ScrollView, can_focus=True):
             entry = self._rows.get(bssid)
             if entry is None:
                 self._rows[bssid] = _RowEntry.new(row)
+                self._dirty.append(bssid)
                 structural = True
-            elif entry.data != row:
+            elif entry.data is not row and entry.data != row:
                 self._invalidate_changed_cells(entry, row)
+                self._dirty.append(bssid)
                 dirty.append(bssid)
 
         if structural:
@@ -410,6 +415,8 @@ class APTable(ScrollView, can_focus=True):
 
     def _drop_caches(self) -> None:
         size = len(COLUMNS)
+        self._dirty = list(self._rows)
+        self._widths_stale = True
         for entry in self._rows.values():
             entry.texts = [None] * size
             entry.segments = [None] * size
@@ -440,7 +447,11 @@ class APTable(ScrollView, can_focus=True):
         """Build dirty cell Texts and re-measure the columns. True if every line must repaint."""
         repaint = self._sync_foreground()
 
-        for entry in self._rows.values():
+        rebuilt = False
+        for bssid in self._dirty:
+            entry = self._rows.get(bssid)
+            if entry is None:
+                continue
             for index, column in enumerate(COLUMNS):
                 if entry.texts[index] is None:
                     text = column.render(entry.data, self._foreground)
@@ -448,6 +459,13 @@ class APTable(ScrollView, can_focus=True):
                         text.stylize("dim")
                     entry.texts[index] = text
                     entry.widths[index] = text.cell_len
+                    rebuilt = True
+        self._dirty.clear()
+
+        if not (rebuilt or repaint or self._widths_stale):
+            self.virtual_size = Size(self._content_width(), len(self._order) + 1)
+            return False
+        self._widths_stale = False
 
         widths = [
             max(column.min_width, _HEADER_WIDTHS[index],

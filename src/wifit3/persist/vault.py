@@ -54,12 +54,14 @@ class Vault:
 
     def __init__(self) -> None:
         self._index: Dict[str, List[PersistedCapture]] = {}
+        self.revision = 0   # bumped on every index change; a cache key for readers
         self.errors: list[str] = []                       # surfaced as toasts by the app on mount
         try:
             self.refresh()
         except Exception as exc:
             logger.exception("Vault: failed to load the capture index")
             self._index = {}
+            self.revision += 1
             self.errors.append(f"Failed to load captures: {exc}")
         self.manager = JobManager(self)
         try:
@@ -71,6 +73,7 @@ class Vault:
     def refresh(self) -> None:
         """Re-scan Config.captures_dir into the cache."""
         self._index = load_capture_index()
+        self.revision += 1
 
     # ----- reads -----
 
@@ -159,6 +162,7 @@ class Vault:
     def save_handshake(self, ap: "AccessPoint", client_mac: str) -> Optional[SaveResult]:
         result = save.save_handshake(ap, client_mac)
         if result and result.was_new:
+            self.revision += 1
             self._index.setdefault(ap.bssid, []).insert(
                 0, PersistedCapture(type=CaptureType.HS, timestamp=int(time.time()),
                                     path=str(result.path), bssid=ap.bssid, ssid=ap.ssid))
@@ -167,6 +171,7 @@ class Vault:
     def save_pmkid(self, ap: "AccessPoint", client_mac: str) -> Optional[SaveResult]:
         result = save.save_pmkid(ap, client_mac)
         if result and result.was_new:
+            self.revision += 1
             self._index.setdefault(ap.bssid, []).insert(
                 0, PersistedCapture(type=CaptureType.PMKID, timestamp=int(time.time()),
                                     path=str(result.path), bssid=ap.bssid, ssid=ap.ssid))
@@ -175,6 +180,7 @@ class Vault:
     def save_wep_key(self, ap: "AccessPoint", key: bytes) -> Optional[SaveResult]:
         result = save.save_wep_key(ap, key)
         if result and result.was_new:
+            self.revision += 1
             self._index.setdefault(ap.bssid, []).insert(
                 0, PersistedCapture(type=CaptureType.WEP, timestamp=int(time.time()),
                                     path=str(result.path), bssid=ap.bssid, value=key.hex(), ssid=ap.ssid))
@@ -183,6 +189,7 @@ class Vault:
     def save_wps_pin(self, ap: "AccessPoint", pin: str, psk: str) -> Optional[SaveResult]:
         result = save.save_wps_pin(ap, pin, psk)
         if result and result.was_new:
+            self.revision += 1
             self._index.setdefault(ap.bssid, []).insert(
                 0, PersistedCapture(type=CaptureType.WPS_PIN, timestamp=int(time.time()),
                                     path=str(result.path), bssid=ap.bssid, value=psk, pin=pin, ssid=ap.ssid))
@@ -191,6 +198,7 @@ class Vault:
     def save_wps_pbc(self, ap: "AccessPoint", psk: str) -> Optional[SaveResult]:
         result = save.save_wps_pbc(ap, psk)
         if result and result.was_new:
+            self.revision += 1
             self._index.setdefault(ap.bssid, []).insert(
                 0, PersistedCapture(type=CaptureType.WPS_PBC, timestamp=int(time.time()),
                                     path=str(result.path), bssid=ap.bssid, value=psk, ssid=ap.ssid))
@@ -203,6 +211,7 @@ class Vault:
         aggregate .hc22000 backs both an HS and a PMKID entry)."""
         Path(capture.path).unlink(missing_ok=True)
         for bssid in list(self._index):
+            self.revision += 1
             remaining = [c for c in self._index[bssid] if c.path != capture.path]
             if remaining:
                 self._index[bssid] = remaining

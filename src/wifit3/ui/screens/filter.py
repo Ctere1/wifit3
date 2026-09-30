@@ -60,7 +60,10 @@ class ScanFilter:
 
     def matches(self, ap: AccessPoint, *, ssid: Optional[str] = None) -> bool:
         """``ssid`` overrides ap.ssid so a hidden AP is searchable by its guessed name."""
-        return self.encryption.matches(ap) and text_matches(self.text, ap.bssid, ssid or ap.ssid)
+        if not self.encryption.matches(ap):
+            return False
+        # The scanner runs this over every AP every tick, and the box is usually empty.
+        return not self.text or text_matches(self.text, ap.bssid, ssid or ap.ssid)
 
 
 class FilterBar(Horizontal):

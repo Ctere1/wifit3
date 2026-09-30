@@ -128,6 +128,8 @@ class ScannerView(Screen):
         self._beacon_flash_until: Dict[str, float] = {}
         # Per-BSSID last-shown SSID, so a decloak is logged exactly once.
         self._prev_ssids: Dict[str, Optional[str]] = {}
+        # Per-BSSID (signature, row): an unchanged AP reuses its row object.
+        self._row_cache: Dict[str, tuple] = {}
         # WPS PBC auto-invade. ON by default. The enabled flag lives on the app
         # (app.pbc_enabled). Watcher + capturing serialization stay Scanner-local.
         self._pbc_watcher = PbcWatcher()
@@ -225,14 +227,27 @@ class ScannerView(Screen):
     def _row_for(
         self, ap: AccessPoint, now: float, clients: int, sibling_ssid: Optional[str]
     ) -> APRow:
-        """The AP as plain values; the table owns every colour decision made from them."""
+        """The AP as plain values; the table owns every colour decision made from them.
+        An AP whose signature is unchanged reuses its previous row object untouched."""
         previous = self._prev_beacons.get(ap.bssid)
         if previous is not None and ap.beacons > previous:
             self._beacon_flash_until[ap.bssid] = now + self.BEACON_FLASH_S
         self._prev_beacons[ap.bssid] = ap.beacons
 
         vault = self.app.vault
-        return APRow(
+        is_stale = self._ap_row_age(ap, now) > STALE_DURATION_S
+        beacon_flash = now < self._beacon_flash_until.get(ap.bssid, 0.0)
+        signature = self._row_signature(
+            ap, vault, clients, is_stale, beacon_flash, sibling_ssid)
+        # EAPOL rewrites ap.handshakes off the beacon path, so APs holding one are
+        # never cached. There are only ever a handful of them.
+        cacheable = not ap.handshakes
+        if cacheable:
+            cached = self._row_cache.get(ap.bssid)
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+
+        row = APRow(
             bssid=ap.bssid,
             ssid=ap.ssid,
             sibling_ssid=sibling_ssid,
@@ -244,8 +259,8 @@ class ScannerView(Screen):
             wps=ap.wps,
             wps_locked=ap.wps_locked,
             identity=ap.identity.summary,
-            is_stale=self._ap_row_age(ap, now) > STALE_DURATION_S,
-            beacon_flash=now < self._beacon_flash_until.get(ap.bssid, 0.0),
+            is_stale=is_stale,
+            beacon_flash=beacon_flash,
             silenced=Config.is_silenced(ap.bssid),
             has_handshake=vault.has_handshake(ap) or any(
                 hs.is_complete for hs in ap.handshakes.values()),
@@ -253,6 +268,32 @@ class ScannerView(Screen):
                 hs.pmkid and pmkid_crackable(hs) for hs in ap.handshakes.values()),
             has_wep_key=vault.has_wep_key(ap) or ap.wep_key is not None,
             has_wps_psk=vault.has_wps_psk(ap) or ap.wps_pbc_psk is not None,
+        )
+        if cacheable:
+            self._row_cache[ap.bssid] = (signature, row)
+        return row
+
+    def _row_signature(
+        self, ap: AccessPoint, vault, clients: int, is_stale: bool,
+        beacon_flash: bool, sibling_ssid: Optional[str],
+    ) -> tuple:
+        """Every input to the row, reduced to values that are cheap to read.
+
+        ``last_seen`` stands in for the whole beacon/probe-response path: wlan/sink.py
+        rewrites it after every IE-derived field, so encryption, AKMs, channel and the
+        rest cannot move without it. Listed explicitly alongside it are the fields a
+        frame can change WITHOUT touching last_seen -- cross-card RSSI, a decloak from a
+        client's probe, a WPS M1's identity, WEP IV counting -- plus the vault and
+        config state the badges read. tests/ui/test_scanner_row_cache.py holds the
+        cached row against a freshly built one, so a missing input here fails loudly.
+        """
+        wep = ap.wep
+        return (
+            ap.last_seen, ap.beacons, ap.signal, ap.channel, ap.ssid,
+            ap.wps, ap.wps_locked, ap.identity.summary,
+            wep.unique_ivs if wep else 0, ap.wep_key, ap.wps_pbc_psk,
+            clients, is_stale, beacon_flash, sibling_ssid,
+            vault.revision, Config.is_silenced(ap.bssid),
         )
 
     def _log_decloak(self, ap: AccessPoint) -> None:
@@ -294,6 +335,7 @@ class ScannerView(Screen):
         self._prev_beacons.pop(bssid, None)
         self._beacon_flash_until.pop(bssid, None)
         self._prev_ssids.pop(bssid, None)
+        self._row_cache.pop(bssid, None)
 
     def _best_named_sibling_ssid(self, ap: AccessPoint) -> Optional[str]:
         """Guess the sibling SSID to display for a hidden AP."""
