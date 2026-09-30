@@ -65,6 +65,7 @@ _LABELS = {
     "asusbe93":        "ASUS USB-BE93",
     "auscomer600":     "Auscoumer 600",
     "dlinkdwa126":     "D-Link DWA-126",
+    "dlinkdwa140":     "D-Link DWA-140",
     "buffalonintendo": "Buffalo Nintendo Wi-Fi",
     "lotekoo150":      "LOTEKOO 150",
     "netgeara9000":    "Netgear A9000",
