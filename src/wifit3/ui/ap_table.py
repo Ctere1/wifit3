@@ -29,6 +29,10 @@ SSID_CELL_MAX = 32
 # 1 space of padding on each side of every cell.
 _CELL_PADDING = 1
 
+# Animated jumps (home/end, re-sort) take this long whatever the distance. Textual's
+# default is a speed, not a duration, so a long list crawled for over a second.
+SCROLL_DURATION_S = 0.25
+
 
 @dataclass(frozen=True, slots=True)
 class APRow:
@@ -393,7 +397,8 @@ class APTable(ScrollView, can_focus=True):
             target = row - height + 1
         else:
             return
-        self.scroll_to(y=target, animate=animate, force=True)
+        self.scroll_to(y=target, animate=animate, force=True,
+                       duration=SCROLL_DURATION_S if animate else None)
 
     def invalidate(self) -> None:
         """Drop every render cache and rebuild from the row values."""

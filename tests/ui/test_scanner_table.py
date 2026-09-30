@@ -46,6 +46,9 @@ def _rows(count: int) -> list[APRow]:
     return [_row(i) for i in range(count)]
 
 
+pytestmark = pytest.mark.asyncio(loop_scope="module")
+
+
 class _TableHost(App):
     CSS = "APTable { height: 1fr; }"
 
@@ -53,12 +56,26 @@ class _TableHost(App):
         yield APTable(id="t")
 
 
-@pytest_asyncio.fixture
-async def table():
+@pytest_asyncio.fixture(loop_scope="module", scope="module")
+async def _table_app():
     app = _TableHost()
     async with app.run_test(size=(100, 16)) as pilot:
         await pilot.pause(0)
         yield app.query_one("#t", APTable), pilot
+
+
+@pytest_asyncio.fixture(loop_scope="module")
+async def table(_table_app):
+    """The shared table, wound back to a known state."""
+    table, pilot = _table_app
+    table.app.theme = "textual-dark"
+    table.set_rows([])
+    table.sort_column = "signal"
+    table.sort_reverse = True
+    table.scroll_to(x=0, y=0, animate=False)
+    table.focus()
+    await pilot.pause(0)
+    yield table, pilot
 
 
 def _snapshot(table: APTable) -> list:
@@ -380,6 +397,11 @@ async def test_cursor_row_drops_cell_colours(table):
 # on_ap_table_* names. Get that wrong and enter/click silently do nothing.
 
 
+async def test_scanner_handles_every_ap_table_message():
+    for message in (APTable.RowSelected, APTable.SortChanged):
+        assert hasattr(ScannerView, message.handler_name), message.handler_name
+
+
 class _FocusStub(Screen):
     pass
 
@@ -428,15 +450,33 @@ def _scanner_aps():
     return aps
 
 
-@pytest_asyncio.fixture
-async def scanner_host():
+@pytest_asyncio.fixture(loop_scope="module", scope="module")
+async def _scanner_app():
     aps = _scanner_aps()
     app = _ScannerHost(aps)
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause(0)
-        app.screen.refresh_table()
-        await pilot.pause()
+        # These tests drive refresh_table() themselves; leaving the 15 Hz tick running
+        # just makes every pilot.pause() wait on another round of timer messages.
+        app.screen._refresh_timer.stop()
+        app.screen._pbc_timer.stop()
         yield app, aps, pilot
+
+
+@pytest_asyncio.fixture(loop_scope="module")
+async def scanner_host(_scanner_app):
+    """The shared ScannerView, back on top of the stack with a default sort."""
+    app, aps, pilot = _scanner_app
+    while not isinstance(app.screen, ScannerView):
+        app.pop_screen()
+    app.target_ap = None
+    table = app.screen.query_one("#ap-table", APTable)
+    table.sort_column = "signal"
+    table.sort_reverse = True
+    Config.scanner_sort = "signal"
+    app.screen.refresh_table()
+    await pilot.pause()
+    yield app, aps, pilot
 
 
 async def test_enter_opens_the_focus_view(scanner_host):
@@ -445,30 +485,22 @@ async def test_enter_opens_the_focus_view(scanner_host):
     table.focus()
     table.move_cursor(1)
     await pilot.press("enter")
-    await pilot.pause()
 
     assert isinstance(app.screen, _FocusStub)
     assert app.target_ap.bssid == table.ordered_bssids[1]
 
 
-async def test_double_clicking_a_row_opens_the_focus_view(scanner_host):
+async def test_single_click_moves_the_cursor_and_double_click_opens_focus(scanner_host):
     app, aps, pilot = scanner_host
     table = app.screen.query_one("#ap-table", APTable)
-    await pilot.click(APTable, offset=(4, 3), times=2)   # +1 for the pinned header row
-    await pilot.pause()
 
+    await pilot.click(APTable, offset=(4, 3))            # +1 for the pinned header row
+    assert isinstance(app.screen, ScannerView), "a single click must not navigate"
+    assert table.cursor_row == 2
+
+    await pilot.click(APTable, offset=(4, 3), times=2)
     assert isinstance(app.screen, _FocusStub)
     assert app.target_ap.bssid == table.ordered_bssids[2]
-
-
-async def test_single_click_only_moves_the_cursor(scanner_host):
-    app, aps, pilot = scanner_host
-    table = app.screen.query_one("#ap-table", APTable)
-    await pilot.click(APTable, offset=(4, 3))
-    await pilot.pause()
-
-    assert isinstance(app.screen, ScannerView)
-    assert table.cursor_row == 2
 
 
 async def test_clicking_a_header_re_sorts_and_persists(scanner_host):
@@ -477,7 +509,6 @@ async def test_clicking_a_header_re_sorts_and_persists(scanner_host):
     assert table.sort_column == "signal"
 
     await pilot.click(APTable, offset=(4, 0))     # the SSID header
-    await pilot.pause()
     assert table.sort_column == "ssid"
     assert Config.scanner_sort == "ssid"
     assert isinstance(app.screen, ScannerView)    # a header click must not select a row

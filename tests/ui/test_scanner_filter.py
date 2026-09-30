@@ -4,6 +4,7 @@ it straight back without having to rediscover it."""
 from contextlib import asynccontextmanager
 
 import pytest
+import pytest_asyncio
 from textual.app import App
 
 from wifit3.models import AccessPoint, IdKey, IdSource
@@ -127,37 +128,48 @@ async def test_text_filter_matches_hidden_ap_via_guessed_sibling():
         assert other.bssid not in scanner.ap_cache
 
 
-async def _identity_shown(ap: AccessPoint) -> str:
-    """The VENDOR/ID value the scanner hands the table for ``ap``."""
-    app = _ScannerHost(_FakeArray([ap], [1, 6, 11]))
+@pytest_asyncio.fixture(loop_scope="module", scope="module")
+async def _identity_app():
+    app = _ScannerHost(_FakeArray([], [1, 6, 11]))
     async with app.run_test() as pilot:
         await pilot.pause(0)
-        scanner = app.screen
-        scanner.refresh_table()
-        return scanner.query_one("#ap-table", APTable).row_data(ap.bssid).identity
+        yield app, pilot
 
 
-@pytest.mark.asyncio
-async def test_scanner_identity_cell_shows_manufacturer_and_model():
+@pytest_asyncio.fixture(loop_scope="module")
+async def identity_shown(_identity_app):
+    """Returns the VENDOR/ID value the scanner hands the table for one AP."""
+    app, pilot = _identity_app
+
+    def shown(ap: AccessPoint) -> str:
+        app.array.access_points = {ap.bssid: ap}
+        app.screen.refresh_table()
+        return app.screen.query_one("#ap-table", APTable).row_data(ap.bssid).identity
+
+    return shown
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_scanner_identity_cell_shows_manufacturer_and_model(identity_shown):
     ap = AccessPoint(bssid="02:00:00:00:00:01", ssid="Lab", channel=1)
     ap.identity.set(IdSource.WSC_BEACON, IdKey.MANUFACTURER, "MikroTik")
     ap.identity.set(IdSource.WSC_BEACON, IdKey.MODEL_NAME, "hAP ac²")
-    assert await _identity_shown(ap) == "MikroTik hAP ac²"
+    assert identity_shown(ap) == "MikroTik hAP ac²"
 
 
-@pytest.mark.asyncio
-async def test_scanner_identity_cell_blank_when_unknown():
-    assert await _identity_shown(AccessPoint(bssid="02:00:00:00:00:01")) == ""
+@pytest.mark.asyncio(loop_scope="module")
+async def test_scanner_identity_cell_blank_when_unknown(identity_shown):
+    assert identity_shown(AccessPoint(bssid="02:00:00:00:00:01")) == ""
 
 
-@pytest.mark.asyncio
-async def test_scanner_identity_cell_shows_summary():
+@pytest.mark.asyncio(loop_scope="module")
+async def test_scanner_identity_cell_shows_summary(identity_shown):
     ap = AccessPoint(bssid="02:00:00:00:00:01", ssid="Vodafone-123456")
     ap.identity.set(IdSource.WSC_BEACON, IdKey.MANUFACTURER, "Celeno")
-    assert await _identity_shown(ap) == "Celeno"
+    assert identity_shown(ap) == "Celeno"
 
 
-@pytest.mark.asyncio
-async def test_scanner_identity_cell_oui_fallback():
+@pytest.mark.asyncio(loop_scope="module")
+async def test_scanner_identity_cell_oui_fallback(identity_shown):
     ap = AccessPoint(bssid="00:03:93:11:22:33", ssid="Alice’s iPhone")
-    assert await _identity_shown(ap) == "Apple"
+    assert identity_shown(ap) == "Apple"
