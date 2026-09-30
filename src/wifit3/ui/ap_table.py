@@ -476,17 +476,21 @@ class APTable(ScrollView, can_focus=True):
     def render_line(self, y: int) -> Strip:
         width = self.size.width
         scroll_x, scroll_y = self.scroll_offset
+        base = self.rich_style
         if y == 0:
+            header = base + self._component_style("ap-table--header")
             return (self._header_strip()
+                    .apply_style(header)
                     .crop(scroll_x, scroll_x + width)
-                    .extend_cell_length(width, self._component_style("ap-table--header")))
+                    .extend_cell_length(width, header))
 
         index = y + scroll_y - 1
         if not 0 <= index < len(self._order):
-            return Strip.blank(width)
+            return Strip.blank(width, base)
         strip = (self._row_strip(index)
+                 .apply_style(base)
                  .crop(scroll_x, scroll_x + width)
-                 .extend_cell_length(width))
+                 .extend_cell_length(width, base))
         if self._order[index] == self._cursor_bssid:
             strip = self._highlight(strip)
         return strip
@@ -513,9 +517,7 @@ class APTable(ScrollView, can_focus=True):
                     cells.append(Text(f"{mark} {column.label}", justify="right"))
                 else:
                     cells.append(Text(f"{column.label} {mark}", justify="left"))
-            segments = self._join_cells([None] * len(COLUMNS), cells)
-            style = self._component_style("ap-table--header")
-            self._header = Strip(segments).apply_style(style).simplify()
+            self._header = Strip(self._join_cells([None] * len(COLUMNS), cells)).simplify()
         return self._header
 
     def _join_cells(
@@ -588,8 +590,10 @@ class APTable(ScrollView, can_focus=True):
             self._sort_by_column_at(offset.x + self.scroll_offset.x)
             return
         index = offset.y + self.scroll_offset.y - 1
-        if 0 <= index < len(self._order):
-            self.move_cursor(index)
+        if not 0 <= index < len(self._order):
+            return
+        self.move_cursor(index)
+        if event.chain == 2:
             self.post_message(self.RowSelected(self._order[index]))
 
     def _sort_by_column_at(self, x: int) -> None:

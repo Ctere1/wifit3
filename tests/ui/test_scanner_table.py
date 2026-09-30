@@ -318,12 +318,35 @@ async def test_focus_change_repaints_the_cursor(table):
 # ----- Row appearance --------------------------------------------------------
 
 
-async def test_rows_carry_no_background_of_their_own(table):
+async def test_rows_paint_the_themed_background_edge_to_edge(table):
     table, pilot = table
     table.set_rows(_rows(8))
     strip = table.render_line(2)
     assert strip.cell_length == table.size.width
-    assert {segment.style.bgcolor if segment.style else None for segment in strip} == {None}
+    assert {segment.style.bgcolor for segment in strip} == {table.rich_style.bgcolor}
+
+
+async def test_switching_theme_repaints_foreground_and_background(table):
+    table, pilot = table
+    table.set_rows(_rows(8))
+
+    async def painted(theme: str):
+        table.app.theme = theme
+        await pilot.pause()
+        table.set_rows(_rows(8))
+        strip = table.render_line(2)
+        return ({s.style.bgcolor for s in strip},
+                {s.style.color for s in strip},
+                table.rich_style)
+
+    dark_bg, dark_fg, dark_style = await painted("textual-dark")
+    light_bg, light_fg, light_style = await painted("textual-light")
+
+    # The table follows the theme, never the terminal's own default colours.
+    assert dark_bg == {dark_style.bgcolor} and None not in dark_bg
+    assert light_bg == {light_style.bgcolor} and None not in light_bg
+    assert dark_bg != light_bg
+    assert dark_fg != light_fg
 
 
 async def test_cursor_row_spans_the_full_width(table):
@@ -428,14 +451,24 @@ async def test_enter_opens_the_focus_view(scanner_host):
     assert app.target_ap.bssid == table.ordered_bssids[1]
 
 
-async def test_clicking_a_row_opens_the_focus_view(scanner_host):
+async def test_double_clicking_a_row_opens_the_focus_view(scanner_host):
     app, aps, pilot = scanner_host
     table = app.screen.query_one("#ap-table", APTable)
-    await pilot.click(APTable, offset=(4, 3))     # +1 for the pinned header row
+    await pilot.click(APTable, offset=(4, 3), times=2)   # +1 for the pinned header row
     await pilot.pause()
 
     assert isinstance(app.screen, _FocusStub)
     assert app.target_ap.bssid == table.ordered_bssids[2]
+
+
+async def test_single_click_only_moves_the_cursor(scanner_host):
+    app, aps, pilot = scanner_host
+    table = app.screen.query_one("#ap-table", APTable)
+    await pilot.click(APTable, offset=(4, 3))
+    await pilot.pause()
+
+    assert isinstance(app.screen, ScannerView)
+    assert table.cursor_row == 2
 
 
 async def test_clicking_a_header_re_sorts_and_persists(scanner_host):
