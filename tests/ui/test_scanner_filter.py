@@ -6,8 +6,10 @@ from contextlib import asynccontextmanager
 import pytest
 import pytest_asyncio
 from textual.app import App
+from textual.widgets import Checkbox, Input
 
 from wifit3.models import AccessPoint, IdKey, IdSource
+from wifit3.persist.config import Config
 from wifit3.persist.vault import Vault
 from wifit3.ui.ap_table import APTable
 from wifit3.ui.screens.filter import EncryptionFilter, ScanFilter
@@ -69,9 +71,10 @@ class _ScannerHost(App):
         self.array = array
         self.pbc_enabled = True
         self.vault = Vault()
+        self.persist_calls = 0
 
     def persist_config(self) -> None:
-        pass
+        self.persist_calls += 1
 
     def on_mount(self) -> None:
         self.push_screen(ScannerView())
@@ -104,6 +107,100 @@ async def test_encryption_filter_hides_rows_but_keeps_registry():
         scanner.refresh_table()
         assert table.row_count == 2
         assert open_ap.bssid in scanner.ap_cache
+
+
+@pytest.mark.asyncio
+async def test_hide_silenced_drops_the_row_but_keeps_the_registry_entry():
+    silenced = AccessPoint(bssid="aa:bb:cc:00:00:01", ssid="NoisyNeighbour", channel=1, akms=["PSK"])
+    audible = AccessPoint(bssid="aa:bb:cc:00:00:02", ssid="SecureNet", channel=1, akms=["PSK"])
+    Config.silenced_bssids = [silenced.bssid]
+
+    app = _ScannerHost(_FakeArray([silenced, audible], [1, 6, 11]))
+    async with app.run_test() as pilot:
+        await pilot.pause(0)
+        scanner = app.screen
+        table = scanner.query_one("#ap-table", APTable)
+
+        scanner.refresh_table()
+        assert table.row_count == 2          # off by default: silencing alone only badges the row
+
+        scanner._scan_filter = ScanFilter(hide_silenced=True)
+        scanner.refresh_table()
+        assert table.row_count == 1
+        assert silenced.bssid not in scanner.ap_cache
+        assert silenced.bssid in app.array.access_points
+
+        scanner._scan_filter = ScanFilter()
+        scanner.refresh_table()
+        assert table.row_count == 2
+        assert silenced.bssid in scanner.ap_cache
+        assert Config.is_silenced(silenced.bssid)   # un-ticking restores the row, not the silence
+
+
+@pytest.mark.asyncio
+async def test_hide_silenced_drops_a_row_silenced_after_the_box_was_ticked():
+    """Silencing happens on Focus; the Scanner re-runs the predicate each tick, so the row goes."""
+    ap = AccessPoint(bssid="aa:bb:cc:00:00:01", ssid="NoisyNeighbour", channel=1, akms=["PSK"])
+
+    app = _ScannerHost(_FakeArray([ap], [1, 6, 11]))
+    async with app.run_test() as pilot:
+        await pilot.pause(0)
+        scanner = app.screen
+        table = scanner.query_one("#ap-table", APTable)
+
+        scanner._scan_filter = ScanFilter(hide_silenced=True)
+        scanner.refresh_table()
+        assert table.row_count == 1
+
+        Config.silenced_bssids = [ap.bssid]
+        scanner.refresh_table()
+        assert table.row_count == 0
+
+
+@pytest.mark.asyncio
+async def test_scanner_starts_with_the_persisted_hide_silenced_setting():
+    silenced = AccessPoint(bssid="aa:bb:cc:00:00:01", ssid="NoisyNeighbour", channel=1, akms=["PSK"])
+    audible = AccessPoint(bssid="aa:bb:cc:00:00:02", ssid="SecureNet", channel=1, akms=["PSK"])
+    Config.silenced_bssids = [silenced.bssid]
+    Config.hide_silenced = True
+
+    app = _ScannerHost(_FakeArray([silenced, audible], [1, 6, 11]))
+    async with app.run_test() as pilot:
+        await pilot.pause(0)
+        scanner = app.screen
+        assert scanner._scan_filter.hide_silenced is True
+        scanner.refresh_table()
+        assert scanner.query_one("#ap-table", APTable).row_count == 1
+        assert app.persist_calls == 0        # restoring the setting is not a change to write back
+
+
+@pytest.mark.asyncio
+async def test_only_the_checkbox_writes_config_not_every_keystroke():
+    ap = AccessPoint(bssid="aa:bb:cc:00:00:02", ssid="SecureNet", channel=1, akms=["PSK"])
+
+    app = _ScannerHost(_FakeArray([ap], [1, 6, 11]))
+    async with app.run_test() as pilot:
+        await pilot.pause(0)
+        scanner = app.screen
+        app.persist_calls = 0
+
+        scanner.query_one("#filter-text", Input).value = "net"
+        await pilot.pause()
+        assert app.persist_calls == 0
+
+        scanner.query_one("#filter-hide-silenced", Checkbox).value = True
+        await pilot.pause()
+        assert app.persist_calls == 1
+        assert Config.hide_silenced is True
+
+        scanner.query_one("#filter-text", Input).value = "netg"
+        await pilot.pause()
+        assert app.persist_calls == 1       # text edits leave the stored setting alone
+
+        scanner.query_one("#filter-hide-silenced", Checkbox).value = False
+        await pilot.pause()
+        assert app.persist_calls == 2
+        assert Config.hide_silenced is False
 
 
 @pytest.mark.asyncio

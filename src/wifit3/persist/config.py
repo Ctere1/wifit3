@@ -22,6 +22,7 @@ class Config:
     scanner_sort_reverse: bool = True
     scanner_sort_delay: float = 2.0
     silenced_bssids: list[str] = []
+    hide_silenced: bool = False
     hashcat_path: str | None = None
     wordlist_path: str | None = None
 
@@ -50,6 +51,7 @@ class Config:
             pass
         raw = data.get("silenced_bssids", cls.silenced_bssids)
         cls.silenced_bssids = [str(x).lower() for x in raw] if isinstance(raw, list) else cls.silenced_bssids
+        cls.hide_silenced = bool(data.get("hide_silenced", cls.hide_silenced))
         cls.hashcat_path = _optional_str(data.get("hashcat_path"), cls.hashcat_path)
         cls.wordlist_path = _optional_str(data.get("wordlist_path"), cls.wordlist_path)
 
@@ -64,6 +66,7 @@ class Config:
             f"scanner_sort_reverse = {_fmt(cls.scanner_sort_reverse)}\n"
             f"scanner_sort_delay = {_fmt(cls.scanner_sort_delay)}\n"
             f"silenced_bssids = {_fmt(cls.silenced_bssids)}\n"
+            f"hide_silenced = {_fmt(cls.hide_silenced)}\n"
         )
         # TOML has no null: an unset path is an absent key, not an empty string.
         for key in ("hashcat_path", "wordlist_path"):

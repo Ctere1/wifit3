@@ -8,7 +8,7 @@ from wifit3.persist.config import Config, ConfigError
 _DEFAULTS = {n: getattr(Config, n)
              for n in (
                  "theme", "scanner_sort", "scanner_sort_reverse", "scanner_sort_delay",
-                 "silenced_bssids", "log_level", "captures_dir", "save_pcap",
+                 "silenced_bssids", "hide_silenced", "log_level", "captures_dir", "save_pcap",
                  "hashcat_path", "wordlist_path")}
 
 
@@ -123,6 +123,21 @@ def test_silenced_bssids_bad_type_keeps_default(config_path):
     config_path.write_text('silenced_bssids = "not-a-list"\n')
     Config.load()
     assert Config.silenced_bssids == []
+
+
+def test_hide_silenced_save_load_roundtrip(config_path):
+    assert Config.hide_silenced is False
+    Config.hide_silenced = True
+    Config.save()
+    Config.hide_silenced = False
+    Config.load()
+    assert Config.hide_silenced is True
+
+
+def test_hide_silenced_absent_key_keeps_default(config_path):
+    config_path.write_text('theme = "nord"\n')
+    Config.load()
+    assert Config.hide_silenced is False
 
 
 def test_is_silenced_is_case_insensitive():

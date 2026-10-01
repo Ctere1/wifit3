@@ -120,7 +120,7 @@ class ScannerView(Screen):
         self._refresh_timer = None
         self._last_sort_time: float = 0.0
         self._channel_filter: Optional[List[int]] = None
-        self._scan_filter: ScanFilter = ScanFilter()
+        self._scan_filter: ScanFilter = ScanFilter(hide_silenced=Config.hide_silenced)
         self._events = CaptureEventDetector(granular_eapol=False)
         # Per-BSSID prev-beacon-count + flash-deadline for "beacon arrived"
         # cell highlight.
@@ -651,6 +651,9 @@ class ScannerView(Screen):
     # ----- Filter bar --------------------------------------------------------
 
     def on_filter_bar_scan_filter_changed(self, message: FilterBar.ScanFilterChanged) -> None:
+        if message.scan_filter.hide_silenced != Config.hide_silenced:
+            Config.hide_silenced = message.scan_filter.hide_silenced
+            self.app.persist_config()   # the text query re-emits per keystroke; only the box writes
         self._scan_filter = message.scan_filter
         self.refresh_table()
 
