@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 import os
@@ -90,7 +91,7 @@ class _CapturePanel(VerticalGroup):
     _CapturePanel .key-row { height: 1; align: left middle; margin-bottom: 1; }
     _CapturePanel .key-display { height: 1; margin-right: 3; margin-bottom: 1; }
     _CapturePanel .copy-btn { max-width: 6; height: 1; border: none; background: $background; color: $foreground; margin-right: 3 }
-    _CapturePanel .verify-btn { max-width: 8; height: 1; border: none }
+    _CapturePanel .verify-btn { width: auto; max-width: 14; height: 1; border: none; }
     _CapturePanel .actions { height: auto; align: left middle; }
     _CapturePanel .spacer { width: 1fr; }
     """
@@ -104,6 +105,13 @@ class _CapturePanel(VerticalGroup):
         for cap in sorted(captures, key=lambda c: c.timestamp, reverse=True):
             self._by_path.setdefault(cap.path, cap)
         self._files = list(self._by_path.values())
+        self._verify_task: Optional[asyncio.Task] = None
+
+    def cancel_verification(self) -> None:
+        """Cancel any running verification task on this panel."""
+        if self._verify_task is not None and not self._verify_task.done():
+            self._verify_task.cancel()
+            self._verify_task = None
 
     def compose(self) -> ComposeResult:
         if self._title == "WPS PSKs":
@@ -161,7 +169,7 @@ class _CapturePanel(VerticalGroup):
             return Horizontal(
                 Label(f"[bold dim]{label}:[/bold dim] [black bold on lightgreen] {escape(val)} [/]", classes="key-display"),
                 Button("Copy", id=btn_id, classes="copy-btn"),
-                Button("Verify", disabled=True, classes="verify-btn", tooltip="TODO: Connect to a live AP and validate credentials"),
+                Button("Verify", id=f"verify-{btn_id}", classes="verify-btn", tooltip="Connect to live AP and verify credentials"),
                 classes="key-row"
             )
 
@@ -191,6 +199,7 @@ class _CapturePanel(VerticalGroup):
 
     @on(Select.Changed)
     def _file_changed(self, event: Select.Changed) -> None:
+        self.cancel_verification()
         cap = self._by_path.get(event.value)
         if cap:
             self._update_display(cap)
@@ -213,6 +222,37 @@ class _CapturePanel(VerticalGroup):
             return
         self.app.copy_to_clipboard(text)
         self.notify("Copied to clipboard")
+
+    @on(Button.Pressed, ".verify-btn")
+    def _verify(self, event: Button.Pressed) -> None:
+        event.stop()
+        cap = self._by_path.get(self.query_one(Select).value)
+        if not cap:
+            return
+        btn = event.button
+        self.cancel_verification()
+        self._verify_task = asyncio.create_task(self._run_verify(cap, btn))
+
+    async def _run_verify(self, cap: PersistedCapture, btn: Button) -> None:
+        from wifit3.campaigns.live_check import LiveKeyVerifier
+
+        btn.disabled = True
+        btn.label = "Verifying..."
+        verifier = LiveKeyVerifier()
+        try:
+            ok, msg = await verifier.verify_credential(cap, self.app.array)
+            if ok:
+                self.notify(msg, title="Verified", severity="information")
+            else:
+                self.notify(msg, title="Verify Failed", severity="warning")
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.exception("Error during live verification")
+            self.notify(f"Verification error: {exc}", title="Verify", severity="error")
+        finally:
+            btn.label = "Verify"
+            btn.disabled = False
 
     @on(Button.Pressed, ".delete")
     def _delete(self, event: Button.Pressed) -> None:
@@ -305,7 +345,13 @@ class VaultItemView(Vertical):
 
     _state: reactive[tuple] = reactive(("", None, ()), recompose=True)
 
+    def cancel_verification(self) -> None:
+        """Cancel any running verification tasks on active capture panels."""
+        for panel in self.query(_CapturePanel):
+            panel.cancel_verification()
+
     def load(self, bssid: str, ssid: Optional[str], captures: List[PersistedCapture]) -> None:
+        self.cancel_verification()
         self._state = (bssid, ssid, tuple(captures))
 
     def compose(self) -> ComposeResult:

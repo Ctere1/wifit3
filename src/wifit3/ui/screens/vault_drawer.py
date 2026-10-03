@@ -57,6 +57,10 @@ class VaultDrawer(ModalScreen):
             pass
 
     def action_dismiss_drawer(self) -> None:
+        try:
+            self.query_one("#vault-item", VaultItemView).cancel_verification()
+        except Exception:
+            pass
         if self.has_class("open"):
             self.remove_class("open")
             def _do_dismiss():
