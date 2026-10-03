@@ -48,7 +48,6 @@ def derive_ptk(pmk: bytes, ap_mac: bytes, sta_mac: bytes, anonce: bytes, snonce:
 def build_eapol_m2(
     bssid: bytes,
     sta_mac: bytes,
-    anonce: bytes,
     snonce: bytes,
     kck: bytes,
     replay: int = 1,

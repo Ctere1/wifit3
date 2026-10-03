@@ -31,11 +31,10 @@ def test_build_eapol_m2_parsed_correctly():
     """Verify built M2 frame parses as a valid EAPOL-Key frame."""
     bssid = bytes.fromhex("000b86289b00")
     sta_mac = bytes.fromhex("001302d1e550")
-    anonce = bytes(range(32))
     snonce = bytes(range(32, 64))
     kck = b"\xaa" * 16
 
-    frame = build_eapol_m2(bssid, sta_mac, anonce, snonce, kck, replay=1)
+    frame = build_eapol_m2(bssid, sta_mac, snonce, kck, replay=1)
     assert len(frame) > 100
 
     parsed = WlanFrameParser.parse_80211_frame(frame, rssi=0)

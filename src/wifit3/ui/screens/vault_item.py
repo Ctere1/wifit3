@@ -90,8 +90,8 @@ class _CapturePanel(VerticalGroup):
     _CapturePanel .date { height: 1; margin-bottom: 1; }
     _CapturePanel .key-row { height: 1; align: left middle; margin-bottom: 1; }
     _CapturePanel .key-display { height: 1; margin-right: 3; margin-bottom: 1; }
-    _CapturePanel .copy-btn { max-width: 6; height: 1; border: none; background: $background; color: $foreground; margin-right: 3 }
-    _CapturePanel .verify-btn { width: auto; max-width: 14; height: 1; border: none; }
+    _CapturePanel .copy-btn { min-width: 0; margin-right: 3; }
+    _CapturePanel .verify-btn { min-width: 14; }
     _CapturePanel .actions { height: auto; align: left middle; }
     _CapturePanel .spacer { width: 1fr; }
     """
@@ -114,20 +114,22 @@ class _CapturePanel(VerticalGroup):
             self._verify_task = None
 
     def compose(self) -> ComposeResult:
+        n = len(self._files)
+        s = "" if n == 1 else "s"
         if self._title == "WPS PSKs":
-            self.border_title = f"WPS ({len(self._files)} PSKs)"
+            self.border_title = f"WPS ({n} PSK{s})"
         elif self._title == "WPA PSKs":
-            self.border_title = f"WPA ({len(self._files)} PSKs)"
+            self.border_title = f"WPA ({n} PSK{s})"
         elif self._title == "WPS PINs":
-            self.border_title = f"WPS ({len(self._files)} PINs)"
+            self.border_title = f"WPS ({n} PIN{s})"
         elif self._title == "WEP KEYs":
-            self.border_title = f"WEP ({len(self._files)} Keys)"
+            self.border_title = f"WEP ({n} Key{s})"
         elif self._title == "HASHCAT":
-            self.border_title = f"HASHCAT ({len(self._files)} .hc22000 files)"
+            self.border_title = f"HASHCAT ({n} .hc22000 file{s})"
         elif self._title == "HANDSHAKE":
-            self.border_title = f"HANDSHAKE ({len(self._files)} .pcap files)"
+            self.border_title = f"HANDSHAKE ({n} .pcap file{s})"
         else:
-            self.border_title = f"{self._title} ({len(self._files)})"
+            self.border_title = f"{self._title} ({n})"
 
         newest = self._files[0]
         yield Select([(Path(c.path).name, c.path) for c in self._files], value=newest.path, allow_blank=False, classes="file")
@@ -165,23 +167,26 @@ class _CapturePanel(VerticalGroup):
                 btn = Button(f"Launch {tool.name}", "primary", classes=f"tool-btn launch-tool-{tool.name}")
                 actions.mount(btn, before=".spacer")
 
-        def _row(label: str, val: str, btn_id: str):
+        def _row(label: str, val: str, btn_id: str, target_type: Optional[CaptureType] = None):
+            verify_btn = Button("Verify", id=f"verify-{btn_id}", variant="primary", classes="verify-btn",
+                                compact=True, tooltip="Connect to live AP and verify credentials")
+            setattr(verify_btn, "target_type", target_type)
             return Horizontal(
                 Label(f"[bold dim]{label}:[/bold dim] [black bold on lightgreen] {escape(val)} [/]", classes="key-display"),
-                Button("Copy", id=btn_id, classes="copy-btn"),
-                Button("Verify", id=f"verify-{btn_id}", classes="verify-btn", tooltip="Connect to live AP and verify credentials"),
+                Button("Copy", id=btn_id, classes="copy-btn", compact=True),
+                verify_btn,
                 classes="key-row"
             )
 
         if self._title in ("WPS PSKs", "WPA PSKs"):
-            kg.mount(_row("PSK", cap.value or "", "copy-psk"))
+            kg.mount(_row("PSK", cap.value or "", "copy-psk", target_type=CaptureType.WPA_PSK))
         elif self._title == "WPS PINs":
-            kg.mount(_row("WPS PIN", cap.pin or "", "copy-pin"))
+            kg.mount(_row("WPS PIN", cap.pin or "", "copy-pin", target_type=CaptureType.WPS_PIN))
         elif self._title == "WEP KEYs":
-            kg.mount(_row("WEP Hex Key", cap.value or "", "copy-hex"))
+            kg.mount(_row("WEP Hex Key", cap.value or "", "copy-hex", target_type=CaptureType.WEP))
             ascii_val = _hex_to_ascii(cap.value)
             if ascii_val:
-                kg.mount(_row("ASCII Key", ascii_val, "copy-ascii"))
+                kg.mount(_row("ASCII Key", ascii_val, "copy-ascii", target_type=CaptureType.WEP))
         elif self._title == "HASHCAT":
             text = self.app.vault.capture_payload(cap)
             hs = sum(1 for ln in text.splitlines() if ln.startswith("WPA*02*"))
@@ -231,20 +236,23 @@ class _CapturePanel(VerticalGroup):
             return
         btn = event.button
         self.cancel_verification()
-        self._verify_task = asyncio.create_task(self._run_verify(cap, btn))
+        target_type = getattr(btn, "target_type", None)
+        self._verify_task = asyncio.create_task(self._run_verify(cap, btn, target_type))
 
-    async def _run_verify(self, cap: PersistedCapture, btn: Button) -> None:
-        from wifit3.campaigns.live_check import LiveKeyVerifier
+    async def _run_verify(self, cap: PersistedCapture, btn: Button, target_type: Optional[CaptureType]) -> None:
+        from wifit3.campaigns.live_check import LiveKeyVerifier, VerifyStatus
 
         btn.disabled = True
-        btn.label = "Verifying..."
+        btn.label = "Verifying…"
         verifier = LiveKeyVerifier()
         try:
-            ok, msg = await verifier.verify_credential(cap, self.app.array)
-            if ok:
-                self.notify(msg, title="Verified", severity="information")
+            res = await verifier.verify_credential(cap, self.app.array, target_type=target_type)
+            if res.status == VerifyStatus.SUCCESS:
+                self.notify(res.body, title=res.title, severity="information")
+            elif res.status == VerifyStatus.INCORRECT:
+                self.notify(res.body, title=res.title, severity="warning")
             else:
-                self.notify(msg, title="Verify Failed", severity="warning")
+                self.notify(res.body, title=res.title, severity="error")
         except asyncio.CancelledError:
             pass
         except Exception as exc:

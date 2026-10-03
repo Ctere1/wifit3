@@ -27,16 +27,15 @@ _STATUS_LABEL = {
 
 class JobActionButton(Button):
     def __init__(self, job: JobState):
-        super().__init__(classes="job-action-btn")
+        super().__init__(classes="job-action-btn", compact=True)
         self.job_id = job.job_id
         self.sync(job)
 
     def sync(self, job: JobState) -> None:
-        """Match the button's label + colour to the job's current state (kept flat, no fill)."""
+        """Match the button's label + colour to the job's current state."""
         self.is_active = job.status in (ToolStatus.RUNNING, ToolStatus.QUEUED)
         self.label = "Kill" if self.is_active else "Clear"
-        self.set_class(self.is_active, "kill")
-        self.set_class(not self.is_active, "clear")
+        self.variant = "error" if self.is_active else "default"
 
 
 class JobRow(Horizontal):
@@ -112,11 +111,7 @@ class JobTrackerPane(Widget):
     JobTrackerPane .job-bar { width: 18; height: 1; margin: 0 1; }
     JobTrackerPane .job-status { width: 11; margin-right: 1; }
     JobTrackerPane .job-detail { width: 1fr; }
-    JobTrackerPane .job-action-btn {
-        height: 1; min-height: 1; min-width: 8;
-        border: none; background: $background; color: $foreground;
-    }
-    JobTrackerPane .job-action-btn.kill { color: $error; }
+    JobTrackerPane .job-action-btn { min-width: 8; }
     """
 
     def compose(self) -> ComposeResult:

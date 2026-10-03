@@ -2,7 +2,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 from wifit3.campaigns.campaign import Campaign
-from wifit3.campaigns.live_check import LiveKeyVerifier
+from wifit3.campaigns.live_check import LiveKeyVerifier, VerifyStatus
 from wifit3.campaigns.wps.registrar import AttemptOutcome, PinResult
 from wifit3.dot11.packet import EapolPacket, WepDataPacket
 from wifit3.dot11.wep.crypto import icv
@@ -35,9 +35,9 @@ async def test_verify_blocked_when_campaign_active():
     orig_active = Campaign.active
     Campaign.active = mock_camp
     try:
-        ok, msg = await verifier.verify_credential(cap, MagicMock())
-        assert ok is False
-        assert "deauth campaign is active" in msg
+        res = await verifier.verify_credential(cap, MagicMock())
+        assert res.status == VerifyStatus.ERROR
+        assert "deauth campaign is active" in res.body
     finally:
         Campaign.active = orig_active
 
@@ -48,9 +48,9 @@ async def test_verify_no_members():
     array = MagicMock()
     array.members = []
 
-    ok, msg = await verifier.verify_credential(cap, array)
-    assert ok is False
-    assert "No wireless adapter available" in msg
+    res = await verifier.verify_credential(cap, array)
+    assert res.status == VerifyStatus.ERROR
+    assert "No wireless adapter available" in res.body
 
 
 async def test_verify_ap_not_in_range():
@@ -60,9 +60,9 @@ async def test_verify_ap_not_in_range():
     array.members = [MagicMock()]
     array.access_points = {}
 
-    ok, msg = await verifier.verify_credential(cap, array)
-    assert ok is False
-    assert "not in range" in msg
+    res = await verifier.verify_credential(cap, array)
+    assert res.status == VerifyStatus.ERROR
+    assert "not in range" in res.body
 
 
 async def test_verify_wpa_psk_success(monkeypatch):
@@ -124,9 +124,10 @@ async def test_verify_wpa_psk_success(monkeypatch):
 
     monkeypatch.setattr("wifit3.campaigns.live_check.Association.associate", AsyncMock(return_value=True))
 
-    ok, msg = await verifier.verify_credential(cap, array)
-    assert ok is True
-    assert "WPA PSK still works" in msg
+    res = await verifier.verify_credential(cap, array)
+    assert res.status == VerifyStatus.SUCCESS
+    assert res.title == "PSK verified for TestNet"
+    assert 'Key "password" still works' in res.body
 
 
 async def test_verify_wpa_psk_no_m3(monkeypatch):
@@ -175,9 +176,9 @@ async def test_verify_wpa_psk_no_m3(monkeypatch):
 
     monkeypatch.setattr("wifit3.campaigns.live_check.Association.associate", AsyncMock(return_value=True))
 
-    ok, msg = await verifier.verify_credential(cap, array)
-    assert ok is False
-    assert "No M3 received" in msg
+    res = await verifier.verify_credential(cap, array)
+    assert res.status == VerifyStatus.INCORRECT
+    assert 'Key "wrongpassword" is incorrect (no M3)' in res.body
 
 
 async def test_verify_wps_pin_success(monkeypatch):
@@ -212,9 +213,9 @@ async def test_verify_wps_pin_success(monkeypatch):
         AsyncMock(return_value=AttemptOutcome(PinResult.SUCCESS, pin="12345670")),
     )
 
-    ok, msg = await verifier.verify_credential(cap, array)
-    assert ok is True
-    assert "WPS PIN still works" in msg
+    res = await verifier.verify_credential(cap, array)
+    assert res.status == VerifyStatus.SUCCESS
+    assert 'PIN "12345670" still works' in res.body
 
 
 async def test_verify_wps_pin_invalid(monkeypatch):
@@ -249,9 +250,9 @@ async def test_verify_wps_pin_invalid(monkeypatch):
         AsyncMock(return_value=AttemptOutcome(PinResult.FIRST_HALF_WRONG, pin="12345670")),
     )
 
-    ok, msg = await verifier.verify_credential(cap, array)
-    assert ok is False
-    assert "WPS PIN invalid" in msg
+    res = await verifier.verify_credential(cap, array)
+    assert res.status == VerifyStatus.INCORRECT
+    assert 'PIN "12345670" is incorrect' in res.body
 
 
 async def test_verify_wep_key_passive(monkeypatch):
@@ -283,7 +284,7 @@ async def test_verify_wep_key_passive(monkeypatch):
 
     key_bytes = bytes.fromhex(hex_key)
     iv_bytes = b"\x01\x02\x03"
-    plain = b"helloworld"
+    plain = b"\xaa\xaa\x03\x00\x00\x00" + b"\x08\x06" + b"arp-body"
     blob = plain + icv(plain)
     ks = rc4_keystream(iv_bytes + key_bytes, len(blob))
     cipher = bytes(b ^ k for b, k in zip(blob, ks))
@@ -303,8 +304,11 @@ async def test_verify_wep_key_passive(monkeypatch):
         cipher=cipher,
     )
 
-    array.next_frame = AsyncMock(return_value=wep_pkt)
+    async def _next_frame(predicate, timeout=0.0):
+        return wep_pkt if predicate(wep_pkt) else None
 
-    ok, msg = await verifier.verify_credential(cap, array)
-    assert ok is True
-    assert "WEP Key still works" in msg
+    array.next_frame = _next_frame
+
+    res = await verifier.verify_credential(cap, array)
+    assert res.status == VerifyStatus.SUCCESS
+    assert f'Key "{hex_key}" still works' in res.body
