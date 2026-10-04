@@ -304,6 +304,16 @@ class WlanSink:
         if not client_mac or client_mac in self.own_macs:
             return True
 
+        # A ToDS data frame's addr3 is the BSSID the STA is talking to, so it must name an AP
+        # we have actually heard announce itself. The MT7601U's RXWI carries no CRC bit (only
+        # MT_RXWI_CTL_UDF), so a PHY-error frame arrives intact with garbage there, and each
+        # one minted a phantom client. An AP->client (FromDS) frame is exempt: its addr3 is the
+        # wired-side origin, not a claim about an AP we should have beaconed, so a hidden or
+        # briefly-missed AP still shows its clients.
+        if (frame_type in ("data", "wep_data") and pkt.to_ds and not pkt.from_ds
+                and bssid not in self.access_points):
+            return False
+
         if client_mac not in self.clients:
             self.clients[client_mac] = Client(mac=client_mac)
         client = self.clients[client_mac]

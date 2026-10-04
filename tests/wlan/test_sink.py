@@ -298,3 +298,71 @@ def test_record_tx_never_raises_on_garbage():
     assert s.packet_stats._counts == {} or all(
         v == dict.fromkeys(PACKET_CLASSES, 0) for v in s.packet_stats._counts.values()
     )
+
+
+# ----- PHY-noise data frames must not mint clients ----------------------------
+#
+# The MT7601U's RXWI carries no CRC bit (only MT_RXWI_CTL_UDF), so a PHY-error frame
+# reaches the parser intact and its addr3 is garbage. Before this gate, each one
+# registered a phantom client under a BSSID no AP had ever announced.
+
+_NOISE_BSSID = "3c:1f:6d:9a:22:41"
+_NOISE_CLIENT = "8e:11:22:33:44:55"
+
+
+def _noise_data(bssid: str = _NOISE_BSSID):
+    """A corrupt data frame: a real-looking STA MAC in addr2, garbage in addr3."""
+    return pkt({"type": "data", "bssid": bssid, "source": _NOISE_CLIENT,
+                "dest": _NOISE_CLIENT, "to_ds": True, "rssi": -95})
+
+
+def test_a_data_frame_for_an_unknown_bssid_mints_no_client():
+    s = WlanSink()
+    s.update(_noise_data(), W0)
+    assert s.clients == {}
+
+
+def test_a_data_frame_for_an_unknown_bssid_leaves_the_client_registry_empty_and_still_records_nothing():
+    """Guard the whole path, not just the dict: a phantom also showed up as client.packets."""
+    s = WlanSink()
+    for _ in range(5):
+        s.update(_noise_data(), W0)
+    assert not s.clients
+
+
+def test_a_data_frame_for_a_known_bssid_does_register_its_client():
+    """The gate must not throw away real traffic: once the AP is beacon-learned, its
+    clients are exactly what the tool exists to show."""
+    s = WlanSink()
+    s.update(_beacon(), W0)
+    s.update(_noise_data(BSSID), W0)
+    assert _NOISE_CLIENT in s.clients
+    assert s.clients[_NOISE_CLIENT].bssid == BSSID
+
+
+def test_a_beacon_after_a_noise_frame_rescues_the_traffic():
+    """Order matters on a live capture: a client heard before its AP's beacon is not lost
+    once the AP turns up, because the next data frame then passes the gate."""
+    s = WlanSink()
+    s.update(_noise_data(BSSID), W0)
+    s.update(_beacon(), W0)
+    s.update(_noise_data(BSSID), W0)
+    assert _NOISE_CLIENT in s.clients
+
+
+def test_a_probe_request_still_registers_without_any_known_ap():
+    """A probe_req has no BSSID to check -- it is how a client is first seen -- so the gate
+    must not touch that path."""
+    s = WlanSink()
+    s.update(pkt({"type": "probe_req", "bssid": _NOISE_BSSID, "source": _NOISE_CLIENT,
+                  "dest": "ff:ff:ff:ff:ff:ff", "ssid": "Some_SSID", "rssi": -60}), W0)
+    assert _NOISE_CLIENT in s.clients
+    assert "Some_SSID" in s.clients[_NOISE_CLIENT].probed_ssids
+
+
+def test_an_assoc_request_still_binds_to_an_ap_we_have_not_beaconed():
+    """Assoc frames carry a real SSID, so they are self-authenticating and stay ungated."""
+    s = WlanSink()
+    s.update(pkt({"type": "assoc_req", "bssid": _NOISE_BSSID, "source": _NOISE_CLIENT,
+                  "ssid": "Real_Net", "rssi": -55}), W0)
+    assert s.clients[_NOISE_CLIENT].bssid == _NOISE_BSSID

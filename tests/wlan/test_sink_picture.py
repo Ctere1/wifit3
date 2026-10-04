@@ -71,6 +71,10 @@ def test_real_client_creates_handshake_with_eapol_frames():
 def test_to_ds_client_is_sender_not_addr3_da():
     s = WlanSink()
     ap, client, far_da = "aa:bb:cc:dd:ee:ff", "12:22:33:44:55:66", "de:ad:be:ef:00:02"
+    # The BSSID must have announced itself: a ToDS frame naming an AP we never heard
+    # is dropped by the noise gate, so beaconing first is what keeps this test about
+    # the ToDS address contract rather than about the gate.
+    s.update(_beacon({"bssid": ap, "channel": 1, "encryption": "WPA2", "raw": b"\x00" * 36}), W0)
     s.update(pkt({"type": "data", "to_ds": True, "from_ds": False, "bssid": ap,
                   "source": client, "dest": far_da, "rssi": -50}), W0)
     assert client in s.clients and far_da not in s.clients
