@@ -20,11 +20,12 @@ from wifit3.campaigns.pin import WpsCampaign, _state_path
 from wifit3.campaigns.wps.pixie import PixieBundle, PixieMode, PixieResult
 from wifit3.campaigns.wps.registrar import AttemptOutcome, PinResult
 from wifit3.dot11.wsc import crypto as wc
+from wifit3.models import AccessPoint
 from wifit3.dot11.wsc.crypto import pin_is_valid
 
 
 def _target(bssid="02:00:00:00:00:ff", ssid="Net", ch=1):
-    return SimpleNamespace(bssid=bssid, ssid=ssid, channel=ch, wps_locked=False)
+    return AccessPoint(bssid=bssid, ssid=ssid, channel=ch)
 
 
 async def _set_fake_mac(*_a, **_k):

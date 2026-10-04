@@ -190,6 +190,7 @@ class WpsCampaign(Campaign):
         self.attempt_delay = attempt_delay
 
         self.our_mac = random_client_mac()
+        self.wsc_2_0 = target.wps_version == "2.0"
         self.assoc: Optional[Association] = None
         self.transport: Optional[WlanTransport] = None
         self._lease = None
@@ -321,7 +322,7 @@ class WpsCampaign(Campaign):
                     self.our_mac = str_to_mac(self._lease.mac)
             self.assoc = Association(self.iface, self.bssid, self.target.ssid or "",
                                      self.channel, our_mac=self.our_mac,
-                                     assoc_trailer_ies=wps_assoc_ie(WPS_REQ_REGISTRAR),
+                                     assoc_trailer_ies=wps_assoc_ie(WPS_REQ_REGISTRAR, self.wsc_2_0),
                                      should_stop=lambda: self.stopped)
             self.assoc.start()
             self.transport = WlanTransport(self.iface, str_to_mac(self.bssid), self.our_mac)
@@ -336,6 +337,7 @@ class WpsCampaign(Campaign):
             return AttemptOutcome(PinResult.PROTO_ERROR, pin, detail="assoc failed")
         self.transport.drain()
         reg = WpsRegistrar(self.transport, str_to_mac(self.bssid), self.our_mac,
+                           channel=self.channel, wsc_2_0=self.wsc_2_0,
                            tx_ack=self._tx_ack,
                            ack_resends=self._ack_resends if self._tx_ack else 0,
                            should_stop=lambda: self.stopped)

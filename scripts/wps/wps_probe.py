@@ -147,11 +147,13 @@ async def find_ap(iface, array, channel: int, bssid: str | None, ssid: str | Non
 
 
 async def run_one_attempt(iface, bssid: str, ssid: str, channel: int, our_mac: bytes,
-                          pin: str, expect: str, capture: list, privacy=None) -> None:
-    step(f"Attempt PIN {pin}  (expect: {expect}, assoc privacy bit="
+                          pin: str, expect: str, capture: list, wsc_2_0: bool,
+                          privacy=None) -> None:
+    step(f"Attempt PIN {pin}  (expect: {expect}, WSC {'2.0' if wsc_2_0 else '1.0'}, "
+         f"assoc privacy bit="
          f"{'auto' if privacy is None else ('on' if privacy else 'off')})")
     assoc = Association(iface, bssid, ssid, channel, our_mac=our_mac,
-                        assoc_trailer_ies=wps_assoc_ie(WPS_REQ_REGISTRAR),
+                        assoc_trailer_ies=wps_assoc_ie(WPS_REQ_REGISTRAR, wsc_2_0),
                         privacy=privacy)
     assoc.start()
     # Record our TX frames into the same capture list as RX → full-conversation pcap.
@@ -164,7 +166,8 @@ async def run_one_attempt(iface, bssid: str, ssid: str, channel: int, our_mac: b
         else:
             ok(f"Associated as {mac_str(our_mac)}")
         transport.start()
-        reg = WpsRegistrar(transport, str_to_mac(bssid), our_mac, log=lambda m: print(f"    {m}"))
+        reg = WpsRegistrar(transport, str_to_mac(bssid), our_mac, channel=channel,
+                           wsc_2_0=wsc_2_0, log=lambda m: print(f"    {m}"))
         outcome = await reg.try_pin(pin)
     finally:
         transport.stop()
@@ -239,6 +242,7 @@ async def main_async(args) -> int:
         privacy = {"auto": None, "on": True, "off": False}[args.privacy]
         for i, (pin, expect) in enumerate(attempts):
             await run_one_attempt(iface, bssid, ssid, channel, our_mac, pin, expect, capture,
+                                  bool(found_ap and found_ap.wps_version == "2.0"),
                                   privacy=privacy)
             if i + 1 < len(attempts):
                 info(f"Re-associating for next attempt in {args.attempt_gap:.0f}s …")
