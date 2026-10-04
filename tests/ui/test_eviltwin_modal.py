@@ -46,3 +46,32 @@ def test_cycle_table():
     assert by_label["Never"] == (None, False)
     assert by_label["Once"][1] is True
     assert by_label["30 seconds"] == (30.0, False)
+
+
+def _card(fake_mac):
+    """A card stub whose driver reports the given FAKE_MAC support."""
+    return SimpleNamespace(driver=SimpleNamespace(FAKE_MAC=fake_mac),
+                           name="card", supported_channels=[1, 6, 11])
+
+
+def test_a_card_that_cannot_spoof_a_mac_cannot_host():
+    """mt7601u leaves FAKE_MAC at the ABC default, so it is not a valid host."""
+    from wifit3.chips.driver import FakeMacSupport
+    from wifit3.ui.screens.focus_v2.eviltwin_modal import _can_host
+    assert _can_host(_card(FakeMacSupport.NONE)) is False
+    assert _can_host(_card(FakeMacSupport.UNIMPLEMENTED)) is False
+    assert _can_host(_card(FakeMacSupport.SPOOFABLE)) is True
+    assert _can_host(_card(FakeMacSupport.FIXED_MAC)) is True
+
+
+def test_the_start_button_refuses_when_no_member_can_host():
+    """The modal builds Select([...], allow_blank=False) from the host list, so an
+    empty list raised EmptySelectError at compose. A live button that crashes on press
+    is worse than one that explains itself, so the guard is part of _start_eviltwin."""
+    import inspect
+
+    from wifit3.ui.screens.focus_v2 import screen as focus_screen
+    src = inspect.getsource(focus_screen.FocusViewV2._start_eviltwin)
+    assert "any(_can_host(m) for m in array.members)" in src
+    # The guard must return before the modal is pushed, or it never fires.
+    assert src.index("if not any(_can_host") < src.index("push_screen")
