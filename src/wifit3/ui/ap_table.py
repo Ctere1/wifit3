@@ -26,6 +26,8 @@ from .encryption_format import EncryptionSummary
 # Cap the SSID+badges cell so the capture badges never overflow the column.
 SSID_CELL_MAX = 32
 
+IDENTITY_CELL_MAX = 24
+"""Cap for the VENDOR/ID cell, same role as SSID_CELL_MAX for the SSID cell."""
 # 1 space of padding on each side of every cell.
 _CELL_PADDING = 1
 
@@ -121,7 +123,12 @@ def _render_wps(row: APRow, fg: str) -> Text:
 
 
 def _render_identity(row: APRow, fg: str) -> Text:
-    return Text(row.identity, style=fg)
+    # Cap like the SSID cell does. manufacturer/model/device_type are uncapped WPS and
+    # probe-response strings, and _relayout sizes a column from the widest row, so one
+    # verbose AP pushed the table past the terminal and every other column off-screen.
+    text = Text(row.identity, style=fg)
+    text.truncate(IDENTITY_CELL_MAX, overflow="ellipsis")
+    return text
 
 
 def _secondary_signal(row: APRow, reverse: bool) -> int:
