@@ -288,3 +288,39 @@ async def test_should_stop_aborts_promptly():
                        msg_timeout=0.02, overall_timeout=30.0, should_stop=lambda: True)
     out = await asyncio.wait_for(reg.try_pin("12345670"), timeout=2.0)   # << 30s overall
     assert out.result is PinResult.ABORTED
+
+
+def _deauth_frame(reason: int) -> bytes:
+    """A mgmt deauth (0xC0) from the AP; reason code at [24:26]."""
+    return b"\xc0\x00" + b"\x00" * 22 + reason.to_bytes(2, "little")
+
+
+def _eap_failure_frame(eap_id: int = 1) -> bytes:
+    eap = bytes([M.EAP_FAILURE, eap_id, 0x00, 0x04])
+    return M.build_data_frame(BSSID, BSSID, STA,
+                              bytes([M.DOT1X_VERSION, M.DOT1X_TYPE_EAP_PACKET, 0x00, 0x04]) + eap)
+
+
+async def test_deauth_before_m1_is_an_active_refusal():
+    # The AP kicking us off ends the attempt at once: resending into a dead association
+    # only earns more class-3 kicks, and the campaign must hear "refused", not "locked".
+    a, b = asyncio.Queue(), asyncio.Queue()
+    b.put_nowait(_deauth_frame(23))
+    reg = WpsRegistrar(_QueueTransport(a, b), BSSID, STA, overall_timeout=30.0, max_resends=2)
+    out = await asyncio.wait_for(reg.try_pin("12345670"), timeout=2.0)   # << 30s overall
+    assert out.result is PinResult.TIMEOUT
+    assert out.refused
+    assert out.reached_m1 is False
+    assert out.detail == "deauth (802.1X-auth-failed)"
+
+
+async def test_eap_failure_before_m1_is_an_active_refusal():
+    # An EAP-Failure answering our Identity is the AP's authenticator refusing an external
+    # registrar (locked / no AP PIN), not a wrong PIN and not a silent lock strike.
+    a, b = asyncio.Queue(), asyncio.Queue()
+    b.put_nowait(_eap_failure_frame())
+    reg = WpsRegistrar(_QueueTransport(a, b), BSSID, STA, overall_timeout=30.0)
+    out = await asyncio.wait_for(reg.try_pin("12345670"), timeout=2.0)
+    assert out.result is PinResult.PROTO_ERROR
+    assert out.refused
+    assert out.detail == "EAP-FAIL before PIN answer"

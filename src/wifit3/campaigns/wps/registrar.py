@@ -161,7 +161,7 @@ class WpsRegistrar:
         # before moving on, instead of shot-and-prayed.
         self.tx_ack = tx_ack
         self.ack_resends = ack_resends
-        self.log = log or logger.debug
+        self.log = log or logger.info
         self._last_1x_frame: Optional[bytes] = None
 
     async def _send_1x(self, payload_1x: bytes) -> None:
@@ -195,7 +195,6 @@ class WpsRegistrar:
         self._last_1x_frame = None
         identity_reqs = 0            # count EAP-Req/Identity: detect the "stuck at identity" stall
         nonwsc_seen: set = set()    # distinct non-WSC frame kinds the AP sent (logged once each)
-        disassoc_why: Optional[str] = None   # set if AP kicked us (mgmt DISASSOC/DEAUTH) + why
 
         def _out(result: PinResult, **kw) -> AttemptOutcome:
             # Every outcome carries reached_m1 so the campaign can tell a silent AP
@@ -239,8 +238,6 @@ class WpsRegistrar:
                              "(timeout-as-NACK)")
                     return _out(PinResult.SECOND_HALF_WRONG, detail="no reply after M6",
                                 via_timeout=True)
-                if disassoc_why is not None:
-                    return _out(PinResult.TIMEOUT, detail=f"disassoc ({disassoc_why})", refused=True)
                 if identity_reqs >= _IDENTITY_STALL:
                     return _out(PinResult.TIMEOUT, refused=True,
                                 detail=f"stalled at ID {identity_reqs}x, no M1")
@@ -264,7 +261,12 @@ class WpsRegistrar:
                              if kind in ("mgmt/DISASSOC", "mgmt/DEAUTH") else "")
                     self.log(f"[WPS] <- {tag}{extra} from AP ({len(frame)}B): {frame[:56].hex()}")
                 if kind in ("mgmt/DISASSOC", "mgmt/DEAUTH"):
-                    disassoc_why = disassoc_reason(frame)
+                    # The association is gone: resending into it only earns more
+                    # class-2/3 kicks, and no PIN verdict can be read off a dead link.
+                    # Before M1 this is the AP refusing an external registrar outright.
+                    return _out(PinResult.TIMEOUT, refused=not reached_m1,
+                                detail=f"{kind.removeprefix('mgmt/').lower()} "
+                                       f"({disassoc_reason(frame)})")
                 continue
 
             if p.is_identity_request:
@@ -294,8 +296,11 @@ class WpsRegistrar:
                 if last_sent == "M6":
                     return _out(PinResult.SECOND_HALF_WRONG, detail="NACK after M6",
                                 config_error=config_error)
-                return _out(PinResult.PROTO_ERROR, detail="NACK before PIN answer",
-                            config_error=config_error)
+                # An EAP-Failure before M1 is the AP's authenticator refusing an
+                # external registrar (locked / no AP PIN), not an in-protocol NACK.
+                return _out(PinResult.PROTO_ERROR, detail=f"{kind} before PIN answer",
+                            config_error=config_error,
+                            refused=p.is_eap_failure and not reached_m1)
 
             mt = p.wsc_msg_type
             if mt and mt < highest_mt:

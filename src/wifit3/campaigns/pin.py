@@ -576,6 +576,9 @@ class WpsCampaign(Campaign):
                     self._save_state()
                 if self.attempt_delay:
                     await asyncio.sleep(self.attempt_delay)
+            logger.info("WPS campaign %s on %s after %d attempt(s)%s", self.status, name,
+                        self.state.attempts,
+                        f": {self.fail_reason}" if self.fail_reason else "")
         except Exception as e:
             logger.exception("WPS campaign crashed")
             self.status = "error"

