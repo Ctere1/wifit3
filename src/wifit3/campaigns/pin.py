@@ -668,22 +668,30 @@ class WpsCampaign(Campaign):
             worker.kill()
 
     async def _try_pixie(self, pin: str, out: AttemptOutcome) -> bool:
-        """Run Pixie once after M3 capture; verify any recovered PIN online next."""
+        """Run Pixie once after M3 capture; verify a recovered PIN (or finish a proved first half)
+        online next."""
         if self._pixie_tried or self.state.phase == "verify" or out.pixie is None:
             return False
         self._pixie_tried = True
         self.log(f"{self._attempt_prefix(pin)} → trying [cyan]PixieDust[/] offline…")
         result = await self._run_pixie(out.pixie)
-        if not result.found or result.pin is None:
-            if not self.stopped:   # an abandoned search didn't search, so it found nothing to say
-                self.log(f"{self._cont_align()} → [dim italic]no PixieDust matches found[/]")
-            return False
-        self.state.found_pin = result.pin
-        self.state.phase = "verify"
         mode = result.mode.name if result.mode is not None else "UNKNOWN"
-        self.log(f"{self._cont_align()} → [bold bright_green]PixieDust found:[/] "
-                 f"[cyan bold]{result.pin}[/] [dim]({mode}; verifying)[/]")
-        return True
+        if result.pin is not None:
+            self.state.found_pin = result.pin
+            self.state.phase = "verify"
+            self.log(f"{self._cont_align()} → [bold bright_green]PixieDust found:[/] "
+                     f"[cyan bold]{result.pin or '<empty>'}[/] [dim]({mode}; verifying)[/]")
+            return True
+        if result.first_half is not None:
+            st = self.state
+            st.first_half, st.phase, st.p2_index = result.first_half, "second_half", 0
+            st.skip_middle = None   # nothing tried online yet, so sweep all 1000 tails
+            self.log(f"{self._cont_align()} → [bold bright_green]PixieDust half:[/] P1 "
+                     f"[cyan bold]{result.first_half}[/] [dim]({mode}; second half online)[/]")
+            return True
+        if not self.stopped:   # an abandoned search didn't search, so it found nothing to say
+            self.log(f"{self._cont_align()} → [dim italic]no PixieDust matches found[/]")
+        return False
 
     def _should_retry_lost_reply(self, pin: str, out: AttemptOutcome) -> bool:
         """True if this half-wrong was inferred from *silence* on an AP we know NACKs."""
