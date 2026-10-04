@@ -1,0 +1,343 @@
+"""Userspace driver for the MediaTek MT7601U (2.4 GHz USB Wi-Fi dongle).
+
+Wires the ported stages into the Driver contract: EEPROM decode and MAC programming,
+firmware download, post-firmware hardware init, the channel tune, and the RX descriptor
+decode feeding the frame parser.
+
+Transmission is ported. Injection writes a real TX descriptor on the verified path and is
+byte-identical to the kernel's own over 7680 recorded de-auths (capture-6). Receiving works on
+hardware: the RX URBs are submitted between mcu_cmd_init and write_mac_initvals, where
+dma.c:517 mt7601u_dma_init sits -- armed earlier the chip never streams a byte.
+
+State of the port (see docs/porting/METHODOLOGY.md for the gates each stage passed):
+
+  EEPROM read + decode     verified 160/160 ops on two cold-boot captures
+  firmware download        verified 78 and 77 ops on the same two captures
+  station memory clears   verified 13/13 burst ops on two cold-boot captures
+  hardware init            ported, register-for-register equivalent to the kernel
+  channel tune             verified 55/55 recorded tunes in monitor mode
+  RX descriptor decode     unit-tested, and delivering real frames on hardware
+  TX descriptors           byte-identical to the kernel over 7680 recorded de-auths
+  transmit queue           ported; USB-level completion verified, air unconfirmed
+  association / keys / AP  not ported -- blocks PMKID, WPS, EvilTwin
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Callable, ClassVar, List, Optional
+
+import usb.core
+
+from wifit3.chips.driver import Driver, FakeMacSupport, ProgressCallback
+from wifit3.chips.mt7601u.constants import (
+    MT_MAC_ADDR_DW0,
+    MT_MAC_ADDR_DW1,
+    MT_MAC_ADDR_DW1_U2ME_MASK,
+    MT_USB_DMA_CFG,
+)
+from wifit3.chips.mt7601u.eeprom import MT7601UEeprom, MT7601UEepromParams
+from wifit3.chips.mt7601u.firmware import find_firmware, load_firmware
+from wifit3.chips.mt7601u.init import MT7601UInit
+from wifit3.chips.mt7601u.mcu import MT7601UMcu
+from wifit3.chips.mt7601u.phy import MT7601UPhy
+from wifit3.chips.mt7601u.rx import iter_frames
+from wifit3.chips.mt7601u.transport import MT7601UTransport
+from wifit3.chips.mt7601u.tx import TX_QUEUE_INJECT as DEFAULT_TX_QUEUE
+from wifit3.chips.mt7601u.tx_status import TxStatus
+from wifit3.chips.mt7601u.tx_ring import TxQueues
+from wifit3.chips.mt7601u.wcid import init_station_memory
+from wifit3.chips.rx_reader import RxReaderThread
+from wifit3.dot11.parser import WlanFrameParser
+from wifit3.errors import BringUpError
+from wifit3.models.device_id import DeviceID
+
+logger = logging.getLogger(__name__)
+
+RX_BUFFER_SIZE = 32768
+"""mt7601u.h MT_RX_ORDER 3, so the RX URBs are 4 pages: 16 * 32768 = 512 KiB."""
+
+class MT7601UDriver(Driver):
+    """Receive-only userspace driver for the MT7601U."""
+
+    SUPPORTED_CHANNELS: ClassVar[List[int]] = list(range(1, 15))
+    """2.4 GHz only. Channel 14 is tuned from the port's own table, bypassing the
+    nl80211 regdomain check that refuses it under most domains; the kernel driver never
+    sees that error, so the port must not invent one."""
+
+    CONFLICTING_LINUX_MODULES: ClassVar[List[str]] = ["mt7601u"]
+    """The in-kernel driver claims 17 of the IDs in SUPPORTED_IDS, so Linux setup must
+    blocklist it or the kernel owns the interface before we can claim it."""
+
+    LINUX_REPLUG_AFTER_MODPROBE = True
+
+    FAKE_MAC: ClassVar[FakeMacSupport] = FakeMacSupport.SPOOFABLE
+    """mac.c:22-24 -- MT_MAC_ADDR_DW0/DW1 are plain writable registers on this silicon, so the
+    autoresponder will HW-ACK whatever MAC is programmed there. Same silicon path as mt76x0u."""
+
+    MAX_ACK_DELAY: ClassVar[float] = 0.25
+    """Inherited default 0.02 is wrong for this chip. Measured on two dongles, ch6, armed
+    autoresponder on A and injecting from B, polling the tally every 1ms: min 2.1ms, median
+    57ms, p90 73ms, max 120ms, with 14 of 15 trials landing outside the 20ms window. The
+    round-trip is dominated by this chip's USB bulk-RX scheduling, not by a register:
+    clearing MT_USB_DMA_CFG_RX_BULK_AGG_EN moved the median only 60.1ms -> 61.2ms, so there
+    is no aggregation knob to turn. At 0.02 every genuinely ACKed frame reported False, which
+    is what made ACK-measured deauth look broken. 0.25 clears the measured max with margin for
+    a busy channel and is still short enough that a retry loop does not visibly stall."""
+
+    @classmethod
+    def from_usb_device(cls, dev: usb.core.Device, id_entry: DeviceID) -> "MT7601UDriver":
+        drv = cls(dev)
+        drv.product_name = id_entry.product_name
+        return drv
+
+    def __init__(self, dev: usb.core.Device) -> None:
+        super().__init__()
+        self.dev = dev
+        self.transport = MT7601UTransport(dev)
+        self.mcu = MT7601UMcu(self.transport)
+        self.ee: MT7601UEepromParams = MT7601UEepromParams()
+        # The reader fills this same object in place, so phy and the driver stay on
+        # one EEPROM record; passing a separate one silently starved the TX power path.
+        self.eeprom_dev = MT7601UEeprom(self.transport, self.ee)
+        self.phy = MT7601UPhy(self.transport, self.mcu, self.ee)
+        self.chip_init = MT7601UInit(self.transport, self.mcu, self.phy)
+        self.parser = WlanFrameParser()
+        self.is_warm: bool = False
+        self.mac_address: Optional[str] = None
+        self._channel: int = self.SUPPORTED_CHANNELS[0]
+        self._rx_callback: Optional[Callable] = None
+        self._disconnect_callback: Optional[Callable] = None
+        self._reader: Optional[RxReaderThread] = None
+        # One pool per OUT endpoint; injection goes to the best-effort queue.
+        self._tx_queues = TxQueues(self.transport, self.mcu)
+
+    # ---- callbacks ----------------------------------------------------
+
+    def register_rx_callback(self, cb: Callable) -> None:
+        self._rx_callback = cb
+
+    def register_disconnect_callback(self, cb: Callable) -> None:
+        self._disconnect_callback = cb
+
+    # ---- bring-up -----------------------------------------------------
+
+    def _refuse_kernel_bound_chip(self) -> None:
+        """Refuse a dongle the kernel driver has already probed.
+
+        ``transport.claim`` silently detaches a bound kernel driver, so nothing downstream
+        distinguishes the two cases. They are not equivalent: mt7601u initialises the chip
+        during probe, and that init is not undone by unloading, so a bring-up onto such a
+        chip completes normally and RX then returns zero bytes at every read timeout, with
+        no error anywhere to explain it. Detaching hides the diagnosis and strands the user
+        watching an empty scan. Refuse while the interface is still bound, when the cause is
+        still knowable.
+        """
+        if not self.transport.dev.is_kernel_driver_active(0):
+            return
+        raise BringUpError(
+            "MT7601U: the kernel mt7601u driver is bound to this dongle. It initialises the "
+            "chip when it probes, and this bring-up cannot undo that init, so RX would stay "
+            "silent. Blacklist the module and replug: "
+            "echo 'blacklist mt7601u' | sudo tee /etc/modprobe.d/blacklist-mt7601u.conf, "
+            "then unplug and re-insert the dongle. Unloading it afterwards is not enough -- "
+            "the init already happened."
+        )
+
+    def _require_live_chip(self) -> None:
+        """Fail loudly unless the chip answers a register read.
+
+        ``rr`` reports a failed or short transfer as ~0, and ``vendor_request``
+        swallows the timeout after its retries, so a card whose control endpoint has
+        stopped responding reads back as ~0 for every register. Without this gate the
+        EEPROM decodes to a garbage MAC, bring-up writes that garbage into the chip and
+        connect() returns True -- presenting a dead card as a healthy one.
+        """
+        probe = self.transport.rr(MT_USB_DMA_CFG)
+        if probe == 0xFFFFFFFF:
+            raise BringUpError(
+                f"MT7601U: no response from {MT_USB_DMA_CFG:#06x}. The control endpoint is "
+                "not answering, so this card cannot be brought up. Unplug and replug it."
+            )
+
+    async def connect(self, progress_cb: Optional[ProgressCallback] = None) -> bool:
+        def step(fraction: float, message: str) -> None:
+            if progress_cb is not None:
+                progress_cb(fraction, message)
+
+        self._refuse_kernel_bound_chip()
+        self.transport.claim()
+        self.transport.assign_pipes()
+        self._require_live_chip()
+        self.is_warm = False
+
+        step(0.10, "Reading EEPROM")
+        # read() fills its own self.ee in place. It must not be rebound here: phy was
+        # constructed with this object, and a rebind left the TX power path reading an
+        # empty table, so every MT_TX_PWR_CFG_* register was programmed to zero and the
+        # chip transmitted at zero power.
+        self.eeprom_dev.read()
+        mac = self.eeprom_dev.macaddr
+        self.mac_address = ":".join(f"{b:02x}" for b in mac) if any(mac) else None
+
+        # init.c:330-347 gates the WLAN clock, waits for the ASIC, then downloads the
+        # firmware, polls WPDMA idle, and waits for the ASIC a second time. Pushing the
+        # image while WLAN_EN is still clear leaves the RF path ungated, and the port
+        # ran it in the opposite order.
+        step(0.35, "Powering up chip")
+        self.chip_init.chip_onoff(True)
+        self.chip_init.wait_asic_ready()
+
+        step(0.60, "Downloading firmware")
+        load_firmware(self.transport, self.mcu, find_firmware())
+        self.chip_init.poll_dma_idle(100_000)
+        self.chip_init.wait_asic_ready()
+        self.chip_init.reset_csr_bbp()
+        self.chip_init.init_usb_dma()
+        self.chip_init.mcu_cmd_init()
+        # dma.c:517 mt7601u_dma_init submits the RX URBs here. The chip only streams
+        # frames once they are armed after mcu_cmd_init; armed earlier it stays silent.
+        self._start_rx()
+        self.chip_init.write_mac_initvals()
+        self.chip_init.poll_mac_idle()
+        self.chip_init.init_bbp()
+        # init.c runs the station-memory clears after the BBP tables.
+        # A TX descriptor carries a wcid that must resolve to a valid slot.
+        init_station_memory(self.mcu)
+        self.chip_init.pre_phy_finalise()
+        self.phy.phy_init()
+        self.chip_init.finalise()
+        self.chip_init.mac_start()
+
+        step(0.90, f"Tuning to channel {self._channel}")
+        self.phy.set_channel(self._channel)
+
+        self._tx_queues = TxQueues(self.transport, self.mcu)
+        step(1.0, "Ready")
+        return True
+
+    def _start_rx(self) -> None:
+        loop = asyncio.get_event_loop()
+        self._reader = RxReaderThread(
+            loop,
+            self._read_once,
+            self._dispatch,
+            name="mt7601u-rx",
+            on_fatal=self._disconnect_callback,
+        )
+        self._reader.start()
+
+    def _read_once(self) -> Optional[bytes]:
+        return self.transport.bulk_in_rx(RX_BUFFER_SIZE) or None
+
+    def _dispatch(self, buffer: bytes) -> None:
+        if self._rx_callback is None and not self._ack_detect_on:
+            return
+        offset = self.ee.rssi_offset[0] if self.ee.rssi_offset else 0
+        for frame in iter_frames(buffer, self.ee.lna_gain, offset):
+            raw = frame.frame
+            # A 10-byte 0xD4 frame is an ACK. The parser drops control frames, so it has
+            # to be tapped here on the raw bytes; record_ack itself no-ops unless the
+            # tally is armed and RA matches a MAC we injected as.
+            if len(raw) == 10 and raw[0] == 0xD4:
+                self.record_ack(raw)
+                continue
+            if self._rx_callback is None:
+                continue
+            packet = self.parser.parse_80211_frame(raw, frame.rssi)
+            if packet is not None:
+                self._rx_callback(packet)
+
+    # ---- channel ------------------------------------------------------
+
+    async def set_channel(self, channel: int, scan: bool = False) -> bool:
+        if channel not in self.SUPPORTED_CHANNELS:
+            return False
+        self.phy.set_channel(channel)
+        self._channel = channel
+        return True
+
+    # ---- teardown -----------------------------------------------------
+
+    async def close(self) -> None:
+        if self._reader is not None:
+            await self._reader.stop()
+            self._reader = None
+        if self._tx_queues is not None:
+            self._tx_queues.close()
+        try:
+            self.chip_init.chip_onoff(False)
+        except Exception as exc:                     # teardown must not mask the real error
+            logger.warning("MT7601U: WLAN shutdown failed: %s", exc)
+        self.transport.release()
+        self.transport.dispose()
+
+    # ---- TX ------------------------------------------------------------
+
+    async def _inject_frame(self, frame_bytes: bytes) -> bool:
+        """Send one frame. False means the chip did not accept it.
+
+        ``ack`` follows the RX-stream ACK tally: request the link-layer ACK exactly when
+        ``enable_rx_acks`` has armed something to watch for it. Disarmed, this is capture-6's
+        kernel injection descriptor (``ack_ctl=0x00``) -- measured on the dongle, ack=True
+        reported SUCCESS 0/15 while ack=False reported 15/15 from the same frame and queue,
+        because an injected frame's Addr2 is spoofed so the silicon cannot match the ACK it
+        waits for. Armed, ``MT_TXWI_ACK_CTL_REQ`` is the whole point: without it the recipient
+        is never asked to ACK, no ACK reaches the RX stream, and the tally ``deauth_client``
+        reports as ``total_acked`` -- the thing ``send_until_ack`` retries on -- could never be
+        anything but zero. The SUCCESS bit reads 0 in that mode and nothing here reads it; the
+        tally counts ACK frames off the air instead.
+        """
+        return self._tx_queues[DEFAULT_TX_QUEUE].submit(frame_bytes,
+                                                       ack=self._ack_detect_on)
+
+    def tx_statuses(self) -> list[TxStatus]:
+        """Per-frame transmit results the MAC has reported since the last reset.
+
+        The kernel hands these to mac80211 as they arrive; here they are drained
+        on every submit and kept on the queue. ``SUCCESS`` means the silicon
+        completed a transmission, not that a frame left the antenna, so it is a
+        floor on what was sent and never proof it was heard.
+        """
+        if self._tx_queues is None:
+            return []
+        return list(self._tx_queues[DEFAULT_TX_QUEUE].statuses)
+
+    def _stamp_tx_seq(self, frame_bytes: bytes) -> bytes:
+        """Unchanged: the txwi leaves NSEQ clear, so the silicon stamps the
+        802.11 sequence number itself (tx.c sets it only for ASSIGN_SEQ)."""
+        return frame_bytes
+
+    async def enter_active_monitor(self, mac: bytes,
+                                   bssid: Optional[bytes] = None) -> bytes:
+        """Program ``mac`` into MT_MAC_ADDR_DW0/DW1 so the autoresponder HW-ACKs it (mac.c:22-24).
+
+        U2ME stays 0xff throughout: the kernel arms it in mt7601u_set_macaddr, which is the
+        only place this silicon ever gets it, so the monitor baseline already has it set and
+        exit must not diverge. ``bssid`` is unused -- unlike a firmware-offload radio, this
+        autoresponder answers on DW0 alone.
+        """
+        self._write_self_mac(bytes(mac))
+        return bytes(mac)
+
+    async def exit_active_monitor(self) -> None:
+        """Restore the EEPROM MAC, keeping U2ME as mac.c set it."""
+        if not self.mac_address:
+            return
+        self._write_self_mac(bytes.fromhex(self.mac_address.replace(":", "")))
+
+    def _write_self_mac(self, mac: bytes) -> None:
+        """mac.c:22-24 -- DW0 takes the low 4 bytes, DW1 the high 2 plus the U2ME mask.
+
+        Synchronous register writes, like every other MT7601U register path in this driver.
+        """
+        self.transport.wr(MT_MAC_ADDR_DW0, int.from_bytes(mac[0:4], "little"))
+        self.transport.wr(MT_MAC_ADDR_DW1,
+                          int.from_bytes(mac[4:6], "little") | MT_MAC_ADDR_DW1_U2ME_MASK)
+
+    async def _enable_rx_acks(self) -> None:
+        """No-op: the monitor RX filter is promiscuous, so ACK/CTS/RTS already reach the
+        RX stream and _dispatch taps ACKs off the raw bytes."""
+
+    async def _disable_rx_acks(self) -> None:
+        """No-op, matching _enable_rx_acks."""
