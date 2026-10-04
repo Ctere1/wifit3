@@ -72,9 +72,10 @@ def test_second_half_recovery_uses_checksum_digit():
     assert result.pin[4:] == "5670"
 
 
-def test_second_half_recovery_rejects_wrong_checksum_hash():
-    e_s1 = b"\x00" * wc.SECRET_NONCE_LEN
-    e_s2 = b"\x00" * wc.SECRET_NONCE_LEN
+def test_second_half_recovery_accepts_a_wrong_checksum_pin():
+    # "12345678"'s 8th digit should be 0, not 8; sweeping all 10000 second halves (not only the
+    # 1000 checksum-valid ones) recovers factory PINs that ship with a wrong checksum digit.
+    e_s1 = e_s2 = b"\x00" * wc.SECRET_NONCE_LEN
     psk1 = wc.hmac_sha256(AUTHKEY, b"1234")[:wc.PSK_LEN]
     psk2 = wc.hmac_sha256(AUTHKEY, b"5678")[:wc.PSK_LEN]
     bundle = PixieBundle(
@@ -88,7 +89,9 @@ def test_second_half_recovery_rejects_wrong_checksum_hash():
 
     result = recover_pin(bundle, modes=(PixieMode.NULL_SECRET,))
 
-    assert result.found is False
+    assert result.found is True
+    assert result.pin == "12345678"
+    assert not wc.pin_is_valid(result.pin)
 
 
 # ----- PRNG-seed modes + Phase 2 (end-to-end: synthesise a vulnerable M3, then recover) -----
