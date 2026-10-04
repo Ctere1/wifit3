@@ -207,3 +207,14 @@ def test_rtl819x_carries_partial_first_half_when_second_half_seed_missed():
     assert result.pin is None
     assert result.first_half == "0001"
     assert result.mode is PixieMode.RTL819X
+
+
+def test_rtl819x_mode_recovers_pin_past_2038():
+    # Seeds >= 2^31 (Unix time from Jan 2038) are negative in glibc's int32 state; recovery must
+    # still reconstruct the nonce there, not just before the rollover.
+    pin = pins.full_pin("9753", "864")
+    seed = 2**31 + 100000
+    nonce = pixie_prng.glibc_nonce(seed)
+    bundle = _bundle_for(pin, nonce, nonce, nonce)
+    result = recover_pin(bundle, modes=(PixieMode.RTL819X,), rtl_window=(seed + 3, seed - 3))
+    assert result.found and result.pin == pin and result.mode is PixieMode.RTL819X
