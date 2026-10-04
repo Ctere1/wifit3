@@ -113,7 +113,16 @@ demand one. Issue #55 is intentionally left open to keep gauging demand.
 
 The WPS engine is built, offline-proven, and HW-validated (full PIN crack on AirLink). Gaps:
 - **Lock-cycle matrix** — only AirLink soft-lock tested; exercise no-lock, long cooldowns, hard-lock.
-- **PixieDust (PRNG seed recovery)** — Phase 1 (Null Secret) and Phase 2 (Static Secrets)
-  landed natively in `campaigns/wps/pixie.py`. Advanced PRNG seed-search modes (Broadcom
-  timestamp search, Realtek/MediaTek LCG) remain deferred due to the CPU cost of
-  evaluating 32-bit seed spaces in pure Python.
+- **PixieDust (PRNG seed recovery)** — Null Secret, Static Secret, Ralink/MediaTek LFSR and
+  RTL819x glibc timestamp search landed natively in `campaigns/wps/pixie.py` (#70). eCos "simple"
+  is ported but kept out of `DEFAULT_MODES`: its 2^25 seed sweep measures 13.5s on a high-end x86
+  laptop, and the legacy ARM phones this has to stay usable on are several times slower.
+- **Gate `ECOS_SIMPLE` behind a preference** — one opt-in bool on `Config`
+  (`persist/config.py`) plus a Checkbox section in the Ctrl+P modal (`ui/pref.py`), tooltip saying
+  the search is very slow. eCos has no cheap pre-filter: nonce[0] fixes only the top 7 seed bits,
+  so ruling an AP *out* costs the whole 2^25 sweep (13.5s laptop) on every capture. That is the
+  footgun. The other modes self-limit — Null/Static are table lookups, Ralink is one deterministic
+  LFSR rewind, and RTL819x rejects 15/16 of APs on the nonce top-bit test, then bounds the probe
+  to a +/-1 day seed window (0.7s laptop) and only pays its 49s E-S1 sweep once the nonce is a
+  confirmed glibc match, i.e. when the PIN is about to fall out. Worth timing that 49s on a phone
+  before deciding whether it needs the pref too.

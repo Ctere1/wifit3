@@ -18,6 +18,7 @@ Sweep wiring (see registrar.py):
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import time
@@ -34,7 +35,7 @@ from .auth_assoc import Association, WlanTransport
 from wifit3.dot11 import random_client_mac, str_to_mac
 from wifit3.dot11.wsc.assoc_ie import WPS_REQ_REGISTRAR, wps_assoc_ie
 from .wps.lock import LockTracker
-from .wps.pixie import recover_pin
+from .wps.pixie import PixieResult, recover_pin
 from .wps.registrar import AttemptOutcome, PinResult, WpsRegistrar, config_error_name
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,7 @@ class WpsCampaign(Campaign):
     _MAX_TIMEOUT_RETRIES = 8  # retries of a silent (lost-reply) attempt before conceding
     _REFUSAL_BAIL = 3         # consecutive refusals (disassoc / identity-stall) before giving up
     _MAX_LOCKS_NO_PROGRESS = 5
+    _PIXIE_POLL = 0.2         # seconds between Stop checks while the PixieDust search runs
 
     button_id = "btn-wps-pin"
     key = "wps"
@@ -227,6 +229,7 @@ class WpsCampaign(Campaign):
         self.fail_reason: Optional[str] = None   # terse give-up reason; Focus renders the fail-leaf
         self._last_logged_pin: Optional[str] = None   # log the PIN only when it changes (save width)
         self._pixie_tried = False
+        self._pixie_pool: Optional[concurrent.futures.Executor] = None
 
     # ---- persistence --------------------------------------------------------
     def _load_state(self) -> CampaignState:
@@ -282,6 +285,7 @@ class WpsCampaign(Campaign):
         self._paused = False
 
     def _teardown(self) -> None:
+        self._halt_pixie()
         if self.transport:
             self.transport.stop()
         if self.assoc:
@@ -535,7 +539,7 @@ class WpsCampaign(Campaign):
                     continue                       # bounded retry; never advance the keyspace
                 self._consecutive_refusals = 0
 
-                if self._try_pixie(pin, out):
+                if await self._try_pixie(pin, out):
                     self._save_state()
                     continue
 
@@ -620,15 +624,59 @@ class WpsCampaign(Campaign):
             return 0.0
         return max(0.0, self._lock_end_at - time.monotonic())
 
-    def _try_pixie(self, pin: str, out: AttemptOutcome) -> bool:
+    async def _run_pixie(self, bundle) -> PixieResult:
+        """Search off the event loop, polling ``stopped`` so Stop stays prompt. Prefers a worker
+        process (killable); falls back to a thread where subprocesses are unavailable."""
+        try:
+            return await self._search_in(concurrent.futures.ProcessPoolExecutor(max_workers=1),
+                                         bundle)
+        except (concurrent.futures.BrokenExecutor, OSError):
+            # Workers spawn lazily, so an unusable subprocess surfaces here rather than at
+            # construction. A thread still yields to the loop between GIL switches.
+            logger.debug("Pixie worker process unusable; retrying in a thread", exc_info=True)
+        if self.stopped:
+            return PixieResult()
+        return await self._search_in(concurrent.futures.ThreadPoolExecutor(max_workers=1), bundle)
+
+    async def _search_in(self, pool, bundle) -> PixieResult:
+        loop = asyncio.get_running_loop()
+        self._pixie_pool = pool
+        try:
+            search = loop.run_in_executor(pool, recover_pin, bundle)
+            # An abandoned search still completes (or dies with the worker); retrieve whatever it
+            # ends up with so asyncio doesn't log it as an unretrieved exception.
+            search.add_done_callback(lambda f: f.cancelled() or f.exception())
+            while True:
+                done, _ = await asyncio.wait({search}, timeout=self._PIXIE_POLL)
+                if done:
+                    return search.result()
+                if self.stopped:
+                    return PixieResult()
+        finally:
+            self._halt_pixie()
+
+    def _halt_pixie(self) -> None:
+        """Drop the search worker without joining it, so Stop never waits on a sweep in flight.
+        Process workers are killed outright; a thread cannot be, and will still delay exit."""
+        pool, self._pixie_pool = self._pixie_pool, None
+        if pool is None:
+            return
+        # Private, but the only handle on the workers, and shutdown() clears it.
+        workers = list((getattr(pool, "_processes", None) or {}).values())
+        pool.shutdown(wait=False, cancel_futures=True)
+        for worker in workers:
+            worker.kill()
+
+    async def _try_pixie(self, pin: str, out: AttemptOutcome) -> bool:
         """Run Pixie once after M3 capture; verify any recovered PIN online next."""
         if self._pixie_tried or self.state.phase == "verify" or out.pixie is None:
             return False
         self._pixie_tried = True
         self.log(f"{self._attempt_prefix(pin)} → trying [cyan]PixieDust[/] offline…")
-        result = recover_pin(out.pixie)
+        result = await self._run_pixie(out.pixie)
         if not result.found or result.pin is None:
-            self.log(f"{self._cont_align()} → [dim italic]no PixieDust matches found[/]")
+            if not self.stopped:   # an abandoned search didn't search, so it found nothing to say
+                self.log(f"{self._cont_align()} → [dim italic]no PixieDust matches found[/]")
             return False
         self.state.found_pin = result.pin
         self.state.phase = "verify"
