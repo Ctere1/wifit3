@@ -42,7 +42,11 @@ _GLIBC_COEFFICIENTS = _derive_output_coefficients(_GLIBC_NONCE_WORDS)
 
 
 def _glibc_seeded_words(seed: int) -> List[int]:
-    value = seed & _U32 or 1  # srandom() substitutes 1 for a zero seed
+    # srandom() takes an unsigned int (1 for 0), then holds it in an int32_t state word, so a seed
+    # >= 2^31 (Unix time past Jan 2038) is sign-extended to negative before the recurrence runs.
+    value = seed & _U32 or 1
+    if value >= 0x80000000:
+        value -= 0x100000000
     words = [value]
     for _ in range(_GLIBC_SEEDED_WORDS - 1):
         value = (_GLIBC_MULTIPLIER * value) % _GLIBC_MODULUS
@@ -208,7 +212,9 @@ def ecos_simple_recover(
     """Sweep the 25 unknown seed bits (the top 7 come from nonce[0]) for (E-S1, E-S2)."""
     if len(e_nonce) != _NONCE_LEN:
         return None
-    known_high = (e_nonce[0] << _ECOS_SEED_HIGH_SHIFT) & _U32
+    # nonce[0] carries only the seed's top 7 bits; mask it so a byte >= 0x80 is handled the same
+    # way rather than letting the shift silently drop bit 7 (true 8-bit semantics need a device).
+    known_high = (e_nonce[0] & 0x7F) << _ECOS_SEED_HIGH_SHIFT
     for counter in range(max_counter):
         state = known_high | counter
         for expected in e_nonce[1:]:

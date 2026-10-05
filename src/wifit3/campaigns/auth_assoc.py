@@ -98,6 +98,7 @@ class Association:
                  our_mac: Optional[bytes] = None, assoc_timeout: float = 1.5,
                  auth_timeout: float = 1.0,
                  assoc_trailer_ies: bytes = b"",
+                 privacy: Optional[bool] = None,
                  should_stop: Optional[Callable[[], bool]] = None):
         self.iface = iface
         self.bssid = bssid.lower()
@@ -108,6 +109,7 @@ class Association:
         self.assoc_timeout = assoc_timeout
         self.auth_timeout = auth_timeout
         self.assoc_trailer_ies = assoc_trailer_ies
+        self.privacy = privacy
         self.should_stop = should_stop or (lambda: False)
         self.associated = False
         self.fail_reason: Optional[str] = None
@@ -144,7 +146,7 @@ class Association:
             logger.info("-> Assoc Req to %s", self.bssid)
             await self._send_until(assoc_req(self.bssid_bytes, self.our_mac, self.ssid,
                                              self.assoc_trailer_ies,
-                                             channel=self.channel),
+                                             channel=self.channel, privacy=self.privacy),
                                    lambda: self._assoc_ok, self.assoc_timeout)
             if self._assoc_ok:
                 self.associated = True

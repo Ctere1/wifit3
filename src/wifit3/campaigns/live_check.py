@@ -249,7 +249,7 @@ class LiveKeyVerifier:
             ap.ssid or "",
             ap.channel,
             our_mac=our_mac,
-            assoc_trailer_ies=wps_assoc_ie(WPS_REQ_REGISTRAR),
+            assoc_trailer_ies=wps_assoc_ie(WPS_REQ_REGISTRAR, ap.wps_version == "2.0"),
         )
         assoc.start()
         transport = WlanTransport(iface, str_to_mac(ap.bssid), our_mac)
@@ -264,7 +264,8 @@ class LiveKeyVerifier:
                     f"Error: {err}",
                 )
             logger.info("[%s] Assoc accepted with WPS IE by %s. Starting WSC session for PIN %s...", ssid, ap.bssid, pin)
-            reg = WpsRegistrar(transport, str_to_mac(ap.bssid), our_mac)
+            reg = WpsRegistrar(transport, str_to_mac(ap.bssid), our_mac,
+                               channel=ap.channel, wsc_2_0=ap.wps_version == "2.0")
             outcome = await reg.try_pin(pin)
             logger.info("[%s] WPS session outcome: %s (detail: %s)", ssid, outcome.result.value, outcome.detail)
             if outcome.result == PinResult.SUCCESS:

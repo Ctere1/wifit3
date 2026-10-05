@@ -86,3 +86,17 @@ def test_ecos_simple_model_recover_roundtrip():
     seed = (0x05 << 25) | 137          # small low 25 bits so the sweep finishes fast
     nonce, es1, es2 = P.ecos_simple_model(seed)
     assert P.ecos_simple_recover(nonce, max_counter=1000) == (es1, es2)
+
+
+def test_glibc_nonce_matches_glibc_past_2038():
+    # Seeds >= 2^31 (Unix time from Jan 2038) are negative in glibc's int32_t state. Ground truth
+    # from the system glibc via ctypes srandom()/random(); before the fix 2**31 gave 2b101346...
+    assert P.glibc_nonce(2**31).hex() == "4fad0d5d48255ae056402720141c32ff"
+    assert P.glibc_nonce(2**31 + 1).hex() == "407b3221004fa414406d7d184094741d"
+    assert P.glibc_nonce(2**32 - 1).hex() == "0f31db3b47d5b6cc15d2aa085387bee1"
+
+
+def test_glibc_nonce_treats_seed_as_srandom_unsigned_int():
+    # srandom() takes an unsigned int, so a Python-negative seed wraps mod 2^32 and 0 becomes 1.
+    assert P.glibc_nonce(-1) == P.glibc_nonce(2**32 - 1)
+    assert P.glibc_nonce(0) == P.glibc_nonce(1)

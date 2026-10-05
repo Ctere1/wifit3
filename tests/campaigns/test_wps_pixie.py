@@ -72,9 +72,10 @@ def test_second_half_recovery_uses_checksum_digit():
     assert result.pin[4:] == "5670"
 
 
-def test_second_half_recovery_rejects_wrong_checksum_hash():
-    e_s1 = b"\x00" * wc.SECRET_NONCE_LEN
-    e_s2 = b"\x00" * wc.SECRET_NONCE_LEN
+def test_second_half_recovery_accepts_a_wrong_checksum_pin():
+    # "12345678"'s 8th digit should be 0, not 8; sweeping all 10000 second halves (not only the
+    # 1000 checksum-valid ones) recovers factory PINs that ship with a wrong checksum digit.
+    e_s1 = e_s2 = b"\x00" * wc.SECRET_NONCE_LEN
     psk1 = wc.hmac_sha256(AUTHKEY, b"1234")[:wc.PSK_LEN]
     psk2 = wc.hmac_sha256(AUTHKEY, b"5678")[:wc.PSK_LEN]
     bundle = PixieBundle(
@@ -88,7 +89,9 @@ def test_second_half_recovery_rejects_wrong_checksum_hash():
 
     result = recover_pin(bundle, modes=(PixieMode.NULL_SECRET,))
 
-    assert result.found is False
+    assert result.found is True
+    assert result.pin == "12345678"
+    assert not wc.pin_is_valid(result.pin)
 
 
 # ----- PRNG-seed modes + Phase 2 (end-to-end: synthesise a vulnerable M3, then recover) -----
@@ -176,3 +179,42 @@ def test_ecos_simple_mode_recovers_pin():
     bundle = _bundle_for(pin, es1, es2, nonce)
     result = recover_pin(bundle, modes=(PixieMode.ECOS_SIMPLE,), ecos_max_counter=1000)
     assert result.found and result.pin == pin and result.mode is PixieMode.ECOS_SIMPLE
+
+
+def test_empty_device_password_recovered():
+    # A zero-length device password hashes the empty string into both PSK halves; neither the
+    # 0000-9999 nor the 000-999 sweep would ever reach it, so it's checked ahead of each loop.
+    null = b"\x00" * wc.SECRET_NONCE_LEN
+    result = recover_pin(_bundle("", null, null), modes=(PixieMode.NULL_SECRET,))
+    assert result.found is True
+    assert result.pin == ""
+    assert result.mode is PixieMode.NULL_SECRET
+
+
+def test_rtl819x_carries_partial_first_half_when_second_half_seed_missed():
+    # First half proved against E-Hash1, but the E-S2 seed lands past the +0..+9s second-half sweep:
+    # the proved half must escape (found=False, first_half set) instead of being thrown away.
+    seed = 1700000000
+    pin = pins.full_pin("0001", "000")
+    bundle = _bundle_for(
+        pin,
+        pixie_prng.glibc_nonce(seed + 1),        # E-S1: a second after the nonce (found by the sweep)
+        pixie_prng.glibc_nonce(seed + 1 + 15),   # E-S2: beyond the 10s forward sweep from E-S1
+        pixie_prng.glibc_nonce(seed),
+    )
+    result = recover_pin(bundle, modes=(PixieMode.RTL819X,), rtl_window=(seed + 2, seed - 2))
+    assert result.found is False
+    assert result.pin is None
+    assert result.first_half == "0001"
+    assert result.mode is PixieMode.RTL819X
+
+
+def test_rtl819x_mode_recovers_pin_past_2038():
+    # Seeds >= 2^31 (Unix time from Jan 2038) are negative in glibc's int32 state; recovery must
+    # still reconstruct the nonce there, not just before the rollover.
+    pin = pins.full_pin("9753", "864")
+    seed = 2**31 + 100000
+    nonce = pixie_prng.glibc_nonce(seed)
+    bundle = _bundle_for(pin, nonce, nonce, nonce)
+    result = recover_pin(bundle, modes=(PixieMode.RTL819X,), rtl_window=(seed + 3, seed - 3))
+    assert result.found and result.pin == pin and result.mode is PixieMode.RTL819X
