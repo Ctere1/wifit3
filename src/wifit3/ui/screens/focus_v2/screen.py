@@ -39,7 +39,8 @@ from wifit3.campaigns.pmkid import PmkidHarvestAttack
 from wifit3.campaigns.wep import WepCampaign
 from wifit3.campaigns.eviltwin import EvilTwinCampaign, EvilTwinInput
 from wifit3.ui.screens.focus_v2.eviltwin_modal import EvilTwinInputModal
-from wifit3.campaigns.pin import WpsCampaign, load_run_state, run_progress_line
+from wifit3.campaigns.pin import (EMPTY_PIN_LABEL, WpsCampaign, load_run_state,
+                                  run_progress_line)
 from wifit3.campaigns.deauth import DeauthCampaign
 from wifit3.campaigns.pbc import WpsPbcCapture
 from wifit3.campaigns.probe import probe_ap
@@ -1142,18 +1143,18 @@ class FocusViewV2(Screen):
     def _finish_wps(self, camp) -> None:
         """Reap a finished WPS PIN sweep: log/save the found PIN, else the give-up reason."""
         ssid = escape(camp.target.ssid or camp.bssid)
-        if camp.state.found_pin:
-            camp.target.wps_pin = camp.state.found_pin
+        if camp.state.found_pin is not None:
+            camp.target.wps_pin = camp.state.found_pin or EMPTY_PIN_LABEL
             camp.target.wps_pin_psk = camp.state.found_psk
             self._log(treelog.branch_ok(
                 f"[black bold on cyan]  WPS PIN for {ssid}: "
-                f"{escape(camp.state.found_pin)}  [/black bold on cyan]"))
+                f"{escape(camp.target.wps_pin)}  [/black bold on cyan]"))
             self._log(treelog.branch(
                 f"[black bold on green] Password for {ssid}: "
                 f"\"{escape(camp.state.found_psk or '')}\" [/black bold on green]"))
             try:
                 result = self.app.vault.save_wps_pin(
-                    camp.target, camp.state.found_pin, camp.state.found_psk or "")
+                    camp.target, camp.target.wps_pin, camp.state.found_psk or "")
                 if result is None:
                     self._log(treelog.leaf("[dim](save failed)[/dim]"))
                 else:

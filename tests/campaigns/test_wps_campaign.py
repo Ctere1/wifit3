@@ -17,7 +17,7 @@ import pytest
 from wifit3.campaigns import pin as pin_mod
 from wifit3.campaigns.wps import known_pins, pins
 from wifit3.campaigns.pin import WpsCampaign, _state_path
-from wifit3.campaigns.wps.pixie import PixieBundle, PixieResult
+from wifit3.campaigns.wps.pixie import PixieBundle, PixieMode, PixieResult
 from wifit3.campaigns.wps.registrar import AttemptOutcome, PinResult
 from wifit3.dot11.wsc import crypto as wc
 from wifit3.dot11.wsc.crypto import pin_is_valid
@@ -174,6 +174,62 @@ async def test_campaign_falls_back_when_pixie_has_no_match(tmp_path, monkeypatch
     assert c.state.found_pin == known
     assert c.tried[:2] == [pins.COMMON_PINS[0], pins.COMMON_PINS[1]]
     assert len(c.tried) > 2
+
+
+async def test_campaign_resumes_the_sweep_when_a_pixie_half_is_wrong(tmp_path, monkeypatch):
+    # PixieDust can prove a first half the AP never confirmed (RTL819x, E-S2's seed missed). When
+    # that half is wrong the second-half phase has to retire it and resume the sweep.
+    monkeypatch.setattr(known_pins, "known_pins_for", lambda bssid: [])
+    known = pins.full_pin("0001", "000")
+    zero = b"\x00" * wc.SECRET_NONCE_LEN
+
+    class PixieWrongHalf(ScriptedCampaign):
+        async def _try(self, pin):
+            if len(self.tried) >= 40:
+                self.stopped = True   # a sweep stuck on one PIN would never return on its own
+            out = await super()._try(pin)
+            if len(self.tried) == 1:
+                out.pixie = _pixie_bundle(known, zero, zero)
+            return out
+
+        async def _run_pixie(self, bundle):
+            return PixieResult(first_half="9999", mode=PixieMode.RTL819X)
+
+    c = PixieWrongHalf(_iface(), _target(), log=lambda m: None, known_pin=known, psk="pw")
+    await c._loop()
+
+    wrong = pins.full_pin("9999", "000")
+    assert c.status == "found"
+    assert c.state.found_pin == known
+    assert "9999" in c.state.dead_first_halves
+    assert c.tried[1] == wrong and c.tried.count(wrong) == 1
+
+
+async def test_campaign_verifies_and_reports_an_empty_pin(tmp_path, monkeypatch):
+    # A zero-length device password is a real PixieDust outcome. "" is falsy, so the campaign has
+    # to carry it as a recovered PIN and render it as <empty> rather than drop the win.
+    monkeypatch.setattr(known_pins, "known_pins_for", lambda bssid: [])
+    zero = b"\x00" * wc.SECRET_NONCE_LEN
+
+    class PixieEmptyPin(ScriptedCampaign):
+        async def _try(self, pin):
+            out = await super()._try(pin)
+            if len(self.tried) == 1:
+                out.pixie = _pixie_bundle("", zero, zero)
+            return out
+
+        async def _run_pixie(self, bundle):
+            return PixieResult(pin="", mode=PixieMode.NULL_SECRET, found=True)
+
+    c = PixieEmptyPin(_iface(), _target(), log=lambda m: None, known_pin="", psk="pw")
+    await c._loop()
+
+    assert c.status == "found"
+    assert c.state.found_pin == ""
+    assert c.state.found_psk == "pw"
+    assert c.tried == [pins.COMMON_PINS[0], ""]
+    assert "<empty>" in pin_mod.wps_status_markup(c)
+    assert pin_mod.run_progress_line(c.state) is None
 
 
 # ----- PixieDust offload: the sweep must never make Stop or process exit wait on it -----
