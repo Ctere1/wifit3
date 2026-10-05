@@ -1,5 +1,8 @@
 """Logic-only tests for FocusViewV2 state derivations."""
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 from wifit3.persist.vault import Vault
 from tests.wlan.mocks import build_ap, mock_array
 from wifit3.ui import focus_model as fm
@@ -8,6 +11,8 @@ from wifit3.campaigns.deauth import DeauthCampaign
 from wifit3.campaigns.eviltwin import EvilTwinCampaign
 from wifit3.campaigns.wep import WepCampaign
 from wifit3.campaigns.pin import WpsCampaign
+from wifit3.models import AccessPoint
+from wifit3.ui.screens.focus_v2.screen import FocusViewV2
 
 
 def test_recovered_wps_psk_shows_in_status():
@@ -21,6 +26,22 @@ def test_recovered_wps_psk_shows_in_status():
     lines = fm.status_headlines(ap, array, vault=Vault())
     status_text = "".join(lines)
     assert "PSK recovered" in status_text
+
+
+def test_finish_wps_preserves_empty_pin():
+    ap = AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="TestNet")
+    vault = Vault()
+    host = SimpleNamespace(app=SimpleNamespace(vault=vault), _log=MagicMock())
+    camp = SimpleNamespace(
+        target=ap,
+        bssid=ap.bssid,
+        state=SimpleNamespace(found_pin="", found_psk="hunter2"),
+    )
+
+    FocusViewV2._finish_wps(host, camp)
+
+    assert ap.wps_pin == ""
+    assert vault.persisted(ap.bssid)[0].pin == ""
 
 
 def test_pmf_required_disables_deauth():

@@ -75,6 +75,18 @@ class TestLoadCaptureIndex:
         assert caps[0].type == CaptureType.WPS_PIN and caps[0].value == "abcdefgh"
         assert caps[0].pin == "12345670"
 
+    def test_empty_wps_pin_is_preserved(self, tmp_path):
+        body = _WPS_PIN_TXT.replace("PIN: 12345670", "PIN: ")
+        _write(tmp_path, f"TestNet_{_BSSID_DASH}_1700000006_wps_pin.txt", body)
+        capture = load_capture_index()[_BSSID_COLON][0]
+        assert capture.pin == ""
+
+    def test_legacy_empty_wps_pin_label_is_normalized(self, tmp_path):
+        body = _WPS_PIN_TXT.replace("PIN: 12345670", "PIN: <empty>")
+        _write(tmp_path, f"TestNet_{_BSSID_DASH}_1700000006_wps_pin.txt", body)
+        capture = load_capture_index()[_BSSID_COLON][0]
+        assert capture.pin == ""
+
     def test_wpa_psk_txt(self, tmp_path):
         _write(tmp_path, f"TestNet_{_BSSID_DASH}_1700000012_wpa_psk.txt",
                f"SSID: TestNet\nBSSID: {_BSSID_COLON}\nPSK: crackedpass\n")
@@ -178,4 +190,3 @@ class TestSummarize:
         _write(tmp_path, f"TestNet_{_BSSID_DASH}.hc22000", _HS_LINE + _PMKID_LINE)
         hs, pmkid, wep, wps = summarize(load_capture_index())
         assert (hs, pmkid, wep, wps) == (1, 1, 0, 0)
-

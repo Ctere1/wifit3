@@ -521,8 +521,8 @@ class FocusViewV2(Screen):
                 creds = []
                 if cap.value:
                     creds.append(f"[black bold on cyan] {escape(cap.value)} [/black bold on cyan]")
-                if cap.pin:
-                    creds.append(f"[dim]PIN[/dim] {escape(cap.pin)}")
+                if cap.pin is not None:
+                    creds.append(f"[dim]PIN[/dim] {escape(cap.pin or EMPTY_PIN_LABEL)}")
                 joined = ("  ".join(creds) + "  ") if creds else ""
                 self._log(line(f"{head}  {joined}[dim]{dt:%Y-%m-%d %H:%M}[/dim]"))
             else:
@@ -1144,17 +1144,18 @@ class FocusViewV2(Screen):
         """Reap a finished WPS PIN sweep: log/save the found PIN, else the give-up reason."""
         ssid = escape(camp.target.ssid or camp.bssid)
         if camp.state.found_pin is not None:
-            camp.target.wps_pin = camp.state.found_pin or EMPTY_PIN_LABEL
+            camp.target.wps_pin = camp.state.found_pin
             camp.target.wps_pin_psk = camp.state.found_psk
+            displayed_pin = camp.state.found_pin or EMPTY_PIN_LABEL
             self._log(treelog.branch_ok(
                 f"[black bold on cyan]  WPS PIN for {ssid}: "
-                f"{escape(camp.target.wps_pin)}  [/black bold on cyan]"))
+                f"{escape(displayed_pin)}  [/black bold on cyan]"))
             self._log(treelog.branch(
                 f"[black bold on green] Password for {ssid}: "
                 f"\"{escape(camp.state.found_psk or '')}\" [/black bold on green]"))
             try:
                 result = self.app.vault.save_wps_pin(
-                    camp.target, camp.target.wps_pin, camp.state.found_psk or "")
+                    camp.target, camp.state.found_pin, camp.state.found_psk or "")
                 if result is None:
                     self._log(treelog.leaf("[dim](save failed)[/dim]"))
                 else:

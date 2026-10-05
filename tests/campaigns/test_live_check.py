@@ -8,9 +8,16 @@ from wifit3.dot11.packet import EapolPacket, WepDataPacket
 from wifit3.dot11.wep.crypto import icv
 from wifit3.crack.wep import rc4_keystream
 from wifit3.models import AccessPoint, CaptureType, PersistedCapture
+from wifit3.persist.capture_history import load_capture_index
+from wifit3.persist.save import save_wps_pin
 
 
-def _make_capture(cap_type: CaptureType, bssid: str, value: str = "", pin: str = "") -> PersistedCapture:
+def _make_capture(
+    cap_type: CaptureType,
+    bssid: str,
+    value: str = "",
+    pin: str | None = None,
+) -> PersistedCapture:
     return PersistedCapture(
         type=cap_type,
         timestamp=1000,
@@ -216,6 +223,79 @@ async def test_verify_wps_pin_success(monkeypatch):
     res = await verifier.verify_credential(cap, array)
     assert res.status == VerifyStatus.SUCCESS
     assert 'PIN "12345670" still works' in res.body
+
+
+async def test_empty_wps_pin_survives_save_reload_and_verification(monkeypatch):
+    verifier = LiveKeyVerifier()
+    bssid = "00:11:22:33:44:55"
+    ap = _make_ap(bssid, channel=1)
+    saved = save_wps_pin(ap, "", "abcdefgh")
+    assert saved is not None
+    cap = load_capture_index()[bssid][0]
+    assert cap.pin == ""
+
+    iface = MagicMock()
+    iface.set_channel = AsyncMock()
+    iface.set_fake_mac = AsyncMock()
+    iface.clear_fake_mac = AsyncMock()
+    iface.send_no_wait = AsyncMock()
+
+    class FakeClaim:
+        async def __aenter__(self):
+            return iface
+
+        async def __aexit__(self, *args):
+            pass
+
+    array = MagicMock()
+    array.members = [iface]
+    array.access_points = {bssid: ap}
+    array.select_iface.return_value = iface
+    array.claim.return_value = FakeClaim()
+    array.register_own_mac.return_value = "00:aa:bb:cc:dd:ee"
+    array.unregister_own_mac = MagicMock()
+
+    monkeypatch.setattr("wifit3.campaigns.live_check.Association.associate", AsyncMock(return_value=True))
+    try_pin = AsyncMock(return_value=AttemptOutcome(PinResult.SUCCESS, pin=""))
+    monkeypatch.setattr("wifit3.campaigns.live_check.WpsRegistrar.try_pin", try_pin)
+
+    res = await verifier.verify_credential(cap, array)
+
+    assert res.status == VerifyStatus.SUCCESS
+    assert 'PIN "<empty>" still works' in res.body
+    try_pin.assert_awaited_once_with("")
+
+
+async def test_missing_wps_pin_does_not_fall_back_to_psk():
+    verifier = LiveKeyVerifier()
+    bssid = "00:11:22:33:44:55"
+    cap = _make_capture(CaptureType.WPS_PIN, bssid, value="abcdefgh")
+    ap = _make_ap(bssid, channel=1)
+    iface = MagicMock()
+    iface.set_channel = AsyncMock()
+    iface.set_fake_mac = AsyncMock()
+    iface.clear_fake_mac = AsyncMock()
+    iface.send_no_wait = AsyncMock()
+
+    class FakeClaim:
+        async def __aenter__(self):
+            return iface
+
+        async def __aexit__(self, *args):
+            pass
+
+    array = MagicMock()
+    array.members = [iface]
+    array.access_points = {bssid: ap}
+    array.select_iface.return_value = iface
+    array.claim.return_value = FakeClaim()
+    array.register_own_mac.return_value = "00:aa:bb:cc:dd:ee"
+    array.unregister_own_mac = MagicMock()
+
+    res = await verifier.verify_credential(cap, array)
+
+    assert res.status == VerifyStatus.ERROR
+    assert "Stored WPS PIN is missing" in res.body
 
 
 async def test_verify_wps_pin_invalid(monkeypatch):

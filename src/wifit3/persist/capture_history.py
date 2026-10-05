@@ -14,9 +14,9 @@ from wifit3.persist.common import (
     AGGREGATED_HC22000_RE,
     LEGACY_CAPTURE_RE,
     WEP_KEY_HEX_RE,
-    WPS_PIN_RE,
     WPS_PSK_RE,
     bssid_to_colon,
+    parse_wps_pin,
 )
 from wifit3.persist.config import Config
 
@@ -54,8 +54,7 @@ def _read_wps_pin(path: Path) -> str | None:
     text = _read_text(path)
     if text is None:
         return None
-    m = WPS_PIN_RE.search(text)
-    return m.group(1).strip() if m else None
+    return parse_wps_pin(text)
 
 
 def _count_hashlines(path: Path, prefix: str) -> int:

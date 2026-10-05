@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Optional
 
 from wifit3.campaigns.auth_assoc import Association, WlanTransport
 from wifit3.campaigns.campaign import Campaign
+from wifit3.campaigns.pin import EMPTY_PIN_LABEL
 from wifit3.campaigns.wps.registrar import PinResult, WpsRegistrar
 from wifit3.crack.wep import rc4_keystream
 from wifit3.dot11 import build_deauth, random_client_mac, str_to_mac
@@ -119,8 +120,13 @@ class LiveKeyVerifier:
                     is_wps_psk = capture.type in (CaptureType.WPS_PIN, CaptureType.WPS_PBC)
                     return await self._verify_wpa_psk(iface, array, ap, psk, our_mac, our_mac_str, is_wps=is_wps_psk)
                 if mode == CaptureType.WPS_PIN:
-                    pin = capture.pin or capture.value or ""
-                    return await self._verify_wps_pin(iface, ap, pin, our_mac)
+                    if capture.pin is None:
+                        return VerifyResult(
+                            VerifyStatus.ERROR,
+                            f"Unable to verify with {ssid}",
+                            "Error: Stored WPS PIN is missing",
+                        )
+                    return await self._verify_wps_pin(iface, ap, capture.pin, our_mac)
                 if mode == CaptureType.WEP:
                     key = capture.value or ""
                     return await self._verify_wep_key(iface, array, ap, key, our_mac)
@@ -243,6 +249,7 @@ class LiveKeyVerifier:
         our_mac: bytes,
     ) -> VerifyResult:
         ssid = ap.ssid or "AP"
+        displayed_pin = pin or EMPTY_PIN_LABEL
         assoc = Association(
             iface,
             ap.bssid,
@@ -263,7 +270,7 @@ class LiveKeyVerifier:
                     f"Unable to verify with {ssid}",
                     f"Error: {err}",
                 )
-            logger.info("[%s] Assoc accepted with WPS IE by %s. Starting WSC session for PIN %s...", ssid, ap.bssid, pin)
+            logger.info("[%s] Assoc accepted with WPS IE by %s. Starting WSC session for PIN %s...", ssid, ap.bssid, displayed_pin)
             reg = WpsRegistrar(transport, str_to_mac(ap.bssid), our_mac,
                                channel=ap.channel, wsc_2_0=ap.wps_version == "2.0")
             outcome = await reg.try_pin(pin)
@@ -272,13 +279,13 @@ class LiveKeyVerifier:
                 return VerifyResult(
                     VerifyStatus.SUCCESS,
                     f"WPS PIN verified for {ssid}",
-                    f'PIN "{pin}" still works',
+                    f'PIN "{displayed_pin}" still works',
                 )
             if outcome.result in (PinResult.FIRST_HALF_WRONG, PinResult.SECOND_HALF_WRONG):
                 return VerifyResult(
                     VerifyStatus.INCORRECT,
                     f"WPS PIN incorrect for {ssid}",
-                    f'PIN "{pin}" is incorrect',
+                    f'PIN "{displayed_pin}" is incorrect',
                 )
             return VerifyResult(
                 VerifyStatus.ERROR,

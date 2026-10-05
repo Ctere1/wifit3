@@ -8,6 +8,7 @@ from wifit3.persist.common import (
     bssid_to_colon,
     bssid_to_dashed,
     parse_hc22000,
+    parse_wps_pin,
     safe_ssid,
 )
 
@@ -57,6 +58,10 @@ def test_payload_regexes():
     m_pin = WPS_PIN_RE.search(wps_text)
     assert m_psk is not None and m_psk.group(1) == "secretpass123"
     assert m_pin is not None and m_pin.group(1) == "12345670"
+
+    empty_pin = WPS_PIN_RE.search("PSK: secretpass123\nPIN: \n")
+    assert empty_pin is not None and empty_pin.group(1) == ""
+    assert parse_wps_pin("PIN: <empty>\n") == ""
 
 
 def test_parse_hc22000_pmkid():

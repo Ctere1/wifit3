@@ -243,6 +243,17 @@ def test_wps_pin_emits_pin_and_psk():
     assert not any(e.kind == CaptureKind.WPS_PBC for e in det.poll(ap))
 
 
+def test_empty_wps_pin_emits_once():
+    det = CaptureEventDetector(granular_eapol=False)
+    ap = _ap_named()
+    ap.wps_pin = ""
+
+    events = [e for e in det.poll(ap) if e.kind == CaptureKind.WPS_PIN]
+
+    assert len(events) == 1 and events[0].value == ""
+    assert list(det.poll(ap)) == []
+
+
 def test_wps_pbc_emits_only_psk_distinct_kind():
     """PBC recovers a passphrase but no PIN → a single, distinctly-kinded event
     so the log can label it 'via PushButton'."""

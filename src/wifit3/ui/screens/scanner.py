@@ -18,6 +18,7 @@ from ..selectable_rich_log import SelectableRichLog
 
 from wifit3.campaigns import treelog
 from wifit3.campaigns.pbc import PbcWatcher, WpsPbcCapture
+from wifit3.campaigns.pin import EMPTY_PIN_LABEL
 from wifit3.campaigns.wps.registrar import PinResult
 from wifit3.persist.config import Config
 from wifit3.models import AccessPoint
@@ -388,7 +389,7 @@ class ScannerView(Screen):
                    f"[bold cyan]{ap_label}[/bold cyan] = {escape(wep_key_ascii(ev.value or ''))}")
         elif ev.kind == CaptureKind.WPS_PIN:
             msg = (f"[bold green]✓ WPS PIN[/bold green] on "
-                   f"[bold cyan]{ap_label}[/bold cyan] = {escape(ev.value or '')}")
+                   f"[bold cyan]{ap_label}[/bold cyan] = {escape(ev.value or EMPTY_PIN_LABEL)}")
         elif ev.kind == CaptureKind.WPS_PSK:
             msg = (f'[bold green]✓ WPS PSK[/bold green] on '
                    f'[bold cyan]{ap_label}[/bold cyan] = "{escape(ev.value or "")}"')
