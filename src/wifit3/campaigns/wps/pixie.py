@@ -104,8 +104,9 @@ def recover_pin(
     mode yields a full PIN but one proved a first half, that half is returned to finish online."""
     oracle = _HalfOracle(bundle)
     partial: Optional[Tuple[str, PixieMode]] = None
+    secret_pairs = tuple(static_secrets)
     for mode in modes:
-        found = _recover_one(oracle, mode, tuple(static_secrets), rtl_window, ecos_max_counter)
+        found = _recover_one(oracle, mode, secret_pairs, rtl_window, ecos_max_counter)
         if found.pin is not None:
             return PixieResult(pin=found.pin, mode=mode, found=True)
         if found.first_half is not None and partial is None:
