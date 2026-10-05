@@ -436,6 +436,24 @@ class WlanSink:
         """A list of discovered Access Points."""
         return list(self.access_points.values())
 
+    def remove_access_point(self, bssid: str) -> Optional[AccessPoint]:
+        """Evict an AP, its clients, and every sibling link that points to it."""
+        key = bssid.lower()
+        ap = self.access_points.pop(key, None)
+        if ap is not None:
+            for sibling_bssid in ap.siblings:
+                sibling = self.access_points.get(sibling_bssid)
+                if sibling is not None and key in sibling.siblings:
+                    sibling.siblings.remove(key)
+            ap.siblings.clear()
+        orphaned_clients = [
+            mac for mac, client in self.clients.items()
+            if client.bssid and client.bssid.lower() == key
+        ]
+        for mac in orphaned_clients:
+            self.clients.pop(mac, None)
+        return ap
+
     def dispatch_rx(self, pkt) -> None:
         """Resolve any next_frame waiters this deduped RX frame matches."""
         with self._waiters_lock:

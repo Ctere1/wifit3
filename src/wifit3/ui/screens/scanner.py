@@ -324,13 +324,7 @@ class ScannerView(Screen):
     def _forget_row(self, bssid: str, *, drop_from_array: bool) -> None:
         """Drop the AP's row and caches; drop_from_array also evicts it and its clients from the registry."""
         if drop_from_array and self.app.array:
-            self.app.array.access_points.pop(bssid, None)
-            orphans = [
-                mac for mac, c in self.app.array.clients.items()
-                if c.bssid == bssid
-            ]
-            for mac in orphans:
-                self.app.array.clients.pop(mac, None)
+            self.app.array.remove_access_point(bssid)
         self.ap_cache.pop(bssid, None)
         self._prev_beacons.pop(bssid, None)
         self._beacon_flash_until.pop(bssid, None)
