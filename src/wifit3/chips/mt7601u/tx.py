@@ -80,8 +80,12 @@ def dma_queue_for_endpoint(endpoint: int) -> int:
             f"endpoint index {endpoint} outside the {TX_QUEUE_COUNT} OUT endpoints")
     return MT_QSEL_MGMT if endpoint == TX_QUEUE_HCCA else MT_QSEL_EDCA
 
-RATE_CONTROLLED = 0xFF
-"""tx.c: an idx of -1 means the firmware picks the rate from the WCID's stored value."""
+RATE_CONTROLLED = -1
+"""tx.c:151 -- `rate->idx < 0` means take the WCID's stored rate instead of a chosen one."""
+
+WCID_STORED_RATE = 0
+"""The `wcid->tx_rate` RATE_CONTROLLED resolves to. The monitor WCID (init.c:589) never
+has one set, and every captured monitor txwi carries rate_ctl 0."""
 
 PROBE_PKTID_BASE = 8
 """tx.c mt7601u_tx_pktid_enc: is_probe adds 8, giving probe frames their own range."""
@@ -116,28 +120,30 @@ def header_pad_len(hdr_len: int) -> int:
 
 
 def build_txwi(*, ack: bool = False, wcid: int = TX_NO_STATION, length: int = 0, rate: int = 0,
-               chip_seq: bool = True, is_probe: bool = False) -> bytes:
+               assign_seq: bool = False, is_probe: bool = False) -> bytes:
     """Build the 20-byte txwi.
 
-    ``rate`` is the MCS index, or ``RATE_CONTROLLED`` to let the firmware choose.
-    ``chip_seq=True`` leaves NSEQ clear, so the hardware stamps the 802.11 sequence
-    number itself -- the kernel clears it for the same reason.
+    ``rate`` is the rate_ctl value, or RATE_CONTROLLED for the WCID's stored rate.
+    ``assign_seq`` sets MT_TXWI_ACK_CTL_NSEQ, which is the bit asking the MAC to stamp
+    the 802.11 sequence number (rt2800.h:3097; tx.c:160 sets it for ASSIGN_SEQ). Clear
+    -- the kernel's own monitor form -- means the MPDU's own seq_ctrl is transmitted, so
+    the caller has to supply it; see MT7601UDriver._stamp_tx_seq.
     """
     if not 0 <= wcid <= 0xFF:
         raise ValueError(f"wcid {wcid} does not fit the u8 slot")
     if not 0 <= length <= C_MAX_BYTE_CNT:
         raise ValueError(f"frame length {length} exceeds the 12-bit byte count")
-    if rate != RATE_CONTROLLED and not 0 <= rate < 8:
-        raise ValueError(f"rate index {rate} outside the 3-bit MCS field")
+    if rate != RATE_CONTROLLED and not 0 <= rate <= MT_TXWI_RATE_MCS:
+        raise ValueError(f"rate_ctl {rate} outside MT_TXWI_RATE_MCS")
 
     flags = 0                                   # tx.c memsets, then sets AMPDU only
-    rate_ctl = rate & MT_TXWI_RATE_MCS
+    rate_ctl = WCID_STORED_RATE if rate == RATE_CONTROLLED else rate
     ack_ctl = 0
     if ack:
         ack_ctl |= MT_TXWI_ACK_CTL_REQ
-    if not chip_seq:
+    if assign_seq:
         ack_ctl |= MT_TXWI_ACK_CTL_NSEQ
-    pkt_id = packet_id(0 if rate == RATE_CONTROLLED else rate, is_probe)
+    pkt_id = packet_id(rate_ctl & 0x7, is_probe)        # tx.c:183
     len_ctl = _field_prep(MT_TXWI_LEN_BYTE_CNT, length) | _field_prep(MT_TXWI_LEN_PKTID, pkt_id)
 
     return (flags.to_bytes(2, "little")
@@ -154,7 +160,7 @@ C_MAX_BYTE_CNT = 0xFFF
 
 
 def build_tx_dma(frame: bytes, *, ack: bool = False, wcid: int = TX_NO_STATION,
-                 rate: int = 0, chip_seq: bool = True,
+                 rate: int = 0, assign_seq: bool = False,
                  queue: int = TX_QUEUE_INJECT) -> bytes:
     """Wrap ``frame`` for transmission: DMA info, txwi, header pad, zero trailer.
 
@@ -170,16 +176,25 @@ def build_tx_dma(frame: bytes, *, ack: bool = False, wcid: int = TX_NO_STATION,
     """
     if not 0 <= queue < TX_QUEUE_COUNT:
         raise ValueError(f"queue {queue} outside the {TX_QUEUE_COUNT} OUT endpoints")
+    if queue == TX_QUEUE_INBAND_CMD:
+        # dma.c:355 q2ep returns qid + 1, so a frame endpoint is never 0. Index 0 is the
+        # MCU's command pipe, and frame bytes on it stop the receive stream.
+        raise ValueError("endpoint 0 is the MCU inband command pipe, not a frame queue")
     if len(frame) < MIN_FRAME_LEN:
         raise ValueError(f"frame of {len(frame)} bytes is too short to be 802.11")
     hdr_len = _hdrlen_from_buf(frame)
     if not hdr_len:
         raise ValueError("frame control names a header longer than the frame")
+    if ack and frame[4] & 0x01:
+        # tx.c:158 sets MT_TXWI_ACK_CTL_REQ only when IEEE80211_TX_CTL_NO_ACK is clear,
+        # which mac80211 sets for a group addr1. Asking a broadcast for an ACK it can
+        # never send makes the MAC wait out its retry budget on every frame.
+        ack = False
     pad = b"\x00" * header_pad_len(hdr_len)
     body = frame[:hdr_len] + pad + frame[hdr_len:]
 
     txwi = build_txwi(ack=ack, wcid=wcid, length=len(frame), rate=rate,
-                      chip_seq=chip_seq)
+                      assign_seq=assign_seq)
     # dma.h: the length field carries round_up(txwi + frame, 4) -- it excludes the
     # DMA info word and the zero trailer, which the capture confirms (LEN 48 on a
     # 56-byte transfer). skb_put_padto then appends 4 more zero bytes.
@@ -193,3 +208,24 @@ def build_tx_dma(frame: bytes, *, ack: bool = False, wcid: int = TX_NO_STATION,
             | _field_prep(MT_TXD_PKT_INFO_QSEL, dma_queue_for_endpoint(queue))
             | MT_TXD_PKT_INFO_80211 | MT_TXD_PKT_INFO_WIV)
     return info.to_bytes(4, "little") + payload + bytes(TRAILER_LEN)
+
+
+def stamp_seq_ctrl(frame: bytearray, seqno: int) -> int:
+    """Stamp an incrementing 802.11 sequence number into seq_ctrl (bytes 22-23),
+    preserving the fragment number; return the advanced seqno.
+
+    build_txwi leaves MT_TXWI_ACK_CTL_NSEQ clear, matching the kernel's monitor form, and
+    that bit is what asks the MAC to assign the number (rt2800.h:3097). Clear, the MPDU's
+    own seq_ctrl goes out -- and the campaigns build it as 0, so without this every frame
+    of a burst shares sequence 0 and a receiver's duplicate filter drops all but the
+    first. The number lives in bits [4:15], so one step is 0x10.
+    """
+    if len(frame) < 24:               # control frames carry no seq_ctrl
+        return seqno
+    frag = frame[22] & 0x0F
+    if frag == 0:
+        seqno = (seqno + 0x10) & 0xFFF0
+    sctl = seqno | frag
+    frame[22] = sctl & 0xFF           # seq_ctrl is __le16
+    frame[23] = (sctl >> 8) & 0xFF
+    return seqno

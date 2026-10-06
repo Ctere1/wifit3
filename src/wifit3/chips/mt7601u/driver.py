@@ -48,6 +48,7 @@ from wifit3.chips.mt7601u.phy import MT7601UPhy
 from wifit3.chips.mt7601u.rx import iter_frames
 from wifit3.chips.mt7601u.transport import MT7601UTransport
 from wifit3.chips.mt7601u.tx import TX_QUEUE_INJECT as DEFAULT_TX_QUEUE
+from wifit3.chips.mt7601u.tx import stamp_seq_ctrl
 from wifit3.chips.mt7601u.tx_status import TxStatus
 from wifit3.chips.mt7601u.tx_ring import TxQueues
 from wifit3.chips.mt7601u.wcid import init_station_memory
@@ -110,6 +111,7 @@ class MT7601UDriver(Driver):
         self.is_warm: bool = False
         self.mac_address: Optional[str] = None
         self._channel: int = self.SUPPORTED_CHANNELS[0]
+        self._tx_seqno: int = 0
         self._rx_callback: Optional[Callable] = None
         self._disconnect_callback: Optional[Callable] = None
         self._reader: Optional[RxReaderThread] = None
@@ -179,13 +181,32 @@ class MT7601UDriver(Driver):
         return await self._bringup(progress_cb)
 
     async def _bringup(self, progress_cb: Optional[ProgressCallback] = None) -> bool:
-        """The kernel's cold-boot register sequence, in its order (init.c:330
-        mt7601u_init_hardware). verify_pcap replays against this."""
+        """init.c:318 mt7601u_init_hardware, including its error path.
+
+        init.c:413-423 unwinds through err_rx -> err_mcu -> err on every failure. Only
+        chip_onoff(false) reaches the wire -- dma_cleanup and mcu_cmd_deinit are host-side
+        URB teardown -- and without it a bring-up that fails midway leaves the chip powered
+        with WLAN_EN set and DMA armed.
+        """
+        try:
+            return await self._init_hardware(progress_cb)
+        except BaseException:
+            if self._reader is not None:                        # init.c:414 dma_cleanup
+                await self._reader.stop()
+                self._reader = None
+            try:
+                self.chip_init.chip_onoff(False)                # init.c:422
+            except Exception as exc:
+                logger.warning("MT7601U: power-down after a failed bring-up failed: %s", exc)
+            raise
+
+    async def _init_hardware(self, progress_cb: Optional[ProgressCallback] = None) -> bool:
+        """The kernel's cold-boot register sequence, in its order (init.c:318
+        mt7601u_init_hardware). verify_pcap replays _bringup against this."""
         def step(fraction: float, message: str) -> None:
             if progress_cb is not None:
                 progress_cb(fraction, message)
 
-        self.is_warm = False
 
         # usb.c:289-306: the ASIC must answer before anything is programmed, and the revision
         # gate is the kernel's own discriminator against the mt76x0u sharing VID:PID 148f:760a.
@@ -209,8 +230,10 @@ class MT7601UDriver(Driver):
         self.chip_init.wait_asic_ready()
 
         step(0.60, "Downloading firmware")
-        load_firmware(self.transport, self.mcu, find_firmware())
-        self.chip_init.poll_dma_idle(100_000)
+        # mcu.c:416 firmware_running is the chip's own cold-vs-warm test: MT_MCU_COM_REG0
+        # reads 1 when a previous session left the MCU up and the download is skipped.
+        self.is_warm = load_firmware(self.transport, self.mcu, find_firmware())
+        self.chip_init.poll_dma_idle(100)                 # init.c:339 mt76_poll_msec
         self.chip_init.wait_asic_ready()
         self.chip_init.reset_csr_bbp()
         self.chip_init.init_usb_dma()
@@ -282,23 +305,41 @@ class MT7601UDriver(Driver):
     # ---- channel ------------------------------------------------------
 
     async def set_channel(self, channel: int, scan: bool = False) -> bool:
+        """Tune to ``channel``. ``scan=True`` is the kernel's MT7601U_STATE_SCANNING.
+
+        main.c:271 and :281 bracket a scan with agc_save/agc_restore, and the flag's
+        transition is the only signal the Driver ABC carries for those two hooks.
+        """
         if channel not in self.SUPPORTED_CHANNELS:
             return False
-        self.phy.set_channel(channel)
+        if scan:
+            self.phy.agc_save()
+        else:
+            self.phy.agc_restore()
+        self.phy.set_channel(channel, scan=scan)
         self._channel = channel
         return True
 
     # ---- teardown -----------------------------------------------------
 
     async def close(self) -> None:
-        if self._reader is not None:
+        """main.c:31 mt7601u_stop then init.c:422 mt7601u_cleanup, in the kernel's order.
+
+        The MAC stops before the reader does: init.c:285-296 drains the RX queue, which only
+        empties while the host is still consuming bulk-IN.
+        """
+        try:
+            self.chip_init.mac_stop_hw()             # init.c:305 mt7601u_mac_stop
+        except Exception as exc:                     # teardown must not mask the real error
+            logger.warning("MT7601U: MAC stop failed: %s", exc)
+        if self._reader is not None:                 # dma.c:541 mt7601u_dma_cleanup
             await self._reader.stop()
             self._reader = None
         if self._tx_queues is not None:
             self._tx_queues.close()
         try:
-            self.chip_init.chip_onoff(False)
-        except Exception as exc:                     # teardown must not mask the real error
+            self.chip_init.chip_onoff(False)         # init.c:312 mt7601u_stop_hardware
+        except Exception as exc:
             logger.warning("MT7601U: WLAN shutdown failed: %s", exc)
         self.transport.release()
         self.transport.dispose()
@@ -335,9 +376,15 @@ class MT7601UDriver(Driver):
         return list(self._tx_queues[DEFAULT_TX_QUEUE].statuses)
 
     def _stamp_tx_seq(self, frame_bytes: bytes) -> bytes:
-        """Unchanged: the txwi leaves NSEQ clear, so the silicon stamps the
-        802.11 sequence number itself (tx.c sets it only for ASSIGN_SEQ)."""
-        return frame_bytes
+        """Software-stamp an incrementing 802.11 sequence number into seq_ctrl.
+
+        MT_TXWI_ACK_CTL_NSEQ is the bit that asks the MAC to assign the number
+        (rt2800.h:3097), tx.c:160 sets it only for ASSIGN_SEQ, and the kernel's monitor
+        descriptor leaves it clear -- so the MPDU's own seq_ctrl is what goes on the air.
+        """
+        buf = bytearray(frame_bytes)
+        self._tx_seqno = stamp_seq_ctrl(buf, self._tx_seqno)
+        return bytes(buf)
 
     async def enter_active_monitor(self, mac: bytes,
                                    bssid: Optional[bytes] = None) -> bytes:

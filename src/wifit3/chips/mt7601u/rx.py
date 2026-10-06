@@ -93,13 +93,13 @@ def next_segment_len(buf: bytes) -> int:
     The DMA header's first 16-bit word is the length the hardware chained, which excludes
     the 8-byte double header; the segment therefore spans MT_DMA_HDRS + that value.
     """
-    if len(buf) < MT_DMA_HDR_LEN + 4 + RXWI_LEN + MT_FCE_INFO_LEN:
+    if len(buf) < MIN_SEGMENT_LEN:                  # dma.c:123
         return 0
     dma_len = int.from_bytes(buf[:2], "little")
     if (not dma_len
             or dma_len + 8 > len(buf)
             or dma_len & 0x3
-            or dma_len < RXWI_LEN + 4):
+            or dma_len < MIN_SEGMENT_LEN):          # dma.c:127
         return 0
     return 8 + dma_len
 
@@ -127,8 +127,10 @@ def decode_segment(seg: bytes, lna_gain: int = 0, rssi_offset: int = 0) -> RxFra
     10 or past the payload, or a length that cannot fit a MAC header. Also drops
     MT_RXINFO_CRCERR, which the C leaves to MT_RX_FILTR_CFG_CRC_ERR in the MAC (main.c:117).
     """
+    # dma.c:102 only dev_err_once()s on a non-pkt urb and hands the segment on regardless.
+    # With no mac80211 downstream to discard it, dropping it here is the equivalent.
     if _field_get(MT_RXD_INFO_TYPE, int.from_bytes(seg[-4:], "little")):
-        return None                                 # dma.c:101 -- a non-pkt urb on the RX path
+        return None
 
     rxwi = seg[MT_DMA_HDR_LEN:MT_DMA_HDR_LEN + RXWI_LEN]
     payload = seg[MT_DMA_HDR_LEN + RXWI_LEN:len(seg) - MT_FCE_INFO_LEN]

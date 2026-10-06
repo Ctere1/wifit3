@@ -5,9 +5,10 @@ Ported from driver_sources/mt7601u-source-v7.2/mt7601u/mac.c:157
 stat_work 10 ms after every completed transmit.
 
 The FIFO is read-pop: every read of MT_TX_STAT_FIFO yields one status word and
-consumes it, so an undrained FIFO eventually stops reporting. Draining it by
-hand shows the silicon emitting exactly one entry per submitted frame and none
-while idle, so the MAC does consume every frame.
+consumes it, so an undrained FIFO eventually stops reporting. On this silicon the
+register behaves as a free-running counter and a VALID word appears on a wrap rather
+than per frame -- 74 injected frames yielded 10 statuses -- so an entry here is not
+evidence that a frame was transmitted. See MT7601U.md.
 
 Upstream does this in a delayed work re-armed while entries remain, because the
 entries arrive asynchronously. Nothing here does: submit() drains inline on the

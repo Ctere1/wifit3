@@ -14,8 +14,11 @@ from wifit3.chips.mt7601u.tx import (
     TRAILER_LEN,
     TX_NO_STATION,
     TX_QUEUE_COUNT,
+    TX_QUEUE_INBAND_CMD,
     TX_QUEUE_INJECT,
     TXWI_LEN,
+    RATE_CONTROLLED,
+    WCID_STORED_RATE,
     build_tx_dma,
     build_txwi,
     dma_queue_for_endpoint,
@@ -141,8 +144,12 @@ class TestAckCtl:
         f = fields(build_txwi(ack=True, wcid=TX_NO_STATION, length=10))
         assert not f["ack_ctl"] & C.MT_TXWI_ACK_CTL_NSEQ
 
-    def test_caller_can_ask_the_chip_to_skip_the_sequence(self) -> None:
-        f = fields(build_txwi(ack=True, wcid=TX_NO_STATION, length=10, chip_seq=False))
+    def test_nseq_is_clear_unless_the_mac_is_asked_to_assign(self) -> None:
+        """rt2800.h:3097 -- NSEQ 1 assigns a hardware sequence number, 0 does not.
+        tx.c:160 sets it only for ASSIGN_SEQ, and the monitor form leaves it clear."""
+        f = fields(build_txwi(ack=True, wcid=TX_NO_STATION, length=10))
+        assert not f["ack_ctl"] & C.MT_TXWI_ACK_CTL_NSEQ
+        f = fields(build_txwi(ack=True, wcid=TX_NO_STATION, length=10, assign_seq=True))
         assert f["ack_ctl"] & C.MT_TXWI_ACK_CTL_NSEQ
 
 
@@ -297,11 +304,13 @@ class TestDmaWrapper:
         info = int.from_bytes(out[:4], "little")
         assert C._field_get(C.MT_TXD_PKT_INFO_QSEL, info) == C.MT_QSEL_EDCA
 
-    def test_the_inband_endpoint_still_reports_the_best_effort_queue(self) -> None:
-        """ep2dmaq has no inband case: endpoint 0 is EDCA like any other but 5."""
-        out = build_tx_dma(CONTROL_FRAME, ack=True, queue=0)
-        info = int.from_bytes(out[:4], "little")
-        assert C._field_get(C.MT_TXD_PKT_INFO_QSEL, info) == C.MT_QSEL_EDCA
+    def test_the_inband_command_endpoint_is_refused(self) -> None:
+        """dma.c:355 q2ep returns qid + 1, so a frame endpoint is never 0. Endpoint 0 is
+        the MCU command pipe, and frame bytes on it stop the receive stream."""
+        with pytest.raises(ValueError, match="inband command pipe"):
+            build_tx_dma(CONTROL_FRAME, ack=True, queue=TX_QUEUE_INBAND_CMD)
+        # ep2dmaq itself still has no inband case: the QSEL derivation is unchanged.
+        assert dma_queue_for_endpoint(TX_QUEUE_INBAND_CMD) == C.MT_QSEL_EDCA
 
     def test_out_of_range_queue_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="queue"):
@@ -390,7 +399,7 @@ class TestEndpointAndQsel:
         """Index 4 in a 2-bit field would be masked off to 0 and the chip would
         be told MGMT. Deriving instead of copying is what keeps this from
         happening for the default index."""
-        for endpoint in range(TX_QUEUE_COUNT):
+        for endpoint in range(TX_QUEUE_INBAND_CMD + 1, TX_QUEUE_COUNT):
             info = int.from_bytes(
                 build_tx_dma(QOS_DATA_FRAME, queue=endpoint)[:4], "little")
             assert C._field_get(C.MT_TXD_PKT_INFO_QSEL, info) == \
@@ -399,3 +408,47 @@ class TestEndpointAndQsel:
     def test_an_endpoint_outside_the_table_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="outside"):
             dma_queue_for_endpoint(TX_QUEUE_COUNT)
+
+class TestAckRequestFollowsTheDestination:
+    """tx.c:158 sets MT_TXWI_ACK_CTL_REQ only when IEEE80211_TX_CTL_NO_ACK is clear,
+    and mac80211 sets that flag for a group addr1."""
+
+    @staticmethod
+    def _ack_ctl(out: bytes) -> int:
+        return out[DMA_INFO_LEN + 4]           # txwi byte 4 is ack_ctl
+
+    def test_a_broadcast_frame_never_requests_an_ack(self) -> None:
+        frame = bytes([0xC0, 0x00, 0x00, 0x00]) + bytes([0xFF] * 6) + bytes(14)
+        out = build_tx_dma(frame, ack=True)
+        assert not self._ack_ctl(out) & C.MT_TXWI_ACK_CTL_REQ
+
+    def test_a_multicast_frame_never_requests_an_ack(self) -> None:
+        frame = bytes([0xC0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x5E, 0x01, 0x02, 0x03]) + bytes(14)
+        out = build_tx_dma(frame, ack=True)
+        assert not self._ack_ctl(out) & C.MT_TXWI_ACK_CTL_REQ
+
+    def test_a_unicast_frame_still_requests_one_when_asked(self) -> None:
+        frame = bytes([0xC0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x5E, 0x01, 0x02, 0x03]) + bytes(14)
+        out = build_tx_dma(frame, ack=True)
+        assert self._ack_ctl(out) & C.MT_TXWI_ACK_CTL_REQ
+
+
+class TestRateControlledSentinel:
+    def test_it_resolves_to_the_wcid_stored_rate(self) -> None:
+        """tx.c:151 takes wcid->tx_rate when rate->idx < 0. Masking 0xff onto the
+        7-bit MCS field instead would emit MCS 127 on the CCK PHY."""
+        f = fields(build_txwi(wcid=TX_NO_STATION, length=10, rate=RATE_CONTROLLED))
+        assert f["rate_ctl"] == WCID_STORED_RATE
+
+    def test_the_packet_id_comes_from_the_resolved_rate(self) -> None:
+        """tx.c:183 encodes rate_ctl & 0x7, not the caller's sentinel."""
+        f = fields(build_txwi(wcid=TX_NO_STATION, length=10, rate=RATE_CONTROLLED))
+        assert C._field_get(C.MT_TXWI_LEN_PKTID, f["len_ctl"]) == packet_id(0, False)
+
+    def test_the_rate_field_is_seven_bits_wide(self) -> None:
+        """MT_TXWI_RATE_MCS is GENMASK(6, 0) (mac.h); the 3-bit limit belongs to the
+        pktid encoder, not to rate_ctl."""
+        f = fields(build_txwi(wcid=TX_NO_STATION, length=10, rate=0x40))
+        assert f["rate_ctl"] == 0x40
+        with pytest.raises(ValueError, match="MT_TXWI_RATE_MCS"):
+            build_txwi(wcid=TX_NO_STATION, length=10, rate=0x80)

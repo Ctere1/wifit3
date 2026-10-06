@@ -143,11 +143,13 @@ def describe(fw: bytes) -> str:
             f"{fw_ver & 0xF:02d} Build: {build_ver:x} Build time: {build_time}")
 
 
-def load_firmware(tp: MT7601UTransport, mcu: MT7601UMcu, image_path: str | Path | None = None) -> None:
+def load_firmware(tp: MT7601UTransport, mcu: MT7601UMcu,
+                  image_path: str | Path | None = None) -> bool:
     """Run mt7601u_load_firmware: preamble, then the image download.
 
     The preamble is not optional -- it configures the FCE DMA engine and the USB
-    bulk pipes the firmware image itself is transferred through.
+    bulk pipes the firmware image itself is transferred through. Returns True when
+    mcu.c:416 firmware_running took the warm shortcut and nothing was downloaded.
     """
     fw = read_firmware(find_firmware(image_path))
     validate(fw)
@@ -160,7 +162,7 @@ def load_firmware(tp: MT7601UTransport, mcu: MT7601UMcu, image_path: str | Path 
         # Already up from a previous session: nothing to download.
         mcu.mcu_running = True
         logger.info("Firmware already running, skipping download")
-        return
+        return True
 
     tp.wr(_REG_94C, 0)
     tp.wr(MT_FCE_PSE_CTRL, 0)
@@ -196,9 +198,9 @@ def load_firmware(tp: MT7601UTransport, mcu: MT7601UMcu, image_path: str | Path 
 
 
 def mcu_init(tp: MT7601UTransport, mcu: MT7601UMcu,
-             image_path: str | Path | None = None) -> None:
-    """mcu.c:504 -- load the image, then mark the MCU running."""
-    load_firmware(tp, mcu, image_path)
+             image_path: str | Path | None = None) -> bool:
+    """mcu.c:504 -- load the image, then mark the MCU running. True when already warm."""
+    return load_firmware(tp, mcu, image_path)
 
 
 def mcu_cmd_init(mcu: MT7601UMcu) -> None:

@@ -36,12 +36,16 @@ from .constants import (
     MT_MAC_SYS_CTRL_RESET_CSR,
     MT_MCU_MEMMAP_BBP,
     MT_MCU_MEMMAP_WLAN,
+    MT_PCNT_0438,
+    MT_PCNT_0A30,
+    MT_PCNT_0A34,
     MT_RX_FILTR_CFG,
     MT_RX_FILTR_CFG_CRC_ERR,
     MT_RX_FILTR_CFG_DUP,
     MT_RX_FILTR_CFG_PHY_ERR,
     MT_RX_FILTR_CFG_RTS,
     MT_RX_FILTR_CFG_VER_ERR,
+    MT_RXQ_STA,
     MT_RX_STA_CNT0,
     MT_RX_STA_CNT1,
     MT_RX_STA_CNT2,
@@ -54,6 +58,8 @@ from .constants import (
     MT_US_CYC_CFG,
     MT_US_CYC_CNT,
     MT_USB_DMA_CFG,
+    MT_USB_DMA_CFG_RX_BUSY,
+    MT_USB_DMA_CFG_TX_BUSY,
     MT_USB_DMA_CFG_RX_BULK_AGG_EN,
     MT_USB_DMA_CFG_RX_BULK_AGG_LMT,
     MT_USB_DMA_CFG_RX_BULK_AGG_TOUT,
@@ -100,11 +106,20 @@ class. A monitor asks for OTHER_BSS, CONTROL and PSPOLL and not FCSFAIL or PLCPF
 clears PROMISC, the main.c:119 control group and PSPOLL, and keeps CRC_ERR, PHY_ERR,
 VER_ERR and DUP. RTS is outside that control group, so it stays set."""
 
+DMA_BUSY = MT_WPDMA_GLO_CFG_TX_DMA_BUSY | MT_WPDMA_GLO_CFG_RX_DMA_BUSY
+"""The pair init.c:234, :250 and :339 all poll for."""
+
+MAC_BUSY = MT_MAC_STATUS_TX | MT_MAC_STATUS_RX
+"""The pair init.c:364 and phy.c:1196 poll for."""
+
 ASIC_READY_ATTEMPTS = 101          # core.c:11 do/while(i--) from i=100 runs 101 times
 """core.c:11."""
 
 XTAL_POLL_ATTEMPTS = 200
 """init.c:46 -- 200 * 20us while waiting for the crystal and PLL."""
+
+QUEUE_DRAIN_PASSES = 200
+"""init.c:272 and init.c:286 -- `i = 200` on both teardown drains."""
 
 
 class BringUpError(RuntimeError):
@@ -246,29 +261,101 @@ class MT7601UInit:
             self.tp.rr(reg)
 
     def mac_start(self) -> None:
-        """init.c:229 mt7601u_mac_start -- enable TX, install the monitor filter, enable RX."""
+        """init.c:230 mt7601u_mac_start -- enable TX, install the monitor filter, enable RX."""
         self.tp.wr(MT_MAC_SYS_CTRL, MT_MAC_SYS_CTRL_ENABLE_TX)
-        self.poll_dma_idle(200_000)
+        if not self.poll(MT_WPDMA_GLO_CFG, DMA_BUSY, 0, 200_000):        # init.c:234
+            raise BringUpError("mac_start", "DMA still busy before the filter write")
         self.tp.wr(MT_RX_FILTR_CFG, RX_FILTER_MONITOR)
         self.tp.wr(MT_MAC_SYS_CTRL, MT_MAC_SYS_CTRL_ENABLE_TX | MT_MAC_SYS_CTRL_ENABLE_RX)
-        self.poll_dma_idle(50)
+        if not self.poll(MT_WPDMA_GLO_CFG, DMA_BUSY, 0, 50):             # init.c:250
+            raise BringUpError("mac_start", "DMA still busy after RX was enabled")
 
-    def poll_dma_idle(self, timeout_us: int) -> None:
-        """mt76_poll on WPDMA_GLO_CFG for both DMA engines to go idle."""
-        busy = MT_WPDMA_GLO_CFG_TX_DMA_BUSY | MT_WPDMA_GLO_CFG_RX_DMA_BUSY
-        for _ in range(max(timeout_us // 1000, 1)):
-            if self.tp.rr(MT_WPDMA_GLO_CFG) & busy == 0:
+    def mac_stop_hw(self) -> None:
+        """init.c:257 mt7601u_mac_stop_hw -- stop beacons, drain both queues, stop the MAC.
+
+        Every poll here only warns in the C: a queue that will not settle does not abort
+        the teardown, because there is nothing left to abort.
+        """
+        beacon_timers = (MT_BEACON_TIME_CFG_TIMER_EN | MT_BEACON_TIME_CFG_SYNC_MODE
+                         | MT_BEACON_TIME_CFG_TBTT_EN | MT_BEACON_TIME_CFG_BEACON_TX)
+        self.tp.rmw(MT_BEACON_TIME_CFG, beacon_timers, 0)                   # init.c:262
+        if not self.poll(MT_USB_DMA_CFG, MT_USB_DMA_CFG_TX_BUSY, 0, 1000):
+            logger.warning("Warning: TX DMA did not stop!")                 # init.c:269
+        self._drain_tx_page_counts()
+        if not self.poll(MT_MAC_STATUS, MT_MAC_STATUS_TX, 0, 1000):
+            logger.warning("Warning: MAC TX did not stop!")                 # init.c:279
+        self.tp.rmw(MT_MAC_SYS_CTRL,
+                    MT_MAC_SYS_CTRL_ENABLE_RX | MT_MAC_SYS_CTRL_ENABLE_TX, 0)
+        self._drain_rx_page_counts()
+        if not self.poll(MT_MAC_STATUS, MT_MAC_STATUS_RX, 0, 1000):
+            logger.warning("Warning: MAC RX did not stop!")                 # init.c:299
+        if not self.poll(MT_USB_DMA_CFG, MT_USB_DMA_CFG_RX_BUSY, 0, 1000):
+            logger.warning("Warning: RX DMA did not stop!")                 # init.c:302
+
+    def _drain_tx_page_counts(self) -> None:
+        """init.c:272-276 -- up to 200 passes while any TxQ page count is still set."""
+        for _ in range(QUEUE_DRAIN_PASSES):
+            if not (self.tp.rr(MT_PCNT_0438) & 0xFFFFFFFF
+                    or self.tp.rr(MT_PCNT_0A30) & 0x000000FF
+                    or self.tp.rr(MT_PCNT_0A34) & 0x00FF00FF):
                 return
-            time.sleep(0.001)
-        raise BringUpError("mac_start", f"DMA still busy after {timeout_us}us")
+            time.sleep(0.010)                                               # msleep(10)
+
+    def _drain_rx_page_counts(self) -> None:
+        """init.c:285-296 -- 200 passes, needing seven consecutive clean reads to finish.
+
+        init.c:293's clean branch takes `continue` without sleeping, so a queue that is
+        already settled exits in seven back-to-back passes, not seven milliseconds.
+        """
+        clean = 0
+        for _ in range(QUEUE_DRAIN_PASSES):
+            if (not self.tp.rr(MT_RXQ_STA) & 0x00FF0000
+                    and not self.tp.rr(MT_PCNT_0A30)
+                    and not self.tp.rr(MT_PCNT_0A34)):
+                if clean > 5:                                               # init.c:292
+                    return
+                clean += 1
+                continue
+            time.sleep(0.001)                                               # msleep(1)
+
+    def poll(self, reg: int, mask: int, val: int, timeout_us: int) -> bool:
+        """core.c:28 mt76_poll -- reads timeout/10 + 1 times, with no added delay.
+
+        core.c:42's udelay(10) has no counterpart here: one vendor-request read is a USB
+        round-trip of at least a USB frame, so the gap the C asks for has already elapsed
+        by the time the next read starts. Sleeping for it would also overshoot -- Windows
+        cannot deliver a 10us time.sleep, and at the 20001 iterations init.c:234 budgets
+        its ~0.5ms floor turns a 200ms poll into ten seconds.
+        """
+        return self._poll(reg, mask, val, timeout_us, 0.0)
+
+    def poll_msec(self, reg: int, mask: int, val: int, timeout_ms: int) -> bool:
+        """core.c:50 mt76_poll_msec -- the same read count, msleep(10) apart.
+
+        10ms is well past the transfer cost, so unlike poll() this delay is real.
+        """
+        return self._poll(reg, mask, val, timeout_ms, 0.010)
+
+    def _poll(self, reg: int, mask: int, val: int, timeout: int, delay: float) -> bool:
+        # core.c:33 divides the timeout by 10 and core.c:43 tests the counter after the
+        # read, so the loop reads timeout/10 + 1 times. The count is the contract: reads
+        # on this chip are not side-effect-free.
+        for _ in range(timeout // 10 + 1):
+            if self.tp.rr(reg) & mask == val:
+                return True
+            if delay:
+                time.sleep(delay)
+        return False
+
+    def poll_dma_idle(self, timeout_ms: int) -> None:
+        """init.c:339 -- both DMA engines idle before the MAC initvals go in."""
+        if not self.poll_msec(MT_WPDMA_GLO_CFG, DMA_BUSY, 0, timeout_ms):
+            raise BringUpError("wpdma", f"DMA still busy after {timeout_ms}ms")
 
     def poll_mac_idle(self) -> None:
-        """init.c:363 -- wait for MAC_STATUS TX and RX to clear before loading BBP."""
-        for _ in range(100):
-            if self.tp.rr(MT_MAC_STATUS) & (MT_MAC_STATUS_TX | MT_MAC_STATUS_RX) == 0:
-                return
-            time.sleep(0.001)
-        raise BringUpError("mac_status", "MAC_STATUS TX|RX never cleared")
+        """init.c:364 -- wait for MAC_STATUS TX and RX to clear before loading BBP."""
+        if not self.poll_msec(MT_MAC_STATUS, MAC_BUSY, 0, 100):
+            raise BringUpError("mac_status", "MAC_STATUS TX|RX never cleared")
 
     def pre_phy_finalise(self) -> None:
         """init.c:375-386 -- the register work that precedes eeprom_init and phy_init."""

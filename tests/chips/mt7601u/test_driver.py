@@ -42,12 +42,12 @@ class TestReceiveArming:
     """
 
     def test_reader_starts_between_mcu_cmd_init_and_write_mac_initvals(self, driver) -> None:
-        src = inspect.getsource(driver._bringup)
+        src = inspect.getsource(driver._init_hardware)
         assert src.index("_start_rx()") > src.index("mcu_cmd_init()")
         assert src.index("_start_rx()") < src.index("write_mac_initvals()")
 
     def test_reader_is_not_started_a_second_time(self, driver) -> None:
-        assert inspect.getsource(driver._bringup).count("_start_rx()") == 1
+        assert inspect.getsource(driver._init_hardware).count("_start_rx()") == 1
 
 
 class TestBringUpOrder:
@@ -60,17 +60,17 @@ class TestBringUpOrder:
     """
 
     def test_the_wlan_clock_is_gated_before_the_firmware_is_pushed(self, driver) -> None:
-        src = inspect.getsource(driver._bringup)
+        src = inspect.getsource(driver._init_hardware)
         assert src.index("chip_onoff(True)") < src.index("load_firmware(")
 
     def test_the_firmware_load_is_waited_for_on_both_sides(self, driver) -> None:
-        src = inspect.getsource(driver._bringup)
+        src = inspect.getsource(driver._init_hardware)
         # usb.c:291 probe gate, then init.c:332 before the image and init.c:347 after it.
         assert src.count("wait_asic_ready()") == 3
         assert src.index("load_firmware(") < src.rindex("wait_asic_ready()")
 
     def test_the_csr_and_bbp_reset_follows_the_firmware_load(self, driver) -> None:
-        src = inspect.getsource(driver._bringup)
+        src = inspect.getsource(driver._init_hardware)
         assert src.index("load_firmware(") < src.index("reset_csr_bbp()")
 
 
@@ -264,9 +264,25 @@ class TestTransmitSubmits:
         asyncio.run(driver.close())
         assert queue.closed
 
-    def test_sequence_stamping_consumes_nothing(self, driver: MT7601UDriver) -> None:
-        frame = b"\x08\x01" + b"\xaa" * 22
-        assert driver._stamp_tx_seq(frame) is frame
+    def test_each_injection_gets_a_fresh_sequence_number(
+            self, driver: MT7601UDriver) -> None:
+        """The txwi leaves NSEQ clear, so the MPDU's own seq_ctrl is transmitted and a
+        burst that reuses 0 is dropped by the receiver's duplicate filter."""
+        frame = bytes([0x08, 0x01]) + bytes(22)
+        seqs = [int.from_bytes(driver._stamp_tx_seq(frame)[22:24], "little") >> 4
+                for _ in range(3)]
+        assert seqs == [1, 2, 3]
+
+    def test_a_fragment_burst_reuses_one_sequence_number(
+            self, driver: MT7601UDriver) -> None:
+        frame = bytes([0x08, 0x01]) + bytes(20) + bytes([0x02, 0x00])
+        first = driver._stamp_tx_seq(frame)[22:24]
+        assert driver._stamp_tx_seq(frame)[22:24] == first
+        assert first[0] & 0x0F == 2                  # the fragment number survives
+
+    def test_a_control_frame_is_left_alone(self, driver: MT7601UDriver) -> None:
+        frame = bytes([0xD4, 0x00]) + bytes(8)       # 10-byte ACK, no seq_ctrl
+        assert driver._stamp_tx_seq(frame) == frame
 
     def test_tx_is_still_coroutine_shaped(self, driver: MT7601UDriver) -> None:
         assert inspect.iscoroutinefunction(driver._inject_frame)
@@ -340,7 +356,7 @@ class TestBringUpFailsLoudlyOnAWedgedChip:
     def test_bring_up_probes_liveness_before_reading_the_eeprom(self, driver) -> None:
         src = inspect.getsource(driver.connect)
         assert src.index("_require_live_chip()") < src.index("await self._bringup(")
-        assert "eeprom_dev.read()" in inspect.getsource(driver._bringup)
+        assert "eeprom_dev.read()" in inspect.getsource(driver._init_hardware)
 
 
 class TestBringUpRefusesAKernelBoundChip:
@@ -560,3 +576,93 @@ class TestSelfMacWriteIsSplitFaithfully:
         driver._write_self_mac(bytes.fromhex("deadbeef0001"))
 
         assert calls[-1] == (MT_MAC_ADDR_DW1 + 2, MT_MAC_ADDR_DW1_U2ME_MASK >> 16)
+
+
+class TestTeardown:
+    """main.c:31 mt7601u_stop then init.c:422 mt7601u_cleanup."""
+
+    @staticmethod
+    def _recorded(driver) -> list[str]:
+        calls: list[str] = []
+        driver.chip_init.mac_stop_hw = lambda: calls.append("mac_stop_hw")
+        driver.chip_init.chip_onoff = lambda enable, reset=False: calls.append(
+            f"chip_onoff({enable})")
+        driver.transport.release = lambda: calls.append("release")
+        driver.transport.dispose = lambda: calls.append("dispose")
+        driver._tx_queues = SimpleNamespace(close=lambda: calls.append("tx_close"))
+
+        async def stop() -> None:
+            calls.append("reader_stop")
+
+        driver._reader = SimpleNamespace(stop=stop)
+        return calls
+
+    def test_close_stops_the_mac_then_powers_the_chip_down(self, driver) -> None:
+        calls = self._recorded(driver)
+        asyncio.run(driver.close())
+        assert calls == ["mac_stop_hw", "reader_stop", "tx_close",
+                         "chip_onoff(False)", "release", "dispose"]
+
+    def test_the_mac_stops_before_the_reader_does(self, driver) -> None:
+        """init.c:285-296 drains the RX queue, which only empties while the host is
+        still consuming bulk-IN."""
+        calls = self._recorded(driver)
+        asyncio.run(driver.close())
+        assert calls.index("mac_stop_hw") < calls.index("reader_stop")
+
+    def test_a_failed_mac_stop_does_not_strand_the_chip_powered(self, driver) -> None:
+        calls = self._recorded(driver)
+
+        def boom() -> None:
+            raise RuntimeError("wedged")
+
+        driver.chip_init.mac_stop_hw = boom
+        asyncio.run(driver.close())
+        assert "chip_onoff(False)" in calls
+        assert calls[-2:] == ["release", "dispose"]
+
+
+class TestFailedBringUpPowersDown:
+    """init.c:413-423 always reaches `err: chip_onoff(false)` on the error path."""
+
+    def test_a_raising_bring_up_powers_the_chip_down(self, driver) -> None:
+        calls: list[str] = []
+        driver.chip_init.chip_onoff = lambda enable, reset=False: calls.append(
+            f"chip_onoff({enable})")
+
+        async def boom(progress_cb=None) -> bool:
+            raise RuntimeError("wedged halfway")
+
+        driver._init_hardware = boom
+        with pytest.raises(RuntimeError, match="wedged halfway"):
+            asyncio.run(driver._bringup())
+        assert calls == ["chip_onoff(False)"]
+
+    def test_the_rx_reader_is_stopped_on_the_error_path(self, driver) -> None:
+        stopped: list[str] = []
+        driver.chip_init.chip_onoff = lambda enable, reset=False: None
+
+        async def stop() -> None:
+            stopped.append("reader_stop")
+
+        async def boom(progress_cb=None) -> bool:
+            driver._reader = SimpleNamespace(stop=stop)
+            raise RuntimeError("wedged after the URBs were armed")
+
+        driver._init_hardware = boom
+        with pytest.raises(RuntimeError):
+            asyncio.run(driver._bringup())
+        assert stopped == ["reader_stop"]
+        assert driver._reader is None
+
+    def test_a_clean_bring_up_does_not_power_the_chip_down(self, driver) -> None:
+        calls: list[str] = []
+        driver.chip_init.chip_onoff = lambda enable, reset=False: calls.append(
+            f"chip_onoff({enable})")
+
+        async def fine(progress_cb=None) -> bool:
+            return True
+
+        driver._init_hardware = fine
+        assert asyncio.run(driver._bringup()) is True
+        assert calls == []

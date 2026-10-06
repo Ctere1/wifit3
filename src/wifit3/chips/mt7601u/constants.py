@@ -199,6 +199,11 @@ MT_PBF_RX_MAX_PCNT = 0x040c                     # [SRC] regs.h:182
 MT_BCN_OFFSET_BASE = 0x041c                     # [SRC] regs.h:184
 MT_RXQ_STA = 0x0430                             # [SRC] regs.h:187
 MT_TXQ_STA = 0x0434                             # [SRC] regs.h:188
+# The two teardown drains at init.c:272-276 and :285-296 read three page-count registers
+# regs.h never names, as bare literals. Named here by address so the citation carries them.
+MT_PCNT_0438 = 0x0438                           # [SRC] init.c:273
+MT_PCNT_0A30 = 0x0a30                           # [SRC] init.c:274
+MT_PCNT_0A34 = 0x0a34                           # [SRC] init.c:275
 MT_RF_CSR_CFG = 0x0500                          # [SRC] regs.h:190
 MT_RF_CSR_CFG_DATA = 0xff                       # [SRC] regs.h:191
 MT_RF_CSR_CFG_REG_ID = 0x3f00                   # [SRC] regs.h:192

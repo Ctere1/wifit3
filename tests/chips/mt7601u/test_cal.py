@@ -12,6 +12,7 @@ from __future__ import annotations
 from wifit3.chips.mt7601u import constants as C
 from wifit3.chips.mt7601u.cal import (
     DPD_TEMP_TOLERANCE,
+    _set_initial_tssi,
     lin2dbd,
     read_bootup_temp,
     rxdc_cal,
@@ -292,3 +293,36 @@ class TestBbpTemp:
         phy.temp_mode = C.MT_TEMP_MODE_HIGH
         bbp_temp(phy, C.MT_TEMP_MODE_LOW)
         assert phy.temp_mode == C.MT_TEMP_MODE_LOW
+
+class TestTssiSignAndClamp:
+    def test_the_four_readings_are_sign_extended(self) -> None:
+        """phy.c:645 declares `s8 res[4]`; bbp_rr hands back an unsigned byte, and the
+        two differ by 256 for any reading at or above 0x80."""
+        phy, _tp, _mcu = make(bbp49=0xFF)
+        tssi_dc_gain_cal(phy)
+        assert phy.ee.tssi_data.init == -1
+        assert phy.ee.tssi_data.init_hvga == -1
+
+    def test_a_low_reading_is_left_alone(self) -> None:
+        phy, _tp, _mcu = make(bbp49=0x2C)
+        tssi_dc_gain_cal(phy)
+        assert phy.ee.tssi_data.init == 0x2C
+
+    def test_the_alc_temp_comp_saturates_rather_than_wrapping(self) -> None:
+        """phy.c:638 pushes init_offset through int_to_s6. Unclamped, -186 masks to
+        +6 and pushes the compensation the wrong way by 38 steps."""
+        phy, tp, _mcu = make()
+        phy.ee.tssi_data.slope = 255
+        phy.ee.tssi_data.offset = [0, 0, 0]
+        _set_initial_tssi(phy, 3156, 0)
+        written = tp.writes_to(C.MT_TX_ALC_CFG_1)[-1] & C.MT_TX_ALC_CFG_1_TEMP_COMP
+        assert written == 0x20
+
+    def test_a_zero_slope_still_writes_the_kernels_ten(self) -> None:
+        """Both of derv's dongles read slope 0, which is why the clamp never showed."""
+        phy, tp, _mcu = make()
+        phy.ee.tssi_data.slope = 0
+        phy.ee.tssi_data.offset = [0, 0, 0]
+        _set_initial_tssi(phy, 3156, 0)
+        written = tp.writes_to(C.MT_TX_ALC_CFG_1)[-1] & C.MT_TX_ALC_CFG_1_TEMP_COMP
+        assert written == 10

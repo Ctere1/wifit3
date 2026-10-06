@@ -7,6 +7,7 @@ two ways. The register sequence is pinned with a recording transport.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from wifit3.chips.mt7601u.init import (
     BEACON_OFFSETS,
     MT_USB_AGGR_SIZE_LIMIT,
     MT_USB_AGGR_TIMEOUT,
+    QUEUE_DRAIN_PASSES,
     RX_FILTER_MONITOR,
     USB_DMA_AGG_EN_MAX_PACKET,
     BringUpError,
@@ -431,3 +433,96 @@ class TestAggregateConstants:
         val = tp.writes_to(C.MT_USB_DMA_CFG)[0]
         assert C._field_get(C.MT_USB_DMA_CFG_RX_BULK_AGG_TOUT, val) == MT_USB_AGGR_TIMEOUT
         assert C._field_get(C.MT_USB_DMA_CFG_RX_BULK_AGG_LMT, val) == MT_USB_AGGR_SIZE_LIMIT
+
+
+class TestPollReadCounts:
+    """core.c:33 is `timeout /= 10` and core.c:43 tests after the read: timeout/10 + 1."""
+
+    @staticmethod
+    def _never_settles() -> tuple[MT7601UInit, list[int]]:
+        init_, tp = make_init()
+        reads: list[int] = []
+
+        def rr(offset: int) -> int:
+            reads.append(offset)
+            return 0xFFFFFFFF
+
+        tp.rr = rr
+        return init_, reads
+
+    def test_microsecond_poll_reads_six_times_for_fifty(self) -> None:
+        init_, reads = self._never_settles()
+        assert init_.poll(C.MT_MAC_STATUS, 0xF, 0, 50) is False
+        assert len(reads) == 6              # init.c:250 mt76_poll(..., 50)
+
+    def test_millisecond_poll_reads_eleven_times_for_a_hundred(self) -> None:
+        init_, reads = self._never_settles()
+        assert init_.poll_msec(C.MT_MAC_STATUS, 0xF, 0, 100) is False
+        assert len(reads) == 11             # init.c:364 mt76_poll_msec(..., 100)
+
+    def test_mac_idle_wait_raises_after_the_c_s_eleven_reads(self) -> None:
+        init_, reads = self._never_settles()
+        with pytest.raises(BringUpError, match="MAC_STATUS"):
+            init_.poll_mac_idle()
+        assert len(reads) == 11
+
+    def test_a_settled_register_is_read_once(self) -> None:
+        init_, tp = make_init()
+        tp.ops.clear()
+        assert init_.poll(C.MT_MAC_STATUS, 0xF, 0, 200_000) is True
+        assert len([op for op in tp.ops if op[0] == "read"]) == 1
+
+
+class TestMacStopHw:
+    """init.c:257 mt7601u_mac_stop_hw."""
+
+    def test_it_clears_the_beacon_timers_first(self) -> None:
+        init_, tp = make_init()
+        tp.ops.clear()
+        init_.mac_stop_hw()
+        first_write = next(op for op in tp.ops if op[0] == "wr")
+        assert first_write[1] == C.MT_BEACON_TIME_CFG
+        timers = (C.MT_BEACON_TIME_CFG_TIMER_EN | C.MT_BEACON_TIME_CFG_SYNC_MODE
+                  | C.MT_BEACON_TIME_CFG_TBTT_EN | C.MT_BEACON_TIME_CFG_BEACON_TX)
+        assert first_write[2] & timers == 0
+
+    def test_tx_and_rx_are_disabled_together(self) -> None:
+        init_, tp = make_init()
+        tp.ops.clear()
+        init_.mac_stop_hw()
+        vals = tp.writes_to(C.MT_MAC_SYS_CTRL)
+        assert vals == [0]                  # init.c:283 clears both enables in one write
+
+    def test_the_rx_drain_needs_seven_clean_passes(self) -> None:
+        """init.c:292's `ok++ > 5` tests the pre-increment value, so the seventh pass exits."""
+        init_, tp = make_init()
+        reads: list[int] = []
+        tp.rr = lambda offset: (reads.append(offset), 0)[1]
+        init_._drain_rx_page_counts()
+        assert reads.count(C.MT_RXQ_STA) == 7
+
+    def test_the_tx_drain_stops_on_the_first_clean_pass(self) -> None:
+        init_, tp = make_init()
+        reads: list[int] = []
+        tp.rr = lambda offset: (reads.append(offset), 0)[1]
+        init_._drain_tx_page_counts()
+        assert reads == [C.MT_PCNT_0438, C.MT_PCNT_0A30, C.MT_PCNT_0A34]
+
+    def test_a_queue_that_never_drains_gives_up_after_two_hundred_passes(
+            self, monkeypatch) -> None:
+        monkeypatch.setattr(time, "sleep", lambda _s: None)
+        init_, tp = make_init()
+        reads: list[int] = []
+        tp.rr = lambda offset: (reads.append(offset), 0xFFFFFFFF)[1]
+        init_._drain_tx_page_counts()
+        # init.c:273's first read short-circuits the other two when it is non-zero.
+        assert reads == [C.MT_PCNT_0438] * QUEUE_DRAIN_PASSES
+
+    def test_a_stuck_poll_warns_rather_than_raising(self, caplog, monkeypatch) -> None:
+        monkeypatch.setattr(time, "sleep", lambda _s: None)
+        init_, tp = make_init()
+        tp.rr = lambda offset: 0xFFFFFFFF
+        with caplog.at_level(logging.WARNING):
+            init_.mac_stop_hw()             # init.c only dev_warn()s on every poll here
+        assert "TX DMA did not stop" in caplog.text
+        assert "RX DMA did not stop" in caplog.text

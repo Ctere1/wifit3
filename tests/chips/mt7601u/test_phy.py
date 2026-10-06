@@ -327,3 +327,80 @@ class TestTxPwrCfg:
         make_phy(tp, ee).set_channel(1)
         cfg = [v for o, v in writes(tp) if o == C.MT_TX_PWR_CFG_0]
         assert cfg == [0x05050505]
+
+class TestAgc:
+    """phy.c:948-968. The MAC initvals leave BBP 66 at a literal that is not what
+    either dongle's LNA gain computes to."""
+
+    def test_the_default_is_derived_from_the_eeprom_lna_gain(self) -> None:
+        ee = MT7601UEepromParams()
+        ee.lna_gain = 8
+        assert make_phy(FakeTransport(), ee).agc_default() == 0x34
+        ee.lna_gain = 0
+        assert make_phy(FakeTransport(), ee).agc_default() == 0x24
+
+    def test_the_default_wraps_as_a_u8(self) -> None:
+        """phy.c:948 returns u8, so a large LNA gain wraps rather than overflowing."""
+        ee = MT7601UEepromParams()
+        ee.lna_gain = 127
+        assert make_phy(FakeTransport(), ee).agc_default() == ((127 - 8) * 2 + 0x34) & 0xFF
+
+    @staticmethod
+    def _bbp66_writes(tp: FakeTransport) -> list[int]:
+        return [C._field_get(C.MT_BBP_CSR_CFG_VAL, v)
+                for o, v in data_writes(tp) if o == C.MT_BBP_CSR_CFG
+                and C._field_get(C.MT_BBP_CSR_CFG_REG_NUM, v) == 66]
+
+    def test_a_scan_hop_resets_the_agc(self) -> None:
+        ee = MT7601UEepromParams()
+        ee.lna_gain = 8
+        tp = FakeTransport()
+        make_phy(tp, ee).set_channel(1, scan=True)
+        assert self._bbp66_writes(tp) == [0x34]
+
+    def test_a_deliberate_tune_leaves_the_agc_alone(self) -> None:
+        """phy.c:434 gates the reset on MT7601U_STATE_SCANNING."""
+        tp = FakeTransport()
+        make_phy(tp).set_channel(1)
+        assert self._bbp66_writes(tp) == []
+
+    def test_save_is_idempotent_across_hops(self) -> None:
+        """main.c:271 saves once at sw_scan_start, not per channel."""
+        phy = make_phy(FakeTransport(bbp_csr=C._field_prep(C.MT_BBP_CSR_CFG_VAL, 0x14)))
+        phy.agc_save()
+        first = phy.agc_saved
+        phy.agc_save()
+        assert phy.agc_saved == first
+
+    def test_restore_puts_the_pre_scan_value_back_once(self) -> None:
+        tp = FakeTransport()
+        phy = make_phy(tp)
+        phy.agc_saved = 0x14
+        phy.agc_restore()
+        assert self._bbp66_writes(tp) == [0x14]
+        phy.agc_restore()
+        assert self._bbp66_writes(tp) == [0x14]      # nothing left to restore
+
+
+class TestTxPwrSaturation:
+    def test_an_out_of_range_rate_saturates_rather_than_wrapping(self) -> None:
+        """phy.c:429 packs through int_to_s6 (eeprom.h:133), which clamps at -0x20.
+        A bare 6-bit mask turns -34 into +30 and inverts the power setting."""
+        ee = MT7601UEepromParams()
+        for rate in ee.power_rate_table.cck + ee.power_rate_table.ofdm:
+            rate.bw20 = -34
+        ee.real_cck_bw20 = [-34, -34]
+        tp = FakeTransport()
+        make_phy(tp, ee).set_channel(1)
+        cfg = [v for o, v in writes(tp) if o == C.MT_TX_PWR_CFG_0]
+        assert cfg == [0x20202020]
+
+    def test_an_in_range_rate_is_unchanged(self) -> None:
+        ee = MT7601UEepromParams()
+        for rate in ee.power_rate_table.cck + ee.power_rate_table.ofdm:
+            rate.bw20 = -2
+        ee.real_cck_bw20 = [-2, -2]
+        tp = FakeTransport()
+        make_phy(tp, ee).set_channel(1)
+        cfg = [v for o, v in writes(tp) if o == C.MT_TX_PWR_CFG_0]
+        assert cfg == [0x3E3E3E3E]

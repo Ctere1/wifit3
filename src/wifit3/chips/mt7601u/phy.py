@@ -40,6 +40,7 @@ from .constants import (
     _field_get,
     _field_prep,
 )
+from .eeprom import int_to_s6
 from .mcu import MT7601UMcu, McuTimeout
 from .transport import MT7601UTransport
 
@@ -94,6 +95,7 @@ class MT7601UPhy:
         self.bw = MT_BW_20
         self.chan_ext_below = False
         self.rf_pa_mode = [0, 0]
+        self.agc_saved: int | None = None
         # Calibration state; phy.c keeps these on the device struct.
         self.raw_temp = 0
         self.curr_temp = 0
@@ -251,7 +253,8 @@ class MT7601UPhy:
     # The channel tune (phy.c __mt7601u_phy_set_channel)
     # ------------------------------------------------------------------
 
-    def set_channel(self, channel: int, bw: int = MT_BW_20) -> None:
+    def set_channel(self, channel: int, bw: int = MT_BW_20,
+                    scan: bool = False) -> None:
         """Tune to ``channel``. ``bw`` is MT_BW_20 or MT_BW_40.
 
         40 MHz carries the same code path with the HT40 channel arithmetic from
@@ -297,12 +300,42 @@ class MT7601UPhy:
         self.apply_ch14_fixup(channel)
         self._pack_tx_pwr_cfg()
 
+        if scan:                                    # phy.c:434
+            self.agc_reset()
+
+    def agc_default(self) -> int:
+        """phy.c:948 -- the AGC floor the EEPROM's LNA gain implies, as a u8."""
+        return ((self.ee.lna_gain - 8) * 2 + 0x34) & 0xFF
+
+    def agc_reset(self) -> None:
+        """phy.c:953 -- put BBP 66 back to that default.
+
+        The MAC initvals leave BBP 66 at a literal (initvals.h:34), which is not the
+        value either dongle's LNA gain computes to.
+        """
+        self.bbp_wr(66, self.agc_default())
+
+    def agc_save(self) -> None:
+        """phy.c:960 -- remember BBP 66 before a scan moves it.
+
+        main.c:271 runs this once at sw_scan_start, so a second hop must not
+        overwrite the saved value with the scanning one.
+        """
+        if self.agc_saved is None:
+            self.agc_saved = self.bbp_rr(66)
+
+    def agc_restore(self) -> None:
+        """phy.c:965 -- put the pre-scan value back (main.c:281)."""
+        if self.agc_saved is not None:
+            self.bbp_wr(66, self.agc_saved)
+            self.agc_saved = None
+
     def _pack_tx_pwr_cfg(self) -> None:
         """phy.c:432 -- the four per-rate s6 values into one register."""
         t = self.ee.power_rate_table
         self.tp.wr(MT_TX_PWR_CFG_0,
-                   ((_s6(t.ofdm[1].bw20) << 24) | (_s6(t.ofdm[0].bw20) << 16)
-                    | (_s6(t.cck[1].bw20) << 8) | _s6(t.cck[0].bw20)) & 0xFFFFFFFF)
+                   ((int_to_s6(t.ofdm[1].bw20) << 24) | (int_to_s6(t.ofdm[0].bw20) << 16)
+                    | (int_to_s6(t.cck[1].bw20) << 8) | int_to_s6(t.cck[0].bw20)) & 0xFFFFFFFF)
 
     # ------------------------------------------------------------------
     # PHY init (phy.c mt7601u_phy_init)
@@ -330,8 +363,3 @@ class MT7601UPhy:
         self.mcu.write_reg_pairs(0, rf_vga)
         from .cal import init_cal
         init_cal(self)
-
-
-def _s6(val: int) -> int:
-    """The 6-bit s6 encoding the per-rate power fields expect."""
-    return val & 0x3F

@@ -33,6 +33,7 @@ from .constants import (
     MT_TX_ALC_CFG_1,
     MT_TX_ALC_CFG_1_TEMP_COMP,
 )
+from .eeprom import _s8, int_to_s6
 from .initvals_phy import bbp_mode_table
 from .phy import MT7601UPhy
 
@@ -180,7 +181,7 @@ def tssi_dc_gain_cal(phy: MT7601UPhy) -> None:
                 break
 
         phy.bbp_wr(47, 0x40)
-        res.append(phy.bbp_rr(49))
+        res.append(_s8(phy.bbp_rr(49)))        # phy.c:645 declares s8 res[4]
 
     tssi_init_db = lin2dbd((res[1] - res[0]) & 0xFFFF)
     tssi_init_hvga_db = lin2dbd(((res[3] - res[2]) * 4) & 0xFFFF)
@@ -208,7 +209,7 @@ def _set_initial_tssi(phy: MT7601UPhy, tssi_db: int, tssi_hvga_db: int) -> None:
     data = phy.ee.tssi_data
     init_offset = -((tssi_db * data.slope + data.offset[1]) // 4096) + 10
     phy.tp.rmw(MT_TX_ALC_CFG_1, MT_TX_ALC_CFG_1_TEMP_COMP,
-               init_offset & MT_TX_ALC_CFG_1_TEMP_COMP)
+               int_to_s6(init_offset) & MT_TX_ALC_CFG_1_TEMP_COMP)
 
 
 def bbp_temp(phy: MT7601UPhy, mode: int) -> None:
