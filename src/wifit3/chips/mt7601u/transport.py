@@ -83,8 +83,11 @@ class MT7601UTransport:
         """Detach the kernel driver (Linux), then claim interface 0. Idempotent."""
         if self._interface_claimed:
             return
-        if self.dev.is_kernel_driver_active(0):
-            self.dev.detach_kernel_driver(0)
+        try:
+            if self.dev.is_kernel_driver_active(0):
+                self.dev.detach_kernel_driver(0)
+        except (NotImplementedError, usb.core.USBError) as e:
+            logger.debug("kernel-driver detach skipped: %s", e)
         usb.util.claim_interface(self.dev, 0)
         self._interface_claimed = True
 

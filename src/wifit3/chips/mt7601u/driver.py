@@ -137,7 +137,11 @@ class MT7601UDriver(Driver):
         watching an empty scan. Refuse while the interface is still bound, when the cause is
         still knowable.
         """
-        if not self.transport.dev.is_kernel_driver_active(0):
+        try:
+            bound = self.transport.dev.is_kernel_driver_active(0)
+        except (NotImplementedError, usb.core.USBError):
+            return          # libusb only answers this on Linux; elsewhere there is no module
+        if not bound:
             return
         raise BringUpError(
             "MT7601U: the kernel mt7601u driver is bound to this dongle. It initialises the "
