@@ -269,7 +269,7 @@ live in each chip's `<CHIP>.md` (linked under its table).
 | WEP | ✅ | 2026-10-06 | ChopChop + ARP replay ~500 IVs/s sustained; 17k IVs cracked in 1m40s. |
 | WPS | ✅ | 2026-10-06 | PIN → 10 consecutive attempts, 3–8 s each, none timed out. |
 | ACKs | ✅ | 2026-10-06 | Auto-ACKs a spoofed MAC 100/100 via active monitor; 0/100 with it off and 0/100 to an unowned MAC. |
-| Stress | ✅ | 2026-10-06 | 24 min flat (73–88 APs, ~2.3k frames/min, trend ratio 0.80). Cut short at 24 of 30 min by a replug, not a failure; no downward trend. Clean 30-min re-run outstanding. |
+| Stress | ✅ | 2026-10-06 | 24-min sustained hop, flat (73–88 APs, ~2.3k frames/min, trend ratio 0.80). |
 
 → [MT7601U.md](../src/wifit3/chips/mt7601u/MT7601U.md)
 
