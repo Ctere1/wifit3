@@ -245,6 +245,10 @@ class WlanArray:
             return aps
         return [ap for ap in aps if ap.bssid not in self._evil_twin_bssids]
 
+    def remove_access_point(self, bssid: str) -> Optional[AccessPoint]:
+        """Evict an AP and its dependent registry state."""
+        return self._sink.remove_access_point(bssid)
+
     def register_forged_mac(self, mac) -> None:
         self._sink.register_forged_mac(mac)
 

@@ -51,6 +51,24 @@ def test_static_secret_mode_recovers_pin_from_candidate_pair():
     assert result.mode is PixieMode.STATIC_SECRET
 
 
+def test_static_secret_generator_survives_earlier_modes():
+    pin = "01030365"
+    e_s1 = bytes.fromhex("12" * wc.SECRET_NONCE_LEN)
+    e_s2 = bytes.fromhex("34" * wc.SECRET_NONCE_LEN)
+    bundle = _bundle(pin, e_s1, e_s2)
+    candidates = ((e_s1, e_s2) for _ in range(1))
+
+    result = recover_pin(
+        bundle,
+        modes=(PixieMode.NULL_SECRET, PixieMode.STATIC_SECRET),
+        static_secrets=candidates,
+    )
+
+    assert result.found is True
+    assert result.pin == pin
+    assert result.mode is PixieMode.STATIC_SECRET
+
+
 def test_recover_pin_returns_not_found_when_secret_does_not_match():
     bundle = _bundle("12345670", bytes.fromhex("12" * wc.SECRET_NONCE_LEN), bytes.fromhex("34" * wc.SECRET_NONCE_LEN))
 

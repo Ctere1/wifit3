@@ -21,6 +21,7 @@ from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Select
 
+from wifit3.campaigns.pin import EMPTY_PIN_LABEL
 from wifit3.models import CaptureType, PersistedCapture
 from wifit3.ui.vault.tools_ui import UI_TOOLS
 
@@ -181,7 +182,7 @@ class _CapturePanel(VerticalGroup):
         if self._title in ("WPS PSKs", "WPA PSKs"):
             kg.mount(_row("PSK", cap.value or "", "copy-psk", target_type=CaptureType.WPA_PSK))
         elif self._title == "WPS PINs":
-            kg.mount(_row("WPS PIN", cap.pin or "", "copy-pin", target_type=CaptureType.WPS_PIN))
+            kg.mount(_row("WPS PIN", cap.pin or EMPTY_PIN_LABEL, "copy-pin", target_type=CaptureType.WPS_PIN))
         elif self._title == "WEP KEYs":
             kg.mount(_row("WEP Hex Key", cap.value or "", "copy-hex", target_type=CaptureType.WEP))
             ascii_val = _hex_to_ascii(cap.value)
@@ -377,7 +378,7 @@ class VaultItemView(Vertical):
             "HASHCAT": [c for c in captures if c.path.endswith(".hc22000")],
             "WPA PSKs": [c for c in captures if c.type == CaptureType.WPA_PSK and c.value],
             "WPS PSKs": [c for c in captures if c.type in (CaptureType.WPS_PIN, CaptureType.WPS_PBC) and c.value],
-            "WPS PINs": [c for c in captures if c.type == CaptureType.WPS_PIN and c.pin],
+            "WPS PINs": [c for c in captures if c.type == CaptureType.WPS_PIN and c.pin is not None],
             "WEP KEYs": [c for c in captures if c.type == CaptureType.WEP],
         }
         cracked_key = next((c.value for c in captures if c.type == CaptureType.WPA_PSK and c.value), None)

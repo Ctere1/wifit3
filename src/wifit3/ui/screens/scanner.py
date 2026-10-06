@@ -18,6 +18,7 @@ from ..selectable_rich_log import SelectableRichLog
 
 from wifit3.campaigns import treelog
 from wifit3.campaigns.pbc import PbcWatcher, WpsPbcCapture
+from wifit3.campaigns.pin import EMPTY_PIN_LABEL
 from wifit3.campaigns.wps.registrar import PinResult
 from wifit3.persist.config import Config
 from wifit3.models import AccessPoint
@@ -324,13 +325,7 @@ class ScannerView(Screen):
     def _forget_row(self, bssid: str, *, drop_from_array: bool) -> None:
         """Drop the AP's row and caches; drop_from_array also evicts it and its clients from the registry."""
         if drop_from_array and self.app.array:
-            self.app.array.access_points.pop(bssid, None)
-            orphans = [
-                mac for mac, c in self.app.array.clients.items()
-                if c.bssid == bssid
-            ]
-            for mac in orphans:
-                self.app.array.clients.pop(mac, None)
+            self.app.array.remove_access_point(bssid)
         self.ap_cache.pop(bssid, None)
         self._prev_beacons.pop(bssid, None)
         self._beacon_flash_until.pop(bssid, None)
@@ -394,7 +389,7 @@ class ScannerView(Screen):
                    f"[bold cyan]{ap_label}[/bold cyan] = {escape(wep_key_ascii(ev.value or ''))}")
         elif ev.kind == CaptureKind.WPS_PIN:
             msg = (f"[bold green]✓ WPS PIN[/bold green] on "
-                   f"[bold cyan]{ap_label}[/bold cyan] = {escape(ev.value or '')}")
+                   f"[bold cyan]{ap_label}[/bold cyan] = {escape(ev.value or EMPTY_PIN_LABEL)}")
         elif ev.kind == CaptureKind.WPS_PSK:
             msg = (f'[bold green]✓ WPS PSK[/bold green] on '
                    f'[bold cyan]{ap_label}[/bold cyan] = "{escape(ev.value or "")}"')

@@ -226,7 +226,8 @@ class CaptureEventDetector:
             (CaptureKind.WPS_PSK, ap.wps_pin_psk),
             (CaptureKind.WPS_PBC, ap.wps_pbc_psk),
         ):
-            if value and (ap.bssid, kind) not in self._creds_announced:
+            is_recovered = value is not None if kind == CaptureKind.WPS_PIN else bool(value)
+            if is_recovered and (ap.bssid, kind) not in self._creds_announced:
                 self._creds_announced.add((ap.bssid, kind))
                 yield CaptureEvent(
                     kind=kind, bssid=ap.bssid, ssid=ap.ssid, value=value,

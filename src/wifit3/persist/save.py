@@ -14,11 +14,11 @@ from wifit3.models import AccessPoint
 from wifit3.persist.common import (
     LEGACY_CAPTURE_RE,
     WEP_KEY_HEX_RE,
-    WPS_PIN_RE,
     WPS_PSK_RE,
     bssid_to_colon,
     bssid_to_dashed,
     parse_hc22000,
+    parse_wps_pin,
     safe_ssid,
 )
 from wifit3.persist.config import Config
@@ -355,7 +355,7 @@ def save_wep_key(ap: AccessPoint, key: bytes) -> Optional[SaveResult]:
 def save_wps_pin(ap: AccessPoint, pin: str, psk: str) -> Optional[SaveResult]:
     """Persist a WPS-PIN credential. Dedupes by (PIN, PSK) for this BSSID."""
     captures_dir = Path(Config.captures_dir)
-    if not pin or not psk:
+    if not psk:
         return None
     for p in _existing(captures_dir, ap.bssid, "_wps_pin.txt"):
         try:
@@ -363,9 +363,8 @@ def save_wps_pin(ap: AccessPoint, pin: str, psk: str) -> Optional[SaveResult]:
         except OSError:
             continue
         psk_match = WPS_PSK_RE.search(text)
-        pin_match = WPS_PIN_RE.search(text)
         if (psk_match and psk_match.group(1).strip() == psk
-                and pin_match and pin_match.group(1).strip() == pin):
+                and parse_wps_pin(text) == pin):
             return SaveResult(path=p, was_new=False)
 
     captures_dir.mkdir(parents=True, exist_ok=True)

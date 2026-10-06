@@ -260,9 +260,30 @@ class TestSaveWpsPin:
         second = save_wps_pin(ap, "12345670", "newpsk")
         assert second is not None and second.was_new is True
 
-    def test_empty_inputs_return_none(self, tmp_path):
+    def test_empty_pin_is_written_and_deduplicated(self, tmp_path):
         ap = AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="HomeNet")
-        assert save_wps_pin(ap, "", "psk") is None
+        first = save_wps_pin(ap, "", "psk")
+        assert first is not None and first.was_new is True
+        assert "PIN: \n" in first.path.read_text(encoding="utf-8")
+        again = save_wps_pin(ap, "", "psk")
+        assert again is not None and again.was_new is False
+        assert again.path == first.path
+
+    def test_legacy_empty_pin_label_is_deduplicated(self, tmp_path):
+        ap = AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="HomeNet")
+        existing = tmp_path / "HomeNet_aa-bb-cc-dd-ee-ff_1700000000_wps_pin.txt"
+        existing.write_text(
+            "SSID: HomeNet\nBSSID: aa:bb:cc:dd:ee:ff\nPSK: psk\nPIN: <empty>\n",
+            encoding="utf-8",
+        )
+
+        result = save_wps_pin(ap, "", "psk")
+
+        assert result is not None and result.was_new is False
+        assert result.path == existing
+
+    def test_empty_psk_returns_none(self, tmp_path):
+        ap = AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="HomeNet")
         assert save_wps_pin(ap, "12345670", "") is None
 
 
@@ -449,5 +470,3 @@ class TestHcFiles:
         split_p = tmp_path / "HomeNet_aa-bb-cc-dd-ee-ff_1700000002_pmkid.hc22000"
         split_p.write_text("WPA*01*4444*aabbccddeeff*112233445566*5465737431***\n", encoding="utf-8")
         assert hc.find_existing_pmkid("4444") == split_p
-
-

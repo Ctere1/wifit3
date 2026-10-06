@@ -54,12 +54,22 @@ class _FakeArray:
     def __init__(self, aps: List[AccessPoint], supported: List[int]):
         self.access_points = {ap.bssid: ap for ap in aps}
         self.clients = {}
+        self.removed_access_points = []
         self.forged_macs = set()
         self.supported_channels = supported
         self.members = [_FakeIface(supported)] if supported else []
 
     def get_access_points(self, include_eviltwin: bool = True) -> List[AccessPoint]:
         return list(self.access_points.values())
+
+    def remove_access_point(self, bssid: str) -> Optional[AccessPoint]:
+        self.removed_access_points.append(bssid)
+        ap = self.access_points.pop(bssid, None)
+        self.clients = {
+            mac: client for mac, client in self.clients.items()
+            if client.bssid != bssid
+        }
+        return ap
 
     async def start_hopping(self, channels=None, interval=0.25) -> None:
         pass
@@ -208,11 +218,11 @@ async def test_forget_row_evicts_ap_and_its_clients():
         # Evict ap1 from scanner and array
         scanner._forget_row(ap1.bssid, drop_from_array=True)
 
+        assert fake_array.removed_access_points == [ap1.bssid]
         assert ap1.bssid not in fake_array.access_points
         assert ap1.bssid not in scanner.ap_cache
         # c1 was associated with ap1, must be pruned
         assert c1.mac not in fake_array.clients
         # c2 was associated with ap2, must NOT be pruned
         assert c2.mac in fake_array.clients
-
 
