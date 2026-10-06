@@ -243,17 +243,17 @@ class TestStatusPump:
         assert tp.status_fifo == []          # read-pop, not a peek
         assert q.statuses[0].success is True
 
-    def test_a_successful_status_releases_its_ring_entry(self) -> None:
-        """The kernel frees a URB on completion and reports status separately;
-        here the two fold together, so a popped status retires one slot."""
+    def test_a_status_is_recorded_without_driving_slot_accounting(self) -> None:
+        """submit already released the slot on the synchronous write; a popped status
+        feeds tx_statuses() and must not retire anything on top of that."""
         q, tp = make_queue()
         tp.status_fifo = [STATUS_SUCCESS]
         q.submit(FRAME)
         assert q.used == 0
+        assert q.statuses[0].success is True
 
-    def test_a_failed_status_releases_its_ring_entry_too(self) -> None:
-        """Retiring on completion is not conditional on success. A frame the
-        silicon dropped still finished, so its slot must not leak."""
+    def test_a_failed_status_does_not_leak_the_slot_either(self) -> None:
+        """A frame the silicon dropped still finished, so its slot must not leak."""
         q, tp = make_queue()
         tp.status_fifo = [STATUS_FAIL]
         q.submit(FRAME)

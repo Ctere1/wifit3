@@ -50,6 +50,7 @@
 | Chipset | Bands | Cards (Make + Model) |
 |---|---|---|
 | Atheros AR9271 | 2.4 GHz | ALFA AWUS036**NHA**, TP-Link TL-WN722N V1 |
+| MediaTek MT7601U | 2.4 GHz | Generic unbranded "nano" dongles |
 | MediaTek MT7610U | 2.4 / 5 GHz | ALFA AWUS036**ACHM**, Panda PAU0B |
 | MediaTek MT7612U | 2.4 / 5 GHz | ALFA AWUS036**ACM** |
 | MediaTek MT7921AU | 2.4 / 5 GHz | ALFA AWUS036**AXML**, Panda PAU0F |
