@@ -47,12 +47,6 @@ class WlanFrameParser:
     SUBTYPE_AUTH = 0x0b
     SUBTYPE_DEAUTH = 0x0c
 
-    DATA_SUBTYPES = frozenset((0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                               0x08, 0x09, 0x0a, 0x0b, 0x0c))
-    """The 12 values IEEE 802.11 Table 9-1 assigns to a data frame. Anything else is
-    noise: the MT7601U air capture surfaced subtypes 1, 2, 5, 6, 7 and 9, all PHY-error
-    frames whose address bytes are random, each minting a phantom client out of addr2."""
-
     @classmethod
     def parse_80211_frame(cls, frame: bytes, rssi: int) -> Optional["Packet"]:
         """Generic 802.11 frame parser: a raw MPDU + RSSI -> the matching typed
@@ -183,11 +177,6 @@ class WlanFrameParser:
         header_len = 24
         if subtype & 0x08:            # QoS Control field present (+2)
             header_len += 2
-        # Data subtypes are a fixed set (IEEE 802.11 Table 9-1); the values seen on the
-        # MT7601U air capture outside it (1,2,5,6,7,9) come from PHY-noise frames whose
-        # address bytes are random, and each one mints a phantom client out of addr2.
-        if subtype not in cls.DATA_SUBTYPES:
-            return None
         if fc1 & 0x80:                # HT Control field present, Order bit (+4)
             header_len += 4
 
