@@ -45,9 +45,9 @@ WCID_COUNT = 128
 """mt7601u.h:105 N_WCIDS. Each station slot occupies two words in the WCID table."""
 
 WCID_ADDR_INVALID = 0xFFFFFFFF
-"""init.c:433 -- the "no address" marker for an unused WCID slot."""
+"""init.c:182 -- the "no address" marker for an unused WCID slot."""
 WCID_ADDR_MASK = 0x00FFFFFF
-"""init.c:433 -- the address bytes inside that word."""
+"""init.c:183 -- the address bytes inside that word."""
 
 
 def init_wcid_mem(mcu: MT7601UMcu) -> None:
@@ -121,7 +121,7 @@ def wcid_setup(transport: MT7601UTransport, idx: int, vif_idx: int,
     """mac.c:355 mt7601u_mac_wcid_setup -- write the slot's BSS index, then its address.
 
     ``mac=None`` writes the all-zero address, which is how sta_remove releases a slot
-    (main.c:251) -- it does not restore the 0xFFFFFFFF marker from init.c:433.
+    (main.c:251) -- it does not restore the 0xFFFFFFFF marker from init.c:182.
     """
     # mac.c:359-360 uses FIELD_PREP, so the index is shifted into the field, not masked
     # against it -- MT_WCID_ATTR_BSS_IDX is GENMASK(6, 4), and ANDing the index straight

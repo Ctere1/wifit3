@@ -116,7 +116,7 @@ ASIC_READY_ATTEMPTS = 101          # core.c:11 do/while(i--) from i=100 runs 101
 """core.c:11."""
 
 XTAL_POLL_ATTEMPTS = 200
-"""init.c:46 -- 200 * 20us while waiting for the crystal and PLL."""
+"""init.c:42 -- the loop count; init.c:48 is the 20us it waits between reads."""
 
 QUEUE_DRAIN_PASSES = 200
 """init.c:272 and init.c:286 -- `i = 200` on both teardown drains."""
@@ -162,7 +162,7 @@ class MT7601UInit:
     def set_wlan_state(self, val: int, enable: bool) -> None:
         """init.c:16 -- gate the WLAN clock and wait for the crystal and PLL to lock.
 
-        WLAN_CLK stays on even when disabling: init.c:19 notes that turning it off
+        WLAN_CLK stays on even when disabling: init.c:20-24 notes that turning it off
         stops the chip answering on the probe path.
         """
         if enable:
@@ -358,7 +358,7 @@ class MT7601UInit:
             raise BringUpError("mac_status", "MAC_STATUS TX|RX never cleared")
 
     def pre_phy_finalise(self) -> None:
-        """init.c:375-386 -- the register work that precedes eeprom_init and phy_init."""
+        """init.c:383-394 -- the register work that precedes eeprom_init and phy_init."""
         # init.c:375 uses mt76_clear, which always writes the register. rmc would
         # skip it when the bits already read zero, and the kernel's capture shows
         # the write happening, so write it unconditionally.
@@ -372,7 +372,7 @@ class MT7601UInit:
                    | _field_prep(MT_TXOP_EXT_CCA_DLY, 0x58))
 
     def finalise(self) -> None:
-        """init.c:404-411 -- the post-PHY steps, in the kernel's order."""
+        """init.c:404-409 -- the post-PHY steps, in the kernel's order."""
         self.phy.set_rx_path(0)
         self.phy.set_tx_dac(0)
         # init.c:407-408 is MAC then BBP; phy.c:401-402 orders the same pair the

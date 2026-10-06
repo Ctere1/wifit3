@@ -2,36 +2,42 @@
 
 Every other porting stage replays a kernel capture and asserts an op-for-op match.
 TX had no such gate, which is why the live-TX defect survived: the descriptor was
-only ever compared by eye against capture-6.
+only ever compared by eye.
 
-This parses capture-6's recorded bulk OUT -- the kernel's own injected deauth --
-rebuilds the same frame through the port's tx.py, and asserts the two descriptors are
-identical field for field. It also decodes both against struct mt76_txwi, so a
-divergence names the field that diverged instead of dumping 32 bytes of hex.
+This pulls the kernel's own injected frames off the TX bulk-OUT endpoint in a recorded
+pcapng, rebuilds the same descriptor through the port's tx.py, and asserts the two match
+field for field. It decodes both against struct mt76_txwi, so a divergence names the
+field that diverged instead of dumping 32 bytes of hex.
 
-The capture is truncated at 32 bytes per record (usbmon prints no continuation line),
-so only the DMA info word and the full 20-byte txwi are recorded. That is exactly the
-descriptor header, and it is the part that was never machine-checked.
+Only the 4-byte DMA info word and the 20-byte txwi are compared. That is the descriptor
+header, and it is the part that was never machine-checked; the frame body after it is
+whatever the kernel chose to send and is not the port's to reproduce.
 
-Run: uv run python scripts/chips/mt7601u/verify_tx.py
+Run: uv run python scripts/chips/mt7601u/verify_tx.py [<pcap>]
 """
 from __future__ import annotations
 
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "scripts" / "porting"))
 
+import mt76_verify_replay as E
 from wifit3.chips.mt7601u import constants as C
 from wifit3.chips.mt7601u.tx import TX_NO_STATION, TX_QUEUE_INJECT, build_tx_dma
 
-CAPTURE = REPO / "driver_captures_mt7601u" / "capture-6-kernel-tx" / "bulk_out.txt"
-FRAME = bytes.fromhex("00000000000000000000000000000000")  # placeholder, see below
+DEFAULT_CAP = (REPO / "driver_captures" / "captures_mt7601u_superwang" / "capture-1.pcap")
 
-USB_LINE = re.compile(r"Bo:\d+:\d+:(\d+) -115 (\d+) = ([0-9a-f ]+)")
+EP_TX_OUT = 0x07
+"""out_eps[4], the endpoint tx.c lands an injected frame on (dma.c:355 q2ep)."""
+
+_URB_SUBMIT, _XFER_BULK = 0x53, 0x03
+"""An OUT transfer carries its payload on the submit record."""
+DESCRIPTOR_LEN = 4 + 20
+"""The DMA info word plus sizeof(struct mt76_txwi)."""
 
 
 @dataclass(frozen=True)
@@ -46,34 +52,25 @@ class Descriptor:
         return self.info.to_bytes(4, "little").hex()
 
 
-def parse_capture(path: Path) -> list[tuple[int, bytes]]:
-    """Return every bulk OUT record as (endpoint, recorded_bytes)."""
-    out = []
-    for line in path.read_text().splitlines():
-        m = USB_LINE.search(line)
-        if not m:
-            continue
-        endpoint = int(m.group(1))
-        length = int(m.group(2))
-        payload = bytes.fromhex(m.group(3).replace(" ", ""))
-        if length and len(payload) >= length:
-            payload = payload[:length]
-        out.append((endpoint, payload))
-    return out
-
-
 def kernel_descriptors(path: Path) -> list[Descriptor]:
-    """Every captured TX descriptor, i.e. bulk OUTs on the TX endpoint."""
+    """Every TX descriptor the kernel put on EP 0x07 in ``path``."""
     found = []
-    for endpoint, payload in parse_capture(path):
-        if len(payload) < 24 or endpoint == 8:      # 8 is the MCU inband endpoint
+    for pkt in E.parse_pcapng(str(path)):
+        if not (len(pkt) > E.UsbmonOff.EP
+                and pkt[E.UsbmonOff.TYPE] == _URB_SUBMIT
+                and pkt[E.UsbmonOff.XFER] == _XFER_BULK
+                and pkt[E.UsbmonOff.EP] == EP_TX_OUT):
             continue
+        cap = pkt[E.UsbmonOff.LEN_CAP]
+        if cap < DESCRIPTOR_LEN:
+            continue
+        payload = bytes(pkt[E.UsbmonOff.DATA:E.UsbmonOff.DATA + cap])
         info = int.from_bytes(payload[:4], "little")
         # A TX descriptor carries MT_TXD_PKT_INFO_80211; filter on it rather than
         # trusting the endpoint index, so a stray record cannot become the oracle.
         if not info & C.MT_TXD_PKT_INFO_80211:
             continue
-        found.append(Descriptor(info=info, txwi=payload[4:24]))
+        found.append(Descriptor(info=info, txwi=payload[4:DESCRIPTOR_LEN]))
     return found
 
 
@@ -105,14 +102,16 @@ def decode_info(info: int) -> dict[str, int]:
 
 
 def main() -> int:
-    if not CAPTURE.exists():
-        print(f"capture missing: {CAPTURE}")
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    capture = Path(args[0]) if args else DEFAULT_CAP
+    if not capture.exists():
+        print(f"capture missing: {capture}")
         print("re-capture with the kernel driver; see capture_mt7601u.py")
         return 2
 
-    recorded = kernel_descriptors(CAPTURE)
+    recorded = kernel_descriptors(capture)
     if not recorded:
-        print(f"no TX descriptors in {CAPTURE}")
+        print(f"no TX descriptors on EP {EP_TX_OUT:#04x} in {capture}")
         return 2
 
     counts: dict[tuple[str, str], int] = {}
@@ -120,7 +119,8 @@ def main() -> int:
         counts[(d.info_le_hex, d.txwi.hex())] = counts.get(
             (d.info_le_hex, d.txwi.hex()), 0) + 1
 
-    print(f"capture-6: {len(recorded)} TX descriptors in {len(counts)} variant(s)")
+    print(f"{capture.name}: {len(recorded)} TX descriptors "
+          f"in {len(counts)} variant(s)")
     variants = []
     for (info_hex, txwi_hex), n in counts.items():
         info = int.from_bytes(bytes.fromhex(info_hex), "little")
@@ -134,9 +134,8 @@ def main() -> int:
               f"pktid={fields['len_ctl'] >> 12} rate_ctl={fields['rate_ctl']:#06x}")
 
     # aireplay-ng's injection test sends probe requests on a WCID the kernel
-    # actually allocated, with the chip stamping the sequence number. The
-    # broadcast deauths go out on the monitor WCID. This port only ever builds the
-    # monitor form, so it cannot produce the variant that reaches the air.
+    # actually allocated. The broadcast deauths go out on the monitor WCID. This port
+    # only ever builds the monitor form, so it cannot produce the other variant.
     wcids = {decode_txwi(t)["wcid"] for _, _, t in variants}
     print(f"\nWCIDs present in the reference capture: {sorted(wcids)}")
 

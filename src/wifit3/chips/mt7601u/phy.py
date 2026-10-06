@@ -232,7 +232,7 @@ class MT7601UPhy:
         self.bbp_rmc(3, 0x20, 0x20 if below else 0)
 
     def apply_ch14_fixup(self, hw_chan: int) -> None:
-        """phy.c:285 -- narrow-bandwidth boost on channel 14 only."""
+        """phy.c:322 -- narrow-bandwidth boost on channel 14 only."""
         if hw_chan != CH14_HW_CHAN or self.bw != MT_BW_20:
             self.bbp_rmw(4, 0x20, 0)
             self.bbp_wr(BBP_CH14_REG, 0xFF)

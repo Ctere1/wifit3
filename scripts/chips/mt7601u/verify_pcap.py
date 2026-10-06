@@ -37,6 +37,13 @@ from wifit3.chips.mt7601u.constants import (
     MT_RX_FILTR_CFG_VER_ERR,
 )
 from wifit3.chips.mt7601u.driver import MT7601UDriver
+from wifit3.chips.mt7601u.eeprom import MT7601UEepromParams
+from wifit3.chips.mt7601u.rx import (
+    MT_FCE_INFO_LEN,
+    iter_frames,
+    next_segment_len,
+)
+from wifit3.dot11.parser import WlanFrameParser
 
 DEFAULT_CAP = "driver_captures/captures_mt7601u_superwang/capture-1.pcap"
 
@@ -47,6 +54,8 @@ _DESC_CONFIGURATION, _DESC_ENDPOINT = 0x02, 0x05
 
 # in_eps[MT_EP_IN_PKT_RX] (usb.c:243): the ambient 802.11 stream, not a port output.
 EP_PKT_RX_IN = 0x84
+_USBMON_LEN = 32
+"""mon_bin's urb length field. It exceeds LEN_CAP where usbmon truncated."""
 
 
 # init.c:238-244, the managed-STA default the kernel programs during bring-up. Built from
@@ -192,6 +201,70 @@ def driver_on(dev, endpoints: list[_Endpoint]) -> MT7601UDriver:
     return drv
 
 
+def rx_decode_phase(pkts: list[bytes], ee) -> None:
+    """METHODOLOGY step 3: run the captured RX stream through the real decode path.
+
+    drop_rx_stream throws these buffers away before the cursor walk, because what was in
+    the air is unreproducible. The bytes are still the only real RX descriptors available
+    offline, so decode them here, outside the cursor, where a surprise cannot derail it.
+    Addresses and SSIDs are deliberately not printed: counts answer the question, and
+    nothing real belongs in this output.
+
+    usbmon truncates part of the bulk-IN stream -- its record length field exceeds the
+    bytes it captured -- so those records are counted and skipped rather than decoded. A
+    truncated buffer is not a decode failure; the C rejects it on the same test
+    (dma.c:125 `dma_len + MT_DMA_HDRS > data_len`).
+    """
+    whole, truncated = [], 0
+    for pkt in pkts:
+        if not (len(pkt) > E.UsbmonOff.EP
+                and pkt[E.UsbmonOff.TYPE] == _URB_COMPLETE
+                and pkt[E.UsbmonOff.XFER] == _XFER_BULK
+                and pkt[E.UsbmonOff.EP] == EP_PKT_RX_IN
+                and pkt[E.UsbmonOff.LEN_CAP] > 0):
+            continue
+        cap = pkt[E.UsbmonOff.LEN_CAP]
+        if int.from_bytes(pkt[_USBMON_LEN:_USBMON_LEN + 4], "little") != cap:
+            truncated += 1
+            continue
+        whole.append(bytes(pkt[E.UsbmonOff.DATA:E.UsbmonOff.DATA + cap]))
+    if not whole:
+        print(f"RX DECODE: no untruncated EP {EP_PKT_RX_IN:#04x} payloads "
+              f"({truncated} truncated by usbmon)")
+        return
+
+    parser = WlanFrameParser()
+    segments = decoded = parsed = unconsumed = 0
+    fc_bytes: set[int] = set()
+    offset = ee.rssi_offset[0] if ee.rssi_offset else 0
+    for buf in whole:
+        walked = 0
+        while True:
+            seg_len = next_segment_len(buf[walked:])
+            if not seg_len:
+                break
+            segments += 1
+            walked += seg_len
+        # MT_FCE_INFO_LEN of zero padding rides after the last segment (dma.h:15).
+        if len(buf) - walked > MT_FCE_INFO_LEN:
+            unconsumed += 1
+        for frame in iter_frames(buf, ee.lna_gain, offset):
+            decoded += 1
+            fc_bytes.add(frame.frame[0])
+            if parser.parse_80211_frame(frame.frame, frame.rssi) is not None:
+                parsed += 1
+
+    total = sum(len(b) for b in whole)
+    print(f"RX DECODE: {len(whole)} whole bulk-IN buffers ({total} bytes), "
+          f"{truncated} truncated by usbmon and skipped")
+    print(f"           {segments} chained segments -> {decoded} frames decoded, "
+          f"{parsed} parsed; {len(fc_bytes)} distinct frame-control bytes")
+    if segments and decoded < segments:
+        print(f"           {segments - decoded} segments dropped by the rxwi gates")
+    if unconsumed:
+        print(f"           {unconsumed} buffers left more than a trailer unconsumed")
+
+
 async def _run_bringup(walk: E.Walk, endpoints: list[_Endpoint], state: dict) -> None:
     async def go(dev):
         state["drv"] = drv = driver_on(dev, endpoints)
@@ -227,6 +300,7 @@ def _run(cap: str | None) -> int:
         print(f"FAIL: {path} carries no usable interface descriptor "
               f"({len(endpoints)} endpoints found, assign_pipes needs 2 IN + 6 OUT)")
         return 1
+    rx_pkts = pkts
     pkts = drop_rx_stream(pkts)
     dev = E.busiest_vendor_devnum(pkts)
     if dev is None:
@@ -254,6 +328,12 @@ def _run(cap: str | None) -> int:
     # _bringup ends at the first channel tune, so the rest of the capture is the
     # operational phase (hopping, TX) that this walk is not scoped to drive.
     remaining = len(capture.ops) - walk.i
+    print()
+    drv = state.get("drv")
+    try:
+        rx_decode_phase(rx_pkts, drv.ee if drv is not None else MT7601UEepromParams())
+    except Exception as e:  # noqa: BLE001
+        print(f"RX DECODE: raised {type(e).__name__}: {e}")
     print()
     print(f"OVERALL: _bringup replayed against the capture with no divergence; "
           f"{remaining} operational-phase ops after it are out of its scope.")
