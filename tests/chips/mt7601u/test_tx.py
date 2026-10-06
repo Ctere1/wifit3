@@ -409,22 +409,28 @@ class TestEndpointAndQsel:
         with pytest.raises(ValueError, match="outside"):
             dma_queue_for_endpoint(TX_QUEUE_COUNT)
 
-class TestAckRequestFollowsTheDestination:
-    """tx.c:158 sets MT_TXWI_ACK_CTL_REQ only when IEEE80211_TX_CTL_NO_ACK is clear,
-    and mac80211 sets that flag for a group addr1."""
+class TestAckRequestIsAlwaysOn:
+    """mt76x0u:999 and mt76x2u:684 request the ACK on every injected frame on this same
+    txwi, group addr1 included. The MAC's ACK-based retry is injection's only retransmission."""
 
     @staticmethod
     def _ack_ctl(out: bytes) -> int:
         return out[DMA_INFO_LEN + 4]           # txwi byte 4 is ack_ctl
 
-    def test_a_broadcast_frame_never_requests_an_ack(self) -> None:
+    def test_a_broadcast_frame_still_requests_an_ack(self) -> None:
         frame = bytes([0xC0, 0x00, 0x00, 0x00]) + bytes([0xFF] * 6) + bytes(14)
         out = build_tx_dma(frame, ack=True)
-        assert not self._ack_ctl(out) & C.MT_TXWI_ACK_CTL_REQ
+        assert self._ack_ctl(out) & C.MT_TXWI_ACK_CTL_REQ
 
-    def test_a_multicast_frame_never_requests_an_ack(self) -> None:
+    def test_a_multicast_frame_still_requests_an_ack(self) -> None:
         frame = bytes([0xC0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x5E, 0x01, 0x02, 0x03]) + bytes(14)
         out = build_tx_dma(frame, ack=True)
+        assert self._ack_ctl(out) & C.MT_TXWI_ACK_CTL_REQ
+
+    def test_the_replay_form_clears_it(self) -> None:
+        """ack=False is replay-only: it is how verify_tx byte-matches the aireplay capture."""
+        frame = bytes([0xC0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x5E, 0x01, 0x02, 0x03]) + bytes(14)
+        out = build_tx_dma(frame, ack=False)
         assert not self._ack_ctl(out) & C.MT_TXWI_ACK_CTL_REQ
 
     def test_a_unicast_frame_still_requests_one_when_asked(self) -> None:

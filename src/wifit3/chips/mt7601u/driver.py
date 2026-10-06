@@ -389,19 +389,11 @@ class MT7601UDriver(Driver):
     async def _inject_frame(self, frame_bytes: bytes) -> bool:
         """Send one frame. False means the chip did not accept it.
 
-        ``ack`` follows the RX-stream ACK tally: request the link-layer ACK exactly when
-        ``enable_rx_acks`` has armed something to watch for it. Disarmed, this is capture-6's
-        kernel injection descriptor (``ack_ctl=0x00``) -- measured on the dongle, ack=True
-        reported SUCCESS 0/15 while ack=False reported 15/15 from the same frame and queue,
-        because an injected frame's Addr2 is spoofed so the silicon cannot match the ACK it
-        waits for. Armed, ``MT_TXWI_ACK_CTL_REQ`` is the whole point: without it the recipient
-        is never asked to ACK, no ACK reaches the RX stream, and the tally ``deauth_client``
-        reports as ``total_acked`` -- the thing ``send_until_ack`` retries on -- could never be
-        anything but zero. The SUCCESS bit reads 0 in that mode and nothing here reads it; the
-        tally counts ACK frames off the air instead.
+        Always requests the link-layer ACK, so the MAC retransmits until the peer ACKs --
+        that HW retry is the only retransmission injection gets. Matches `mt76x0u`:999 and
+        `mt76x2u`:684 on the identical txwi; NO_ACK is gutted fleet-wide as a footgun.
         """
-        return self._tx_queues[DEFAULT_TX_QUEUE].submit(frame_bytes,
-                                                       ack=self._ack_detect_on)
+        return self._tx_queues[DEFAULT_TX_QUEUE].submit(frame_bytes, ack=True)
 
     def tx_statuses(self) -> list[TxStatus]:
         """Per-frame transmit results the MAC has reported since the last reset.

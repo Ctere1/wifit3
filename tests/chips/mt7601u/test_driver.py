@@ -183,30 +183,26 @@ class RecordingQueue:
 
 
 class TestInjectionDescriptorMatchesTheKernel:
-    """The injected txwi must be byte-identical to the kernel's injection descriptor.
+    """The injected txwi, against the kernel's recorded injection descriptor.
 
-    capture-6 records the kernel's frame: txwi ``0000000000ff1a10...`` -- flags 0,
-    rate_ctl 0, ack_ctl 0, wcid 0xff, BYTE_CNT 26, PKTID 1, on queue AC_BE. The only
-    field this port ever got wrong is ack_ctl. Setting MT_TXWI_ACK_CTL_REQ makes the
-    silicon ask the recipient for a link-layer ACK to a frame whose Addr2 is spoofed,
-    so the ACK is addressed to an address this radio never sent from and can never be
-    matched: measured on the dongle, ack=True reported SUCCESS=0 for 15/15 frames and
-    ack=False for 15/15, same frame, same queue. A permanently-false SUCCESS also pins
-    the ``total_acked`` tally that ``deauth_client`` reports and ``send_until_ack``
-    retries on to zero, which is how this stayed invisible for so long.
+    capture-6 records ``0000000000ff1a10...`` -- flags 0, rate_ctl 0, ack_ctl 0, wcid 0xff,
+    BYTE_CNT 26, PKTID 1, on queue AC_BE. Its ack_ctl 0 is aireplay-ng's radiotap NOACK and
+    not a kernel constraint, so production keeps REQ set the way mt76x0u and mt76x2u do on
+    this identical txwi, and ``ack=False`` is the replay form the byte-match tests build.
+    Active monitor is what lets the chip match an ACK to a spoofed Addr2.
     """
 
-    def test_the_queue_is_asked_for_no_link_layer_ack(self, driver: MT7601UDriver) -> None:
+    def test_the_queue_is_asked_for_a_link_layer_ack(self, driver: MT7601UDriver) -> None:
+        """The MAC's ACK-based retry is the only retransmission injection gets."""
         queue = RecordingQueues()
         driver._tx_queues = queue
         asyncio.run(driver.inject_frame(FRAME))
-        assert queue.ack_flags == [False]
+        assert queue.ack_flags == [True]
 
-    def test_arming_the_ack_tally_makes_the_chip_request_one(
+    def test_the_ack_request_does_not_depend_on_the_tally(
             self, driver: MT7601UDriver) -> None:
-        """deauth_client reports total_acked from the RX stream, and a recipient
-        only sends an ACK if the descriptor asked for one. Leaving it disarmed
-        there would pin that tally to zero for the whole campaign."""
+        """Coupling REQ to enable_rx_acks left every send_no_wait frame -- all of WEP --
+        without a hardware retry, while send_until_ack campaigns got one."""
         queue = RecordingQueues()
         driver._tx_queues = queue
 
@@ -217,7 +213,7 @@ class TestInjectionDescriptorMatchesTheKernel:
             await driver.inject_frame(FRAME)
 
         asyncio.run(run())
-        assert queue.ack_flags == [True, False]
+        assert queue.ack_flags == [True, True]
 
     def test_the_built_descriptor_is_the_kernel_reference_byte_for_byte(self) -> None:
         # capture-6's frame is a 26-byte broadcast deauth, so BYTE_CNT is 26 (0x1a)

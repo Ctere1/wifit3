@@ -185,11 +185,8 @@ def build_tx_dma(frame: bytes, *, ack: bool = False, wcid: int = TX_NO_STATION,
     hdr_len = _hdrlen_from_buf(frame)
     if not hdr_len:
         raise ValueError("frame control names a header longer than the frame")
-    if ack and frame[4] & 0x01:
-        # tx.c:158 sets MT_TXWI_ACK_CTL_REQ only when IEEE80211_TX_CTL_NO_ACK is clear,
-        # which mac80211 sets for a group addr1. Asking a broadcast for an ACK it can
-        # never send makes the MAC wait out its retry budget on every frame.
-        ack = False
+    # No group-addr veto: mt76x0u and mt76x2u request the ACK on every injected frame,
+    # broadcast included. ack=False is replay-only, for byte-matching the aireplay capture.
     pad = b"\x00" * header_pad_len(hdr_len)
     body = frame[:hdr_len] + pad + frame[hdr_len:]
 
