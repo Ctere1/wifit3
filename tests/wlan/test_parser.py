@@ -1,5 +1,6 @@
 import struct
 
+import pytest
 
 from wifit3.dot11.parser import WlanFrameParser
 from wifit3.dot11.packet import (
@@ -589,6 +590,29 @@ def test_beacon_with_control_char_ssid_returns_none():
     assert WlanFrameParser.parse_80211_frame(frame, -50) is None
 
 
+@pytest.mark.parametrize("bad", [
+    "\x7f",              # DEL, one byte >= 0x20
+    "\u009b",            # C1 CSI, UTF-8 C2 9B: every byte >= 0x20
+    "\u0085",            # C1 NEL, UTF-8 C2 85
+    "\u202e",            # RLO, UTF-8 E2 80 AE: reverses the rest of the row
+    "\t",                # TAB was whitelisted by the old byte guard
+    "\n",                # LF likewise
+])
+def test_ssid_rejected_when_any_codepoint_is_unprintable(bad):
+    """The guard checks DECODED codepoints. A byte test cannot see a C1 control, DEL
+    or a bidi override, because each byte of their UTF-8 encoding is >= 0x20."""
+    assert WlanFrameParser.parse_80211_frame(_build_beacon(ssid="Net" + bad), -50) is None
+
+
+@pytest.mark.parametrize("good", ["Ooredoo-322961", "Café", "\u0639\u0631\u0628\u064a", "WiFi\U0001f4f6"])
+def test_ssid_keeps_printable_unicode(good):
+    """Non-ASCII is legitimate, especially on Arabic-market kit: the guard must reject
+    only unprintable codepoints, never valid text."""
+    parsed = WlanFrameParser.parse_80211_frame(_build_beacon(ssid=good), -50)
+    assert parsed is not None
+    assert parsed.ssid == good
+
+
 def test_wep_data_with_ht_control_offset():
     """The Order/HT-Control bit (FC1 0x80) adds a 4-byte HT Control field to the
     MAC header. The WEP IV must be read past it (offset 28, not 24)."""
@@ -639,3 +663,24 @@ def test_probe_req_is_typed():
     p = WlanFrameParser.parse_80211_frame(frame, -50)
     assert isinstance(p, ProbeReqPacket)
     assert p.ssid == "Foo"
+
+
+# ---- Data subtypes ----------------------------------------------------------
+
+def _build_data_frame(subtype: int) -> bytes:
+    """A FromDS data frame with the given subtype and a 24-byte body."""
+    fc0 = 0x08 | (subtype << 4)        # type=data, subtype
+    fc1 = 0x02                          # from_ds
+    return (bytes([fc0, fc1]) + b"\x00\x00"
+            + b"\xde\xad\xbe\xef\x00\x01"      # addr1: dest
+            + b"\x12\x34\x56\x78\x9a\xbc"      # addr2: transmitter
+            + b"\x12\x34\x56\x78\x9a\xbc"      # addr3: bssid
+            + b"\x00\x00" + bytes(24))
+
+
+@pytest.mark.parametrize("subtype", [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                                     0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0e, 0x0f])
+def test_every_assigned_data_subtype_parses(subtype):
+    """Table 9-1 assigns every data subtype but 0x0d; the parser may not narrow that."""
+    parsed = WlanFrameParser.parse_80211_frame(_build_data_frame(subtype), -60)
+    assert parsed is not None and parsed.type in ("data", "wep_data", "eapol")

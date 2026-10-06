@@ -38,7 +38,7 @@ from wifit3.campaigns.campaign import Campaign
 from wifit3.campaigns.pmkid import PmkidHarvestAttack
 from wifit3.campaigns.wep import WepCampaign
 from wifit3.campaigns.eviltwin import EvilTwinCampaign, EvilTwinInput
-from wifit3.ui.screens.focus_v2.eviltwin_modal import EvilTwinInputModal
+from wifit3.ui.screens.focus_v2.eviltwin_modal import EvilTwinInputModal, _can_host
 from wifit3.campaigns.pin import (EMPTY_PIN_LABEL, WpsCampaign, load_run_state,
                                   run_progress_line)
 from wifit3.campaigns.deauth import DeauthCampaign
@@ -1028,6 +1028,13 @@ class FocusViewV2(Screen):
         array = self.app.array
         if not ap or not array or not array.members:
             self._log("[red]✗ No target / interface. Cannot start EvilTwin.[/red]")
+            return
+        # Every member here is FAKE_MAC=NONE/UNIMPLEMENTED, so the modal's host Select
+        # would be built empty and raise EmptySelectError at compose. Guarding on members
+        # alone left the button live but the campaign unstartable -- a crash, not a no-op.
+        if not any(_can_host(m) for m in array.members):
+            self._log("[red]✗ No interface can spoof a MAC, so none can host the twin."
+                      " EvilTwin needs a SPOOFABLE or FIXED_MAC card.[/red]")
             return
         self.app.push_screen(EvilTwinInputModal(ap, array.members), self._on_eviltwin_input)
 

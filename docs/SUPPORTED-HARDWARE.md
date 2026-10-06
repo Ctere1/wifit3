@@ -22,6 +22,7 @@ live in each chip's `<CHIP>.md` (linked under its table).
 | [MT7610U](#mt7610u) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
 | [MT7921AU](#mt7921au) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
 | [MT7925AU](#mt7925au) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
+| [MT7601U](#mt7601u) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
 | [RTL8188EUS](#rtl8188eus) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
 | [RTL8812AU](#rtl8812au) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
 | [RTL8821AU](#rtl8821au) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
@@ -254,6 +255,24 @@ live in each chip's `<CHIP>.md` (linked under its table).
 → [RTL8922AU.md](../src/wifit3/chips/rtl8922au/RTL8922AU.md)
 
 ## Mediatek Chipsets
+### MT7601U
+
+*Two generic nano dongles · 2.4 GHz*
+
+| Capability | Status | Date | Notes |
+|---|:--:|---|---|
+| **Grade** | **94% (A)** | 2026-10-06 | Linux-parity RX, the fleet's fastest WEP, full campaign suite. |
+| RX | ✅ | 2026-10-06 | ref2g 7.8 and 7.9 b/s across two units; breadth 86 / 69 APs (2.4 only); 11/11 channels heard their own beacons, 0 silent. |
+| Port | ✅ | 2026-10-06 | Matches mt7601u on both units: RSSI −1.2 / −1.0 dB over 68 / 58 shared APs, beacon rate at parity, breadth gaps run both ways. |
+| Handshake | ✅ | 2026-10-06 | Deauth → 4-way capture. |
+| PMKID | ✅ | 2026-10-06 | Harvest + passive capture. |
+| WEP | ✅ | 2026-10-06 | ChopChop + ARP replay ~500 IVs/s sustained; 17k IVs cracked in 1m40s. |
+| WPS | ✅ | 2026-10-06 | PIN → 10 consecutive attempts, 3–8 s each, none timed out. |
+| ACKs | ✅ | 2026-10-06 | Auto-ACKs a spoofed MAC 100/100 via active monitor; 0/100 with it off and 0/100 to an unowned MAC. |
+| Stress | ✅ | 2026-10-06 | 24-min sustained hop, flat (73–88 APs, ~2.3k frames/min, trend ratio 0.80). |
+
+→ [MT7601U.md](../src/wifit3/chips/mt7601u/MT7601U.md)
+
 ### MT7610U
 <img align="right" width="124" height="165" src="../assets/cardart/card-awus036achm.png" alt="ALFA AWUS036ACHM">
 
@@ -468,4 +487,3 @@ Kali: <https://github.com/morrownr/USB-WiFi/blob/main/home/Recommended_Adapters_
 **Wishlist (not yet bought):**
 
 - **TP-Link Archer T2U Plus**: RTL8821AU / RTL8811AU.
-- **Generic MT7601U**: cheapest dongle; known for awkward packet injection.

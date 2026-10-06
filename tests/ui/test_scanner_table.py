@@ -15,7 +15,7 @@ from textual.screen import Screen
 from wifit3.models import AccessPoint
 from wifit3.persist.config import Config
 from wifit3.persist.vault import Vault
-from wifit3.ui.ap_table import COLUMNS, SSID_CELL_MAX, APRow, APTable
+from wifit3.ui.ap_table import COLUMNS, IDENTITY_CELL_MAX, SSID_CELL_MAX, APRow, APTable
 from wifit3.ui.screens.scanner import ScannerView
 from wifit3.ui.encryption_format import EncryptionSummary, EncryptionType
 
@@ -114,6 +114,18 @@ async def test_badges_shrink_the_ssid_but_not_the_column(table):
     plain = table._rows[_row(0).bssid].texts[0].plain
     assert "✓HS" in plain and "✓PMK" in plain
     assert "…" in plain
+
+
+async def test_verbose_identity_does_not_widen_the_table(table):
+    """One AP with a verbose WPS-derived identity must not push every column
+    off-screen: _relayout sizes a column from its widest row, so the cell has to
+    be capped the way SSID_CELL_MAX caps the SSID cell."""
+    table, pilot = table
+    table.set_rows([_row(0), _row(1, identity="Zyxel Communications Corporation "
+                                            "Zyxel F680G-6x v2.1.0 Gateway (Router)")])
+    await pilot.pause()
+    assert table._widths[-1] == IDENTITY_CELL_MAX
+    assert table._content_width() <= table.size.width
 
 
 async def test_header_reserves_room_for_the_sort_indicator(table):

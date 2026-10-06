@@ -514,10 +514,16 @@ class WlanFrameParser:
                 if len(tag_data) == 0:
                     parsed["ssid"] = "<hidden>"
                 elif len(tag_data) <= 32:
-                    # Validate against completely corrupted text
-                    if any(b < 0x20 and b not in (0x09, 0x0a, 0x0d) for b in tag_data):
-                        return None # Corrupt frame masquerading as valid
-                    parsed["ssid"] = tag_data.decode('utf-8', errors='ignore')
+                    # Validate the DECODED codepoints, not the raw bytes. A byte test cannot
+                    # see anything whose UTF-8 encoding is >= 0x20 per byte: C1 controls
+                    # (U+0085, U+009B), DEL (U+007F) and bidi overrides (U+202E, which reverse
+                    # the rest of the row on screen) all sail through, as do TAB/LF/CR, which
+                    # this guard used to whitelist and which shift the table row. isprintable()
+                    # rejects all of them while keeping non-ASCII SSIDs intact.
+                    ssid_text = tag_data.decode('utf-8', errors='ignore')
+                    if not all(ch.isprintable() for ch in ssid_text):
+                        return None  # Corrupt frame masquerading as valid
+                    parsed["ssid"] = ssid_text
             elif tag_id == 3: # DS Parameter Set (Channel)
                 if len(tag_data) == 1:
                     channel_ds = tag_data[0]

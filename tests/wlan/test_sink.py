@@ -298,3 +298,45 @@ def test_record_tx_never_raises_on_garbage():
     assert s.packet_stats._counts == {} or all(
         v == dict.fromkeys(PACKET_CLASSES, 0) for v in s.packet_stats._counts.values()
     )
+
+
+# ----- Data frames register their client --------------------------------------
+
+_OTHER_BSSID = "3c:1f:6d:9a:22:41"
+_STA_MAC = "8e:11:22:33:44:55"
+
+
+def _data_frame(bssid: str = _OTHER_BSSID):
+    """A ToDS data frame: the STA in addr2, the DA in addr3."""
+    return pkt({"type": "data", "bssid": bssid, "source": _STA_MAC,
+                "dest": _STA_MAC, "to_ds": True, "rssi": -95})
+
+
+def test_a_data_frame_registers_its_client_under_the_bssid():
+    s = WlanSink()
+    s.update(_beacon(), W0)
+    s.update(_data_frame(BSSID), W0)
+    assert _STA_MAC in s.clients
+    assert s.clients[_STA_MAC].bssid == BSSID
+
+
+def test_a_data_frame_registers_its_client_before_the_ap_beacons():
+    """A client heard before its AP's beacon is still a client."""
+    s = WlanSink()
+    s.update(_data_frame(), W0)
+    assert _STA_MAC in s.clients
+
+
+def test_a_probe_request_registers_its_client():
+    s = WlanSink()
+    s.update(pkt({"type": "probe_req", "bssid": _OTHER_BSSID, "source": _STA_MAC,
+                  "dest": "ff:ff:ff:ff:ff:ff", "ssid": "Some_SSID", "rssi": -60}), W0)
+    assert _STA_MAC in s.clients
+    assert "Some_SSID" in s.clients[_STA_MAC].probed_ssids
+
+
+def test_an_assoc_request_binds_to_an_ap_we_have_not_beaconed():
+    s = WlanSink()
+    s.update(pkt({"type": "assoc_req", "bssid": _OTHER_BSSID, "source": _STA_MAC,
+                  "ssid": "Real_Net", "rssi": -55}), W0)
+    assert s.clients[_STA_MAC].bssid == _OTHER_BSSID
