@@ -22,7 +22,6 @@ live in each chip's `<CHIP>.md` (linked under its table).
 | [MT7610U](#mt7610u) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
 | [MT7921AU](#mt7921au) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
 | [MT7925AU](#mt7925au) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
-| [MT7601U](#mt7601u) | ✅ | ✅ | ✅ | ✅ | ⬜ | A |
 | [RTL8188EUS](#rtl8188eus) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
 | [RTL8812AU](#rtl8812au) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
 | [RTL8821AU](#rtl8821au) | ✅ | ✅ | ✅ | ✅ | ✅ | A |
@@ -35,6 +34,7 @@ live in each chip's `<CHIP>.md` (linked under its table).
 | [RT5572](#rt5572) | ✅ | ⚠️ | ✅ | ✅ | ✅ | B |
 | [RTL8821CU](#rtl8821cu) | ⚠️ | ✅ | ✅ | ⚠️ | ✅ | B |
 | [RTL8187L](#rtl8187l) | ✅ | ✅ | ⚠️ | ✅ | ✅ | C |
+| [MT7601U](#mt7601u) | ✅ | ✅ | ✅ | ✅ | ❌ | C |
 | [RTL8814AU](#rtl8814au) | ❌ | ✅ | ✅ | ⚠️ | ✅ | D |
 | [RT2500USB](#rt2500usb) | ⚠️ | ✅ | ❌ | ✅ | ⚠️ | D |
 
@@ -261,7 +261,7 @@ live in each chip's `<CHIP>.md` (linked under its table).
 
 | Capability | Status | Date | Notes |
 |---|:--:|---|---|
-| **Grade** | **92% (A)** | 2026-10-06 | Linux-parity RX, best-in-fleet WEP, full campaign suite. Provisional (soak pending). |
+| **Grade** | **74% (C)** | 2026-10-06 | Linux-parity RX and the fleet's fastest WEP, but the radio dies ~25 min into a sustained hop. |
 | RX | ✅ | 2026-10-06 | ref2g 7.8 and 7.9 b/s across two units; breadth 86 / 69 APs (2.4 only); 11/11 channels heard their own beacons, 0 silent. |
 | Port | ✅ | 2026-10-06 | Matches mt7601u on both units: RSSI −1.2 / −1.0 dB over 68 / 58 shared APs, beacon rate at parity, breadth gaps run both ways. |
 | Handshake | ✅ | 2026-10-06 | Deauth → 4-way capture. |
@@ -269,7 +269,7 @@ live in each chip's `<CHIP>.md` (linked under its table).
 | WEP | ✅ | 2026-10-06 | ChopChop + ARP replay ~500 IVs/s sustained; 17k IVs cracked in 1m40s. |
 | WPS | ✅ | 2026-10-06 | PIN → 10 consecutive attempts, 3–8 s each, none timed out. |
 | ACKs | ✅ | 2026-10-06 | Auto-ACKs a spoofed MAC 100/100 via active monitor; 0/100 with it off and 0/100 to an unowned MAC. |
-| Stress | ⬜ | — | 30-min soak deferred. |
+| Stress | ❌ | 2026-10-06 | 24 min flat (73–88 APs, ~2.3k frames/min, trend ratio 0.80), then RX cliffs to zero at ~25 min and the device drops off USB. One observation, needs a re-run. |
 
 → [MT7601U.md](../src/wifit3/chips/mt7601u/MT7601U.md)
 
