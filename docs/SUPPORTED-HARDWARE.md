@@ -34,6 +34,7 @@ live in each chip's `<CHIP>.md` (linked under its table).
 | [RT5572](#rt5572) | ✅ | ⚠️ | ✅ | ✅ | ✅ | B |
 | [RTL8821CU](#rtl8821cu) | ⚠️ | ✅ | ✅ | ⚠️ | ✅ | B |
 | [RTL8187L](#rtl8187l) | ✅ | ✅ | ⚠️ | ✅ | ✅ | C |
+| [MT7601U](#mt7601u) | ✅ | ⚠️ | ✅ | ✅ | ⬜ | C |
 | [RTL8814AU](#rtl8814au) | ❌ | ✅ | ✅ | ⚠️ | ✅ | D |
 | [RT2500USB](#rt2500usb) | ⚠️ | ✅ | ❌ | ✅ | ⚠️ | D |
 
@@ -254,6 +255,24 @@ live in each chip's `<CHIP>.md` (linked under its table).
 → [RTL8922AU.md](../src/wifit3/chips/rtl8922au/RTL8922AU.md)
 
 ## Mediatek Chipsets
+### MT7601U
+
+*Two generic nano dongles · 2.4 GHz*
+
+| Capability | Status | Date | Notes |
+|---|:--:|---|---|
+| **Grade** | **75% (C)** | 2026-10-06 | Linux-parity RX and most campaigns work; WEP is broken. Provisional (soak pending). |
+| RX | ✅ | 2026-10-06 | ref2g 7.8 and 7.9 b/s across two units; breadth 86 / 69 APs (2.4 only); 11/11 channels heard their own beacons, 0 silent. |
+| Port | ✅ | 2026-10-06 | Matches mt7601u on both units: RSSI −1.2 / −1.0 dB over 68 / 58 shared APs, beacon rate at parity, breadth gaps run both ways. |
+| Handshake | ✅ | 2026-10-06 | Deauth → 4-way capture. |
+| PMKID | ✅ | 2026-10-06 | Harvest + passive capture. |
+| WEP | ❌ | 2026-10-06 | FakeAuth fails, so ChopChop and ARP replay fail with it. The same APs crack from an RTL8822BU. |
+| WPS | ⚠️ | 2026-10-06 | PIN attempts usually land in ~3 s; one needed ~1 min of retries. |
+| ACKs | ✅ | 2026-10-06 | Auto-ACKs a spoofed MAC 100/100 via active monitor; 0/100 with it off and 0/100 to an unowned MAC. |
+| Stress | ⬜ | — | 30-min soak deferred. |
+
+→ [MT7601U.md](../src/wifit3/chips/mt7601u/MT7601U.md)
+
 ### MT7610U
 <img align="right" width="124" height="165" src="../assets/cardart/card-awus036achm.png" alt="ALFA AWUS036ACHM">
 
@@ -468,4 +487,3 @@ Kali: <https://github.com/morrownr/USB-WiFi/blob/main/home/Recommended_Adapters_
 **Wishlist (not yet bought):**
 
 - **TP-Link Archer T2U Plus**: RTL8821AU / RTL8811AU.
-- **Generic MT7601U**: cheapest dongle; known for awkward packet injection.
