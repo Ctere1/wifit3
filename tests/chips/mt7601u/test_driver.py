@@ -20,6 +20,7 @@ from wifit3.chips.mt7601u.constants import (
     MT_MAC_ADDR_DW1,
     MT_MAC_ADDR_DW1_U2ME_MASK,
 )
+from wifit3.chips.mt7601u.mac import STAT_WORK_INTERVAL_S
 from wifit3.chips.mt7601u.driver import (
     CALIBRATE_INTERVAL_S,
     RX_BUFFER_SIZE,
@@ -672,51 +673,53 @@ class TestFailedBringUpPowersDown:
         assert calls == []
 
 
-class TestCalibrationLoop:
-    """main.c:22-25 queues cal_work at MT_CALIBRATE_INTERVAL; main.c:37 cancels it."""
+class TestDelayedWorks:
+    """main.c:22-25 queues cal_work and mac_work; main.c:37-38 cancels both."""
 
-    def test_the_interval_is_the_kernels_four_seconds(self) -> None:
-        assert CALIBRATE_INTERVAL_S == 4.0
+    def test_the_intervals_are_the_kernels(self) -> None:
+        assert CALIBRATE_INTERVAL_S == 4.0            # mt7601u.h:22, 4 * HZ
+        assert STAT_WORK_INTERVAL_S == 10.0           # mac.c:351, 10 * HZ
 
-    def test_bring_up_starts_it_and_close_cancels_it(self, driver: MT7601UDriver) -> None:
-        ticks: list[int] = []
-
+    def test_close_cancels_both_tasks(self, driver: MT7601UDriver) -> None:
         async def run() -> None:
-            driver._cal_task = asyncio.create_task(driver._calibration_loop())
-            driver.phy = SimpleNamespace()
+            driver._cal_task = asyncio.create_task(driver._periodic(99, lambda: None, "cal"))
+            driver._stats_task = asyncio.create_task(
+                driver._periodic(99, lambda: None, "stats"))
             driver.chip_init.mac_stop_hw = lambda: None
             driver.chip_init.chip_onoff = lambda enable, reset=False: None
             driver.transport.release = lambda: None
             driver.transport.dispose = lambda: None
             driver._tx_queues = None
             await asyncio.sleep(0)
-            assert not driver._cal_task.done()
             await driver.close()
-            assert driver._cal_task is None
+            assert driver._cal_task is None and driver._stats_task is None
 
         asyncio.run(run())
-        assert ticks == []
 
-    def test_a_usb_hiccup_does_not_end_the_loop(self, driver: MT7601UDriver) -> None:
+    def test_a_usb_hiccup_does_not_end_a_loop(self, driver: MT7601UDriver) -> None:
         """One failed tick must not stop the chip refreshing its temperature."""
         calls: list[int] = []
 
-        def boom(_phy: object) -> None:
+        def boom() -> None:
             calls.append(1)
             raise usb.core.USBError("stall")
 
         async def run() -> None:
-            import wifit3.chips.mt7601u.driver as mod
-            real_sleep, real_cal = mod.CALIBRATE_INTERVAL_S, mod.phy_calibrate
-            mod.CALIBRATE_INTERVAL_S, mod.phy_calibrate = 0, boom
-            try:
-                task = asyncio.create_task(driver._calibration_loop())
-                while len(calls) < 3:
-                    await asyncio.sleep(0)
-                task.cancel()
-                await task
-            finally:
-                mod.CALIBRATE_INTERVAL_S, mod.phy_calibrate = real_sleep, real_cal
+            task = asyncio.create_task(driver._periodic(0, boom, "calibration"))
+            while len(calls) < 3:
+                await asyncio.sleep(0)
+            task.cancel()
+            await task
 
         asyncio.run(run())
         assert len(calls) >= 3
+
+    def test_an_unexpected_error_still_stops_the_loop(self, driver: MT7601UDriver) -> None:
+        """Only the USB and MCU faults are tolerated; a real bug must surface."""
+        async def run() -> None:
+            def boom() -> None:
+                raise ValueError("a real bug")
+            with pytest.raises(ValueError, match="a real bug"):
+                await driver._periodic(0, boom, "calibration")
+
+        asyncio.run(run())

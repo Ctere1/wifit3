@@ -45,6 +45,7 @@ from wifit3.chips.mt7601u.constants import (
 from wifit3.chips.mt7601u.eeprom import MT7601UEeprom, MT7601UEepromParams
 from wifit3.chips.mt7601u.firmware import find_firmware, load_firmware
 from wifit3.chips.mt7601u.init import MT7601UInit
+from wifit3.chips.mt7601u.mac import STAT_WORK_INTERVAL_S, MacStats, mac_work
 from wifit3.chips.mt7601u.mcu import MT7601UMcu, McuTimeout
 from wifit3.chips.mt7601u.phy import MT7601UPhy
 from wifit3.chips.mt7601u.rx import iter_frames
@@ -119,6 +120,8 @@ class MT7601UDriver(Driver):
         self._channel: int = self.SUPPORTED_CHANNELS[0]
         self._tx_seqno: int = 0
         self._cal_task: Optional[asyncio.Task] = None
+        self._stats_task: Optional[asyncio.Task] = None
+        self.stats = MacStats()
         self._rx_callback: Optional[Callable] = None
         self._disconnect_callback: Optional[Callable] = None
         self._reader: Optional[RxReaderThread] = None
@@ -274,25 +277,31 @@ class MT7601UDriver(Driver):
         self.phy.set_channel(self._channel)
 
         self._tx_queues = TxQueues(self.transport, self.mcu)
-        # main.c:22-25 queues cal_work at MT_CALIBRATE_INTERVAL once the MAC is started.
-        self._cal_task = asyncio.create_task(self._calibration_loop())
+        # main.c:22-25 queues both delayed works once the MAC is started. cal_work keeps
+        # phy.raw_temp moving, without which temp_comp's DPD and PLL-protect branches can
+        # never fire again; mac_work sweeps the read-to-clear counters and is the only
+        # thing that calls check_mac_err.
+        self._cal_task = asyncio.create_task(self._periodic(
+            CALIBRATE_INTERVAL_S, lambda: phy_calibrate(self.phy), "calibration"))
+        self._stats_task = asyncio.create_task(self._periodic(
+            STAT_WORK_INTERVAL_S, lambda: mac_work(self.transport, self.stats), "stats"))
         step(1.0, "Ready")
         return True
 
-    async def _calibration_loop(self) -> None:
-        """phy.c:1014 re-queues cal_work every MT_CALIBRATE_INTERVAL.
+    async def _periodic(self, interval: float, work: Callable[[], None],
+                        label: str) -> None:
+        """One of the kernel's delayed works, re-queued as phy.c:1014 and mac.c:351 do.
 
-        Without it phy.raw_temp keeps its boot value forever and the DPD and PLL-protect
-        branches of cal.py:temp_comp can never fire again. A USB hiccup on one tick is not
-        worth tearing the interface down for.
+        A USB hiccup on one tick is not worth tearing the interface down for, so a failed
+        tick is logged and the next one still runs.
         """
         try:
             while True:
-                await asyncio.sleep(CALIBRATE_INTERVAL_S)
+                await asyncio.sleep(interval)
                 try:
-                    phy_calibrate(self.phy)
+                    work()
                 except (IOError, usb.core.USBError, McuTimeout) as exc:
-                    logger.debug("MT7601U: calibration tick skipped: %s", exc)
+                    logger.debug("MT7601U: %s tick skipped: %s", label, exc)
         except asyncio.CancelledError:
             pass
 
@@ -354,9 +363,11 @@ class MT7601UDriver(Driver):
         The MAC stops before the reader does: init.c:285-296 drains the RX queue, which only
         empties while the host is still consuming bulk-IN.
         """
-        if self._cal_task is not None:               # main.c:37 cancel_delayed_work_sync
-            self._cal_task.cancel()
-            self._cal_task = None
+        for name in ("_cal_task", "_stats_task"):    # main.c:37-38
+            task = getattr(self, name)
+            if task is not None:
+                task.cancel()
+                setattr(self, name, None)
         try:
             self.chip_init.mac_stop_hw()             # init.c:305 mt7601u_mac_stop
         except Exception as exc:                     # teardown must not mask the real error

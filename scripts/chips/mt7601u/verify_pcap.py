@@ -21,6 +21,9 @@ sys.path.insert(0, str(REPO / "scripts" / "porting"))
 
 import mt76_verify_replay as E
 from wifit3.chips.mt7601u.constants import (
+    MT_BBP_CSR_CFG,
+    MT_BBP_CSR_CFG_REG_NUM,
+    MT_RF_CSR_CFG,
     MT_RX_FILTR_CFG,
     MT_RX_FILTR_CFG_ACK,
     MT_RX_FILTR_CFG_BA,
@@ -35,9 +38,19 @@ from wifit3.chips.mt7601u.constants import (
     MT_RX_FILTR_CFG_PSPOLL,
     MT_RX_FILTR_CFG_RTS,
     MT_RX_FILTR_CFG_VER_ERR,
+    MT_RX_STA_CNT0,
+    MT_TXD_INFO_LEN,
+    _field_get,
 )
 from wifit3.chips.mt7601u.driver import MT7601UDriver
 from wifit3.chips.mt7601u.eeprom import MT7601UEepromParams
+from wifit3.chips.mt7601u.cal import phy_calibrate
+from wifit3.chips.mt7601u.mac import MacStats, mac_work
+from wifit3.chips.mt7601u.phy import (
+    FREQ_PLAN,
+    FREQ_PLAN_BASE_REG,
+    FREQ_PLAN_REGS,
+)
 from wifit3.chips.mt7601u.rx import (
     MT_FCE_INFO_LEN,
     iter_frames,
@@ -54,6 +67,10 @@ _DESC_CONFIGURATION, _DESC_ENDPOINT = 0x02, 0x05
 
 # in_eps[MT_EP_IN_PKT_RX] (usb.c:243): the ambient 802.11 stream, not a port output.
 EP_PKT_RX_IN = 0x84
+EP_INBAND_CMD_OUT = 0x08
+"""out_eps[MT_EP_OUT_INBAND_CMD] (usb.h:34): where MCU register pairs go."""
+BBP_TEMP_REG = 47
+"""phy.c:534 -- the BBP register read_temp kicks and polls."""
 _USBMON_LEN = 32
 """mon_bin's urb length field. It exceeds LEN_CAP where usbmon truncated."""
 
@@ -265,6 +282,178 @@ def rx_decode_phase(pkts: list[bytes], ee) -> None:
         print(f"           {unconsumed} buffers left more than a trailer unconsumed")
 
 
+def _mcu_pairs(op) -> list[tuple[int, int]]:
+    """The (register, value) pairs inside an MCU CMD_RANDOM_WRITE payload."""
+    data = op.data
+    if len(data) < 12:
+        return []
+    ln = int.from_bytes(data[:4], "little") & MT_TXD_INFO_LEN
+    body = data[4:4 + ln]
+    return [(int.from_bytes(body[j:j + 4], "little"),
+             int.from_bytes(body[j + 4:j + 8], "little"))
+            for j in range(0, len(body) - 7, 8)]
+
+
+def _tune_channel(op) -> int | None:
+    """The 1..14 channel a freq-plan burst names, or None if this is not one.
+
+    phy.c:284 __mt7601u_phy_set_channel opens with the RF freq-plan write, which is what
+    delimits one tune in the operational tail. The channel is recovered by matching the
+    recorded rows against FREQ_PLAN rather than trusting an op index.
+    """
+    if op.cls != "bulk" or op.ep != EP_INBAND_CMD_OUT:
+        return None
+    pairs = _mcu_pairs(op)
+    if len(pairs) < FREQ_PLAN_REGS or (pairs[0][0] & 0xFFFF) != FREQ_PLAN_BASE_REG:
+        return None
+    row = tuple(v & 0xFF for _reg, v in pairs[:FREQ_PLAN_REGS])
+    for idx, plan in enumerate(FREQ_PLAN):
+        if tuple(plan) == row:
+            return idx + 1
+    return None
+
+
+def _next_matchable_index(ops, i: int, waivers) -> int | None:
+    """The next op no SKIP waiver covers, as an index. Works on a Walk or a ReplayDevice."""
+    while i < len(ops):
+        if waivers is None or waivers.first_match(ops[i]) is None:
+            return i
+        i += 1
+    return None
+
+
+def _selects_bbp(op, reg: int) -> bool:
+    """True when this vendor write loads MT_BBP_CSR_CFG selecting BBP register `reg`."""
+    return (op.cls == "ctrl" and not op.is_in and op.widx == MT_BBP_CSR_CFG
+            and _field_get(MT_BBP_CSR_CFG_REG_NUM, op.wval) == reg)
+
+
+def _is_cal_work(ops, j: int) -> bool:
+    """phy.c:1002 cal_work opens with read_temp, i.e. a BBP access selecting register 47.
+
+    Every BBP access opens on the same MT_BBP_CSR_CFG busy read, so the opener alone does
+    not say which register follows; the selecting write is what distinguishes it.
+    """
+    op = ops[j]
+    if not (op.cls == "ctrl" and op.is_in and (op.addr & 0xFFFF) == MT_BBP_CSR_CFG):
+        return False
+    return j + 1 < len(ops) and _selects_bbp(ops[j + 1], BBP_TEMP_REG)
+
+
+STAT_BLOCK = range(0x1700, 0x1800)
+"""regs.h:495-525 -- the counter block mac_work sweeps."""
+
+
+def _producers_interleaved(ops, j: int, window: int = 16) -> bool:
+    """True when the ops around `j` mix two kernel work items register by register.
+
+    cal_work, mac_work and the channel set are three independent producers in the C
+    (init.c:621, phy.c:1254), and nothing serialises their register access. The
+    interleave hook drains one work item spliced between two of another's ops, but it
+    cannot nest -- it issues USB calls itself -- so a sweep interrupted *inside* a second
+    sweep ends the walk. Evidence it really happens: antenna/capture-1 ops 885-889 put a
+    tune's BBP 4 access between two of mac_work's counter reads, and superwang/capture-2
+    ops 805-810 do the same with the RF CSR. That is a property of the capture, not a
+    divergence in the port, and saying so is the difference between a real finding and a
+    wasted session.
+    """
+    stats = tune = False
+    for op in ops[j:j + window]:
+        if op.cls != "ctrl":
+            continue
+        reg = op.addr & 0xFFFF if op.is_in else op.widx
+        if reg in STAT_BLOCK:
+            stats = True
+        elif reg in (MT_BBP_CSR_CFG, MT_RF_CSR_CFG):
+            tune = True                     # set_channel reaches the chip through both
+    return stats and tune
+
+
+def _interleave_hook(drv: MT7601UDriver, stats: MacStats):
+    """Drain a delayed work the kernel spliced into a mid-flight handler.
+
+    cal_work and mac_work are separate work items in the C (init.c:621, phy.c:1254), so
+    their register accesses land *between* a channel tune's rather than after it. Without
+    this the tune's next op no longer lines up and the walk stops on an interleave that is
+    a property of the capture, not of the port. The ops these drain are credited to the
+    handler that was in flight.
+    """
+    def hook(dev) -> None:
+        while True:
+            j = _next_matchable_index(dev.ops, dev.i, dev.waivers)
+            if j is None:
+                return
+            if _is_mac_work(dev.ops[j]):
+                mac_work(drv.transport, stats)
+            elif _is_cal_work(dev.ops, j):
+                phy_calibrate(drv.phy)
+            else:
+                return
+    return hook
+
+
+def _is_mac_work(op) -> bool:
+    """mac.c:301 mt7601u_mac_work opens with the first MT_RX_STA_CNT0 read."""
+    return (op.cls == "ctrl" and op.is_in
+            and (op.addr & 0xFFFF) == MT_RX_STA_CNT0)
+
+
+def drive_operational(walk: E.Walk, drv: MT7601UDriver) -> dict[str, int]:
+    """Dispatch the tail after bring-up to the real routine that emits each burst.
+
+    One driver carries its own EEPROM and phy state across the bursts, the way a live
+    session does -- rebuilding it per burst would hand set_channel a blank bw and
+    chan_ext_below and hide any state the kernel's own sequence depends on.
+
+    Tunes replay with scan=False: the recorded kernel is channel-hopping in monitor mode,
+    not running a software scan, so MT7601U_STATE_SCANNING is clear and phy.c:434's
+    agc_reset does not fire. An unrecognised opener -- a TX descriptor, most of what is
+    left -- ends the walk rather than being skipped past.
+    """
+    tally = {"tunes": 0, "mac_work": 0, "cal_work": 0, "diverged": 0,
+             "interleaved": 0}
+    stats = MacStats()
+    hook = _interleave_hook(drv, stats)
+    while not walk.done():
+        op = walk.peek_matchable()
+        if op is None:
+            break
+        channel = _tune_channel(op)
+        try:
+            if channel is not None:
+                walk.run(lambda dev, ch=channel: _on_device(drv, dev, drv.phy.set_channel, ch),
+                         f"phy.set_channel({channel})", feed_responses=True,
+                         async_interleave=hook)
+                tally["tunes"] += 1
+            elif _is_mac_work(op):
+                walk.run(lambda dev: _on_device(drv, dev, mac_work, drv.transport, stats),
+                         "mac.mac_work", feed_responses=True)
+                tally["mac_work"] += 1
+            elif (j := _next_matchable_index(walk.ops, walk.i, walk.waivers)) is not None                     and _is_cal_work(walk.ops, j):
+                walk.run(lambda dev: _on_device(drv, dev, phy_calibrate, drv.phy),
+                         "cal.phy_calibrate", feed_responses=True)
+                tally["cal_work"] += 1
+            else:
+                break
+        except E.Divergence:
+            tally["diverged"] += 1
+            j = _next_matchable_index(walk.ops, walk.i, walk.waivers)
+            if j is not None and _producers_interleaved(walk.ops, j):
+                tally["interleaved"] += 1
+            break
+        except Exception as e:  # noqa: BLE001
+            print(f"[harness] operational burst raised {type(e).__name__}: {e}")
+            tally["diverged"] += 1
+            break
+    return tally
+
+
+def _on_device(drv: MT7601UDriver, dev, fn, *args) -> None:
+    """Point the one driver's transport at this burst's replay device, then run `fn`."""
+    drv.transport.dev = dev
+    fn(*args)
+
+
 async def _run_bringup(walk: E.Walk, endpoints: list[_Endpoint], state: dict) -> None:
     async def go(dev):
         state["drv"] = drv = driver_on(dev, endpoints)
@@ -307,7 +496,9 @@ def _run(cap: str | None) -> int:
         print(f"FAIL: no vendor-control device found in {path}")
         return 1
     capture = E.extract(pkts, dev)
-    walk = E.Walk(capture, waivers=waivers())
+    # The tune phase runs after bring-up, so the response stream has to carry on
+    # rather than restart: the port's MCU sequence counter does not reset.
+    walk = E.Walk(capture, waivers=waivers(), continue_responses=True)
     state: dict = {}
 
     title = f"mt7601u verify · {Path(path).name}"
@@ -322,21 +513,34 @@ def _run(cap: str | None) -> int:
     except Exception as e:  # noqa: BLE001
         print(f"\n[harness] bring-up raised {type(e).__name__}: {e}")
 
-    rc = walk.report(title)
-    if walk.ledger.frontier is not None:
-        return rc
-    # _bringup ends at the first channel tune, so the rest of the capture is the
-    # operational phase (hopping, TX) that this walk is not scoped to drive.
-    remaining = len(capture.ops) - walk.i
-    print()
+    # The operational tail runs on the same cursor before the report, so its credits
+    # land in the coverage figure rather than after it.
     drv = state.get("drv")
+    tally = {}
+    if drv is not None and walk.ledger.frontier is None:
+        tally = drive_operational(walk, drv)
+
+    rc = walk.report(title)
+    if tally and any(tally.values()):
+        print(f"OPERATIONAL: {tally['tunes']} channel tunes, {tally['mac_work']} mac_work "
+              f"sweeps, {tally['cal_work']} calibration passes")
+        if tally["interleaved"]:
+            print("             the walk stopped where a second kernel work item spliced "
+                  "its registers into one already in flight -- concurrent producers, not "
+                  "a port divergence (see MT7601U.md)")
+    print()
     try:
         rx_decode_phase(rx_pkts, drv.ee if drv is not None else MT7601UEepromParams())
     except Exception as e:  # noqa: BLE001
         print(f"RX DECODE: raised {type(e).__name__}: {e}")
+    if walk.ledger.frontier is not None:
+        return rc
+    # What is left is the TX stream: 442 bulk-OUTs carrying frames the kernel chose,
+    # which this port has nothing to reproduce. verify_tx.py checks their descriptors.
+    remaining = len(capture.ops) - walk.i
     print()
-    print(f"OVERALL: _bringup replayed against the capture with no divergence; "
-          f"{remaining} operational-phase ops after it are out of its scope.")
+    print(f"OVERALL: bring-up and the operational tail replayed with no divergence; "
+          f"{remaining} ops after the walk are out of its scope.")
     return 0 if walk.ledger.waived_count == 0 else 2
 
 
