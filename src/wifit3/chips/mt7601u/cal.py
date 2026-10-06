@@ -124,6 +124,33 @@ def read_bootup_temp(phy: MT7601UPhy) -> int:
     return temp - 0x100 if temp & 0x80 else temp
 
 
+def read_temp(phy: MT7601UPhy) -> int:
+    """phy.c:530 mt7601u_read_temp -- the die temperature now, as the s8 the C declares.
+
+    Unlike read_bootup_temp this does not bypass the RF, so it is safe to call while
+    the receiver is running.
+    """
+    val = phy.bbp_rmw(47, 0x7F, BBP_TEMP_BUSY)
+    # phy.c:536: this rarely succeeds, and the temperature moves even when it does not.
+    for _ in range(BBP_TEMP_POLL_LIMIT):
+        if not val & BBP_TEMP_BUSY:
+            break
+        val = phy.bbp_rr(47)
+    return _s8(bbp_r47_get(phy, val, BBP_R47_F_TEMP))
+
+
+def phy_calibrate(phy: MT7601UPhy) -> None:
+    """phy.c:1002 mt7601u_phy_calibrate -- one pass of the periodic calibration.
+
+    phy.c:1009 skips the temperature read when TSSI calibration has already refreshed
+    it, but phy.c:876 tssi_cal is unported, so nothing else moves raw_temp and the read
+    runs either way -- the gate's premise does not hold here. phy.c:970 agc_tune is also
+    unported; it returns early on avg_rssi == 0, which is every pass with no association.
+    """
+    phy.raw_temp = read_temp(phy)
+    temp_comp(phy, True)                              # phy.c:1011
+
+
 def rxdc_cal(phy: MT7601UPhy) -> None:
     """phy.c mt7601u_rxdc_cal -- the RX DC-offset trim loop."""
     intro = [(158, 0x8D), (159, 0xFC), (158, 0x8C), (159, 0x4C)]

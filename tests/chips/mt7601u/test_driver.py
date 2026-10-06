@@ -20,7 +20,11 @@ from wifit3.chips.mt7601u.constants import (
     MT_MAC_ADDR_DW1,
     MT_MAC_ADDR_DW1_U2ME_MASK,
 )
-from wifit3.chips.mt7601u.driver import RX_BUFFER_SIZE, MT7601UDriver
+from wifit3.chips.mt7601u.driver import (
+    CALIBRATE_INTERVAL_S,
+    RX_BUFFER_SIZE,
+    MT7601UDriver,
+)
 from wifit3.chips.mt7601u.tx import TX_NO_STATION, TX_QUEUE_AC_BE, build_tx_dma
 from tests.chips.mt7601u.test_rx import build_segment
 from wifit3.models.device_id import DeviceID
@@ -666,3 +670,53 @@ class TestFailedBringUpPowersDown:
         driver._init_hardware = fine
         assert asyncio.run(driver._bringup()) is True
         assert calls == []
+
+
+class TestCalibrationLoop:
+    """main.c:22-25 queues cal_work at MT_CALIBRATE_INTERVAL; main.c:37 cancels it."""
+
+    def test_the_interval_is_the_kernels_four_seconds(self) -> None:
+        assert CALIBRATE_INTERVAL_S == 4.0
+
+    def test_bring_up_starts_it_and_close_cancels_it(self, driver: MT7601UDriver) -> None:
+        ticks: list[int] = []
+
+        async def run() -> None:
+            driver._cal_task = asyncio.create_task(driver._calibration_loop())
+            driver.phy = SimpleNamespace()
+            driver.chip_init.mac_stop_hw = lambda: None
+            driver.chip_init.chip_onoff = lambda enable, reset=False: None
+            driver.transport.release = lambda: None
+            driver.transport.dispose = lambda: None
+            driver._tx_queues = None
+            await asyncio.sleep(0)
+            assert not driver._cal_task.done()
+            await driver.close()
+            assert driver._cal_task is None
+
+        asyncio.run(run())
+        assert ticks == []
+
+    def test_a_usb_hiccup_does_not_end_the_loop(self, driver: MT7601UDriver) -> None:
+        """One failed tick must not stop the chip refreshing its temperature."""
+        calls: list[int] = []
+
+        def boom(_phy: object) -> None:
+            calls.append(1)
+            raise usb.core.USBError("stall")
+
+        async def run() -> None:
+            import wifit3.chips.mt7601u.driver as mod
+            real_sleep, real_cal = mod.CALIBRATE_INTERVAL_S, mod.phy_calibrate
+            mod.CALIBRATE_INTERVAL_S, mod.phy_calibrate = 0, boom
+            try:
+                task = asyncio.create_task(driver._calibration_loop())
+                while len(calls) < 3:
+                    await asyncio.sleep(0)
+                task.cancel()
+                await task
+            finally:
+                mod.CALIBRATE_INTERVAL_S, mod.phy_calibrate = real_sleep, real_cal
+
+        asyncio.run(run())
+        assert len(calls) >= 3

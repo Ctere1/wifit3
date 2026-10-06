@@ -12,6 +12,7 @@ We only READ. mt7601u never programs efuse fuses.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 
 from .constants import (
@@ -141,8 +142,19 @@ def _s8(val: int) -> int:
 
 
 def _is_valid_ether_addr(addr: bytes) -> bool:
-    """is_valid_ether_addr: not all-zero and not broadcast (mac.c:15)."""
-    return addr != b"\x00" * 6 and addr != b"\xff" * 6
+    """is_valid_ether_addr (mac.c:15) -- not a group address and not all-zero.
+
+    Broadcast needs no separate test: ff:ff:ff:ff:ff:ff has the group bit set.
+    """
+    return len(addr) == 6 and not addr[0] & 0x01 and addr != bytes(6)
+
+
+def _random_ether_addr() -> bytes:
+    """eth_random_addr -- random bytes with the group bit cleared and the
+    locally-administered bit set."""
+    addr = bytearray(os.urandom(6))
+    addr[0] = (addr[0] & 0xFE) | 0x02
+    return bytes(addr)
 
 
 def field_validate(val: int) -> int:
@@ -227,11 +239,16 @@ class MT7601UEeprom:
     def set_macaddr(self, addr: bytes) -> None:
         """mac.c:11 mt7601u_set_macaddr -- program the card's own MAC.
 
-        An all-zero or all-ones EEPROM address is unusable (is_valid_ether_addr);
-        upstream substitutes a random address, which we cannot do without a MAC pool,
-        so the caller checks the fallback.
+        A group or all-zero EEPROM address is unusable, and mac.c:16 installs a random
+        one rather than carrying on with it -- the autoresponder ACKs whatever is in
+        these two registers, so an address the chip cannot own makes it answer nothing.
         """
-        self.macaddr = addr if _is_valid_ether_addr(addr) else bytes(6)
+        if _is_valid_ether_addr(addr):
+            self.macaddr = bytes(addr)
+        else:
+            self.macaddr = _random_ether_addr()
+            logger.info("Invalid MAC address, using random address %s",
+                        ":".join(f"{b:02x}" for b in self.macaddr))
         self.tp.wr(MT_MAC_ADDR_DW0, int.from_bytes(self.macaddr[0:4], "little"))
         self.tp.wr(MT_MAC_ADDR_DW1,
                    int.from_bytes(self.macaddr[4:6], "little")

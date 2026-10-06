@@ -9,6 +9,8 @@ import pytest
 
 from wifit3.chips.mt7601u import constants as C
 from wifit3.chips.mt7601u.eeprom import (
+    _is_valid_ether_addr,
+    _random_ether_addr,
     EepromError,
     MT7601UEeprom,
     PowerPerRate,
@@ -305,3 +307,25 @@ class TestPowerPerRate:
     def test_default_instance_is_zeroed(self) -> None:
         rate = PowerPerRate()
         assert (rate.raw, rate.bw20, rate.bw40) == (0, 0, 0)
+
+class TestMacAddressValidation:
+    """mac.c:15-20. is_valid_ether_addr rejects a group address as well as all-zero,
+    and mac.c:16 installs a random one rather than carrying on."""
+
+    @pytest.mark.parametrize("addr,valid", [
+        (bytes.fromhex("200db0305159"), True),
+        (bytes.fromhex("000000000000"), False),
+        (bytes.fromhex("ffffffffffff"), False),
+        (bytes.fromhex("010203040506"), False),      # group bit set in byte 0
+        (bytes.fromhex("020304050607"), True),       # locally administered, not group
+    ])
+    def test_group_and_zero_addresses_are_refused(self, addr: bytes, valid: bool) -> None:
+        assert _is_valid_ether_addr(addr) is valid
+
+    def test_a_random_address_is_unicast_and_locally_administered(self) -> None:
+        for _ in range(32):
+            addr = _random_ether_addr()
+            assert len(addr) == 6
+            assert not addr[0] & 0x01                 # never a group address
+            assert addr[0] & 0x02                     # locally administered
+            assert _is_valid_ether_addr(addr)

@@ -31,7 +31,9 @@ import usb.core
 
 from wifit3.chips.driver import Driver, FakeMacSupport, ProgressCallback
 from wifit3.chips.mt7601u.constants import (
+    HZ,
     MT_ASIC_VERSION,
+    MT_CALIBRATE_INTERVAL,
     MT_EFUSE_CTRL,
     MT_EFUSE_CTRL_SEL,
     MT_MAC_ADDR_DW0,
@@ -43,12 +45,13 @@ from wifit3.chips.mt7601u.constants import (
 from wifit3.chips.mt7601u.eeprom import MT7601UEeprom, MT7601UEepromParams
 from wifit3.chips.mt7601u.firmware import find_firmware, load_firmware
 from wifit3.chips.mt7601u.init import MT7601UInit
-from wifit3.chips.mt7601u.mcu import MT7601UMcu
+from wifit3.chips.mt7601u.mcu import MT7601UMcu, McuTimeout
 from wifit3.chips.mt7601u.phy import MT7601UPhy
 from wifit3.chips.mt7601u.rx import iter_frames
 from wifit3.chips.mt7601u.transport import MT7601UTransport
 from wifit3.chips.mt7601u.tx import TX_QUEUE_INJECT as DEFAULT_TX_QUEUE
 from wifit3.chips.mt7601u.tx import stamp_seq_ctrl
+from wifit3.chips.mt7601u.cal import phy_calibrate
 from wifit3.chips.mt7601u.tx_status import TxStatus
 from wifit3.chips.mt7601u.tx_ring import TxQueues
 from wifit3.chips.mt7601u.wcid import init_station_memory
@@ -61,6 +64,9 @@ logger = logging.getLogger(__name__)
 
 RX_BUFFER_SIZE = 32768
 """mt7601u.h MT_RX_ORDER 3, so the RX URBs are 4 pages: 16 * 32768 = 512 KiB."""
+
+CALIBRATE_INTERVAL_S = MT_CALIBRATE_INTERVAL / HZ
+"""mt7601u.h:22 MT_CALIBRATE_INTERVAL is 4 * HZ jiffies; asyncio.sleep wants seconds."""
 
 class MT7601UDriver(Driver):
     """Receive-only userspace driver for the MT7601U."""
@@ -112,6 +118,7 @@ class MT7601UDriver(Driver):
         self.mac_address: Optional[str] = None
         self._channel: int = self.SUPPORTED_CHANNELS[0]
         self._tx_seqno: int = 0
+        self._cal_task: Optional[asyncio.Task] = None
         self._rx_callback: Optional[Callable] = None
         self._disconnect_callback: Optional[Callable] = None
         self._reader: Optional[RxReaderThread] = None
@@ -267,8 +274,27 @@ class MT7601UDriver(Driver):
         self.phy.set_channel(self._channel)
 
         self._tx_queues = TxQueues(self.transport, self.mcu)
+        # main.c:22-25 queues cal_work at MT_CALIBRATE_INTERVAL once the MAC is started.
+        self._cal_task = asyncio.create_task(self._calibration_loop())
         step(1.0, "Ready")
         return True
+
+    async def _calibration_loop(self) -> None:
+        """phy.c:1014 re-queues cal_work every MT_CALIBRATE_INTERVAL.
+
+        Without it phy.raw_temp keeps its boot value forever and the DPD and PLL-protect
+        branches of cal.py:temp_comp can never fire again. A USB hiccup on one tick is not
+        worth tearing the interface down for.
+        """
+        try:
+            while True:
+                await asyncio.sleep(CALIBRATE_INTERVAL_S)
+                try:
+                    phy_calibrate(self.phy)
+                except (IOError, usb.core.USBError, McuTimeout) as exc:
+                    logger.debug("MT7601U: calibration tick skipped: %s", exc)
+        except asyncio.CancelledError:
+            pass
 
     def _start_rx(self) -> None:
         loop = asyncio.get_event_loop()
@@ -328,6 +354,9 @@ class MT7601UDriver(Driver):
         The MAC stops before the reader does: init.c:285-296 drains the RX queue, which only
         empties while the host is still consuming bulk-IN.
         """
+        if self._cal_task is not None:               # main.c:37 cancel_delayed_work_sync
+            self._cal_task.cancel()
+            self._cal_task = None
         try:
             self.chip_init.mac_stop_hw()             # init.c:305 mt7601u_mac_stop
         except Exception as exc:                     # teardown must not mask the real error

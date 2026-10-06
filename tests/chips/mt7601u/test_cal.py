@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from wifit3.chips.mt7601u import constants as C
 from wifit3.chips.mt7601u.cal import (
+    BBP_TEMP_POLL_LIMIT,
+    phy_calibrate,
+    read_temp,
     DPD_TEMP_TOLERANCE,
     _set_initial_tssi,
     lin2dbd,
@@ -326,3 +329,37 @@ class TestTssiSignAndClamp:
         _set_initial_tssi(phy, 3156, 0)
         written = tp.writes_to(C.MT_TX_ALC_CFG_1)[-1] & C.MT_TX_ALC_CFG_1_TEMP_COMP
         assert written == 10
+
+class TestPeriodicCalibration:
+    """phy.c:530 read_temp and phy.c:1002 phy_calibrate. Without the periodic pass
+    raw_temp keeps its boot value and temp_comp can never fire again."""
+
+    def test_read_temp_sign_extends_the_sensor(self) -> None:
+        """phy.c:530 is declared s8 and the sensor byte carries the sign bit."""
+        phy, _tp, _mcu = make(bbp49=0x80)
+        assert read_temp(phy) == -128
+
+    def test_read_temp_does_not_bypass_the_rf(self) -> None:
+        """read_bootup_temp bypasses the RF, which would deafen a running receiver.
+        phy.c:530 touches neither MT_RF_BYPASS_0 nor MT_RF_SETTING_0."""
+        phy, tp, _mcu = make()
+        read_temp(phy)
+        assert tp.writes_to(C.MT_RF_BYPASS_0) == []
+        assert tp.writes_to(C.MT_RF_SETTING_0) == []
+
+    def test_the_busy_wait_is_bounded_by_the_c_s_hundred_reads(self) -> None:
+        """phy.c:536 is `for (i = 100; i && (val & 0x10); i--)`. The kick at phy.c:534
+        sets the bit, so a chip that never clears it must not spin forever."""
+        phy, tp, _mcu = make()
+        read_temp(phy)
+        kicks = [v for v in tp.writes_to(C.MT_BBP_CSR_CFG)
+                 if C._field_get(C.MT_BBP_CSR_CFG_REG_NUM, v) == 47
+                 and v & C.MT_BBP_CSR_CFG_READ]
+        assert len(kicks) <= BBP_TEMP_POLL_LIMIT + 1
+
+    def test_a_calibration_pass_refreshes_raw_temp(self) -> None:
+        phy, _tp, _mcu = make(bbp47=0x05)
+        phy.raw_temp = 0
+        phy_calibrate(phy)
+        assert phy.raw_temp == read_temp(phy)
+        assert phy.raw_temp != 0
