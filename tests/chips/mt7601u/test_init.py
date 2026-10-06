@@ -6,6 +6,7 @@ two ways. The register sequence is pinned with a recording transport.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -385,11 +386,15 @@ class TestMacStart:
 class TestChipOnoff:
     def test_enable_sets_the_clock_and_the_enable_bits(self) -> None:
         init_, tp = make_init()
-        tp.rr = lambda offset: (C.MT_CMB_CTRL_XTAL_RDY | C.MT_CMB_CTRL_PLL_LD)
+        readback = C.MT_CMB_CTRL_XTAL_RDY | C.MT_CMB_CTRL_PLL_LD
+        tp.rr = lambda offset: readback
         init_.chip_onoff(True)
-        val = tp.writes_to(C.MT_WLAN_FUN_CTRL)[0]
-        assert val & C.MT_WLAN_FUN_CTRL_WLAN_EN
-        assert val & C.MT_WLAN_FUN_CTRL_WLAN_CLK_EN
+        # init.c:82 writes the register back untouched before init.c:32 gates the clock.
+        writes = tp.writes_to(C.MT_WLAN_FUN_CTRL)
+        assert len(writes) == 2
+        assert writes[0] == readback
+        assert writes[1] & C.MT_WLAN_FUN_CTRL_WLAN_EN
+        assert writes[1] & C.MT_WLAN_FUN_CTRL_WLAN_CLK_EN
         assert init_.wlan_running
 
     def test_disable_clears_enable_but_keeps_the_clock(self) -> None:
@@ -397,16 +402,19 @@ class TestChipOnoff:
         init_, tp = make_init()
         tp.rr = lambda offset: 0xFFFFFFFF            # WLAN_EN and WLAN_CLK_EN both set
         init_.chip_onoff(False)
-        val = tp.writes_to(C.MT_WLAN_FUN_CTRL)[0]
+        val = tp.writes_to(C.MT_WLAN_FUN_CTRL)[-1]
         assert not val & C.MT_WLAN_FUN_CTRL_WLAN_EN
         assert val & C.MT_WLAN_FUN_CTRL_WLAN_CLK_EN
         assert not init_.wlan_running
 
-    def test_crystal_never_locking_raises(self) -> None:
+    def test_crystal_never_locking_logs_and_continues(self, caplog) -> None:
+        """init.c:55 only logs; refusing here would strand a card upstream brings up."""
         init_, tp = make_init()
         tp.rr = lambda offset: 0
-        with pytest.raises(BringUpError, match="PLL and XTAL"):
+        with caplog.at_level(logging.ERROR):
             init_.chip_onoff(True)
+        assert "PLL and XTAL" in caplog.text
+        assert init_.wlan_running
 
 
 class TestAggregateConstants:

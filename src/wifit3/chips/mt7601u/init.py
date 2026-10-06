@@ -9,6 +9,7 @@ MCU-register-pair traffic, so it is replay-verified against the cold-boot captur
 """
 from __future__ import annotations
 
+import logging
 import time
 
 from .constants import (
@@ -57,8 +58,12 @@ from .constants import (
     MT_USB_DMA_CFG_TX_BULK_EN,
     MT_USB_DMA_CFG_UDMA_RX_WL_DROP,
     MT_WLAN_FUN_CTRL,
+    MT_WLAN_FUN_CTRL_FRC_WL_ANT_SEL,
+    MT_WLAN_FUN_CTRL_GPIO_OUT_EN,
     MT_WLAN_FUN_CTRL_WLAN_CLK_EN,
     MT_WLAN_FUN_CTRL_WLAN_EN,
+    MT_WLAN_FUN_CTRL_WLAN_RESET,
+    MT_WLAN_FUN_CTRL_WLAN_RESET_RF,
     MT_WPDMA_GLO_CFG,
     MT_WPDMA_GLO_CFG_RX_DMA_BUSY,
     MT_WPDMA_GLO_CFG_TX_DMA_BUSY,
@@ -68,6 +73,8 @@ from .constants import Q_SELECT
 from .mcu import MT7601UMcu
 from .phy import MT7601UPhy
 from .transport import MT7601UTransport
+
+logger = logging.getLogger(__name__)
 
 MT_USB_AGGR_TIMEOUT = 0x80
 """mt7601u.h:31 -- 0x80 * 33ns of RX bulk aggregation."""
@@ -89,7 +96,7 @@ beacons and zero unicast data frames in 20 s, so no client MAC was ever derivabl
 and PHY_ERR suppressed unicast outright. VER_ERR nearly killed RX (29 beacons in 16 s,
 versus 360 for this value). Keeping promisc+DUP discovered 18 clients over 60 s."""
 
-ASIC_READY_ATTEMPTS = 100
+ASIC_READY_ATTEMPTS = 101          # core.c:11 do/while(i--) from i=100 runs 101 times
 """core.c:11."""
 
 XTAL_POLL_ATTEMPTS = 200
@@ -116,17 +123,33 @@ class MT7601UInit:
 
     # ------------------------------------------------------------------
 
-    def chip_onoff(self, enable: bool) -> None:
-        """init.c:12 -- gate the WLAN clock and wait for the crystal and PLL to lock.
+    def chip_onoff(self, enable: bool, reset: bool = False) -> None:
+        """init.c:59 -- write MT_WLAN_FUN_CTRL back untouched, then hand that same value to
+        set_wlan_state, which is what gates the clock. Two writes, not one."""
+        val = self.tp.rr(MT_WLAN_FUN_CTRL)
+        if reset:
+            val |= MT_WLAN_FUN_CTRL_GPIO_OUT_EN
+            val &= ~MT_WLAN_FUN_CTRL_FRC_WL_ANT_SEL & 0xFFFFFFFF
+            if val & MT_WLAN_FUN_CTRL_WLAN_EN:
+                val |= MT_WLAN_FUN_CTRL_WLAN_RESET | MT_WLAN_FUN_CTRL_WLAN_RESET_RF
+                self.tp.wr(MT_WLAN_FUN_CTRL, val)
+                time.sleep(0.000020)                      # udelay(20)
+                val &= ~(MT_WLAN_FUN_CTRL_WLAN_RESET
+                         | MT_WLAN_FUN_CTRL_WLAN_RESET_RF) & 0xFFFFFFFF
+        self.tp.wr(MT_WLAN_FUN_CTRL, val)
+        time.sleep(0.000020)                              # udelay(20)
+        self.set_wlan_state(val, enable)
 
-        WLAN_CLK stays on even when disabling: init.c:20 notes that turning it off
+    def set_wlan_state(self, val: int, enable: bool) -> None:
+        """init.c:16 -- gate the WLAN clock and wait for the crystal and PLL to lock.
+
+        WLAN_CLK stays on even when disabling: init.c:19 notes that turning it off
         stops the chip answering on the probe path.
         """
-        val = self.tp.rr(MT_WLAN_FUN_CTRL)
         if enable:
             val |= MT_WLAN_FUN_CTRL_WLAN_EN | MT_WLAN_FUN_CTRL_WLAN_CLK_EN
         else:
-            val &= ~MT_WLAN_FUN_CTRL_WLAN_EN
+            val &= ~MT_WLAN_FUN_CTRL_WLAN_EN & 0xFFFFFFFF
         self.tp.wr(MT_WLAN_FUN_CTRL, val)
         time.sleep(0.000020)                              # udelay(20)
 
@@ -139,7 +162,8 @@ class MT7601UInit:
             if val & MT_CMB_CTRL_XTAL_RDY and val & MT_CMB_CTRL_PLL_LD:
                 return
             time.sleep(0.000020)                          # udelay(20)
-        raise BringUpError("chip_onoff", "PLL and XTAL check failed")
+        # init.c:55 logs and carries on -- a slow PLL is not a bring-up failure upstream.
+        logger.error("Error: PLL and XTAL check failed!")
 
     def reset_csr_bbp(self) -> None:
         """init.c:90 -- pulse RESET_CSR|RESET_BBP with USB DMA off in between."""
@@ -168,7 +192,9 @@ class MT7601UInit:
         registers the silicon has not started honouring."""
         for _ in range(ASIC_READY_ATTEMPTS):
             val = self.tp.rr(MT_MAC_CSR0)
-            if val and ~val:
+            # core.c:19 complements a u32, so an all-ones read fails the test. Python's ~ is
+            # arbitrary-precision and would make 0xffffffff pass, accepting a dead card.
+            if val and ~val & 0xFFFFFFFF:
                 return
             time.sleep(0.000010)                          # udelay(10)
         raise BringUpError("asic_ready", "MT_MAC_CSR0 never settled")
@@ -258,5 +284,8 @@ class MT7601UInit:
         """init.c:404-411 -- the post-PHY steps, in the kernel's order."""
         self.phy.set_rx_path(0)
         self.phy.set_tx_dac(0)
-        self.phy.set_ctrlch(below=False)
+        # init.c:407-408 is MAC then BBP; phy.c:401-402 orders the same pair the
+        # other way round, so neither call site can share a wrapper.
+        self.phy.mac_set_ctrlch(False)
+        self.phy.bbp_set_ctrlch(False)
         self.phy.bbp_set_bw(MT_BW_20)

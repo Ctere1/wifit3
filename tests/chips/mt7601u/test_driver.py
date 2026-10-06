@@ -64,7 +64,10 @@ class TestBringUpOrder:
         assert src.index("chip_onoff(True)") < src.index("load_firmware(")
 
     def test_the_firmware_load_is_waited_for_on_both_sides(self, driver) -> None:
-        assert inspect.getsource(driver._bringup).count("wait_asic_ready()") == 2
+        src = inspect.getsource(driver._bringup)
+        # usb.c:291 probe gate, then init.c:332 before the image and init.c:347 after it.
+        assert src.count("wait_asic_ready()") == 3
+        assert src.index("load_firmware(") < src.rindex("wait_asic_ready()")
 
     def test_the_csr_and_bbp_reset_follows_the_firmware_load(self, driver) -> None:
         src = inspect.getsource(driver._bringup)

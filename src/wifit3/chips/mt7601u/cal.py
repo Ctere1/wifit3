@@ -117,7 +117,10 @@ def read_bootup_temp(phy: MT7601UPhy) -> int:
     phy.tp.wr(MT_RF_BYPASS_0, 0)
     phy.tp.wr(MT_RF_SETTING_0, rf_set)
     phy.tp.wr(MT_RF_BYPASS_0, rf_bp)
-    return temp
+    # phy.c:492 is declared s8 and returns a u8, so the sensor's sign bit is reinterpreted
+    # on return. Kept unsigned, a chip below its EEPROM reference temperature feeds
+    # (raw_temp - ref_temp) a value 256 too high and MCU_CAL_DPD is calibrated to garbage.
+    return temp - 0x100 if temp & 0x80 else temp
 
 
 def rxdc_cal(phy: MT7601UPhy) -> None:

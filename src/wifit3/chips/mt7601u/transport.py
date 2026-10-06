@@ -98,13 +98,14 @@ class MT7601UTransport:
         interface = cfg[(0, 0)]
         self.in_eps.clear()
         self.out_eps.clear()
-        # usb.c:244 records the first bulk-IN's max packet size; init.c:108 only enables
-        # RX aggregation when it is a full 512.
+        # usb.c:244 assigns in_max_packet on every bulk-IN it walks, so the LAST one
+        # wins; init.c:108 then enables RX aggregation only when it is a full 512.
+        # Keeping the first instead silently flips that branch on any device whose two
+        # bulk-IN endpoints disagree.
         self.in_max_packet = 0
         for endpoint in interface:
             if endpoint.bEndpointAddress & usb.util.ENDPOINT_IN:
-                if not self.in_max_packet:
-                    self.in_max_packet = endpoint.wMaxPacketSize
+                self.in_max_packet = endpoint.wMaxPacketSize
                 self.in_eps.append(endpoint.bEndpointAddress)
             else:
                 self.out_eps.append(endpoint.bEndpointAddress)

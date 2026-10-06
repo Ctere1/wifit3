@@ -32,7 +32,10 @@ from .constants import (
     MT_RF_CSR_CFG_REG_BANK,
     MT_RF_CSR_CFG_REG_ID,
     MT_RF_CSR_CFG_WR,
+    MT_TEMP_MODE_NORMAL,
     MT_TX_ALC_CFG_0,
+    MT_TX_BAND_CFG,
+    MT_TX_BAND_CFG_UPPER_40M,
     MT_TX_PWR_CFG_0,
     _field_get,
     _field_prep,
@@ -95,7 +98,10 @@ class MT7601UPhy:
         self.raw_temp = 0
         self.curr_temp = 0
         self.dpd_temp = 0
-        self.temp_mode = -1
+        # phy.c:306 memoises against a kzalloc'd dev->temp_mode, i.e.
+        # MT_TEMP_MODE_NORMAL. A -1 sentinel here writes the normal-temperature BBP
+        # table at boot, which upstream skips.
+        self.temp_mode = MT_TEMP_MODE_NORMAL
         self.pll_lock_protect = False
 
     # ------------------------------------------------------------------
@@ -237,9 +243,9 @@ class MT7601UPhy:
             self.ee.power_rate_table.cck[0].bw20 = self.ee.real_cck_bw20[0] - 2
             self.ee.power_rate_table.cck[1].bw20 = self.ee.real_cck_bw20[1] - 2
 
-    def set_ctrlch(self, below: bool) -> None:
-        """Both windows move the control channel; phy.c sets BBP and MAC together."""
-        self.bbp_set_ctrlch(below)
+    def mac_set_ctrlch(self, below: bool) -> None:
+        """mt7601u.h:382."""
+        self.tp.rmc(MT_TX_BAND_CFG, MT_TX_BAND_CFG_UPPER_40M, int(below))
 
     # ------------------------------------------------------------------
     # The channel tune (phy.c __mt7601u_phy_set_channel)
@@ -270,7 +276,7 @@ class MT7601UPhy:
         if bw != self.bw or below != self.chan_ext_below:
             self.bbp_set_bw(bw)
             self.bbp_set_ctrlch(below)
-            self.set_ctrlch(below)
+            self.mac_set_ctrlch(below)
             self.chan_ext_below = below
         self.bw = bw
 

@@ -31,9 +31,13 @@ import usb.core
 
 from wifit3.chips.driver import Driver, FakeMacSupport, ProgressCallback
 from wifit3.chips.mt7601u.constants import (
+    MT_ASIC_VERSION,
+    MT_EFUSE_CTRL,
+    MT_EFUSE_CTRL_SEL,
     MT_MAC_ADDR_DW0,
     MT_MAC_ADDR_DW1,
     MT_MAC_ADDR_DW1_U2ME_MASK,
+    MT_MAC_CSR0,
     MT_USB_DMA_CFG,
 )
 from wifit3.chips.mt7601u.eeprom import MT7601UEeprom, MT7601UEepromParams
@@ -179,14 +183,18 @@ class MT7601UDriver(Driver):
 
         self.is_warm = False
 
-        step(0.10, "Reading EEPROM")
-        # read() fills its own self.ee in place. It must not be rebound here: phy was
-        # constructed with this object, and a rebind left the TX power path reading an
-        # empty table, so every MT_TX_PWR_CFG_* register was programmed to zero and the
-        # chip transmitted at zero power.
-        self.eeprom_dev.read()
-        mac = self.eeprom_dev.macaddr
-        self.mac_address = ":".join(f"{b:02x}" for b in mac) if any(mac) else None
+        # usb.c:289-306: the ASIC must answer before anything is programmed, and the revision
+        # gate is the kernel's own discriminator against the mt76x0u sharing VID:PID 148f:760a.
+        step(0.10, "Probing ASIC")
+        self.chip_init.wait_asic_ready()
+        asic_rev = self.transport.rr(MT_ASIC_VERSION)
+        mac_rev = self.transport.rr(MT_MAC_CSR0)
+        logger.info("MT7601U: ASIC revision %08x MAC revision %08x", asic_rev, mac_rev)
+        if (asic_rev >> 16) != 0x7601:                                      # usb.c:299
+            raise BringUpError(
+                "asic_id", f"ASIC revision {asic_rev:#010x} is not an MT7601U")
+        if not self.transport.rr(MT_EFUSE_CTRL) & MT_EFUSE_CTRL_SEL:        # usb.c:305
+            logger.warning("MT7601U: eFUSE not present")
 
         # init.c:330-347 gates the WLAN clock, waits for the ASIC, then downloads the
         # firmware, polls WPDMA idle, and waits for the ASIC a second time. Pushing the
@@ -213,6 +221,17 @@ class MT7601UDriver(Driver):
         # A TX descriptor carries a wcid that must resolve to a valid slot.
         init_station_memory(self.mcu)
         self.chip_init.pre_phy_finalise()
+
+        # init.c:396 reads the EEPROM here, immediately before phy_init: the power tables it
+        # fills are what phy_init programs. read() fills its own self.ee in place and must not
+        # be rebound -- phy was constructed with this object, and a rebind left the TX power
+        # path reading an empty table, so every MT_TX_PWR_CFG_* register went to zero and the
+        # chip transmitted at zero power.
+        step(0.80, "Reading EEPROM")
+        self.eeprom_dev.read()
+        mac = self.eeprom_dev.macaddr
+        self.mac_address = ":".join(f"{b:02x}" for b in mac) if any(mac) else None
+
         self.phy.phy_init()
         self.chip_init.finalise()
         self.chip_init.mac_start()
