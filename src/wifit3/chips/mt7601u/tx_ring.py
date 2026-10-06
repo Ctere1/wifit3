@@ -82,16 +82,22 @@ class TxQueue:
         # makes a TX result untrustworthy. Draining inline is the tightest
         # approximation and needs no timer.
         self.collect_status()
+        # bulk_out_tx is synchronous, so this frame is already on the air: release its
+        # slot here. The kernel releases q->used in the async URB completion callback,
+        # which has no counterpart in this port. Retiring on a popped status instead
+        # ratcheted used to entries after ~65 injects and refused every frame after
+        # that, measured on hardware while the endpoint still accepted 96-byte writes.
+        self.pump(1)
         return True
 
     def collect_status(self, limit: int = DRAIN_LIMIT) -> list[TxStatus]:
-        """Pop pending TX status entries and release the entries they cover.
+        """Pop pending TX status entries into the recent-status window.
 
-        The kernel releases a URB on completion and reports the status separately;
-        here the two are folded, so each popped status retires one ring slot.
+        Popping does not retire a ring slot: MT_TX_STAT_FIFO is a free-running counter
+        that yields a valid entry on a wrap rather than per frame, so slots retired
+        against it leak. ``submit`` releases the slot instead.
         """
         statuses = TxStatusFifo(self.transport).drain(limit)
-        self.pump(len(statuses))
         self.statuses.extend(statuses)
         del self.statuses[:-TX_STATUS_HISTORY]
         return statuses

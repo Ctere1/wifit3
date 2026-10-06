@@ -97,11 +97,13 @@ class TestSubmit:
         assert len(sent) % 4 == 0
         assert sent[-4:] == b"\x00\x00\x00\x00"
 
-    def test_one_submit_consumes_one_entry(self) -> None:
+    def test_one_submit_releases_its_entry_immediately(self) -> None:
+        """bulk_out_tx is synchronous, so the frame is done when submit returns and
+        the slot must not stay occupied waiting for a status that may never come."""
         q, _tp = make_queue()
         q.submit(FRAME)
-        assert q.used == 1
-        assert q.free_entries() == TX_QUEUE_ENTRIES - 1
+        assert q.used == 0
+        assert q.free_entries() == TX_QUEUE_ENTRIES
 
     def test_the_fourth_slot_wraps_back_to_the_first(self) -> None:
         """end advances modulo entries, so freed slots are reused in order."""
@@ -122,25 +124,27 @@ class TestSubmit:
 
 
 class TestFullQueue:
+    """dma.c returns -ENOSPC on a full queue. Unreachable while bulk_out_tx is
+    synchronous -- submit releases each slot as it goes -- so these force the count
+    to the cap rather than filling it, keeping the guard under test for the day an
+    async transport makes it reachable again."""
+
     def test_a_full_queue_refuses_rather_than_overwriting(self) -> None:
-        """A full queue means -ENOSPC in dma.c. Overwriting an in-flight entry
-        would corrupt a frame the chip is still transmitting."""
         q, _tp = make_queue(entries=2)
-        assert q.submit(FRAME) is True
-        assert q.submit(FRAME) is True
+        q.used = q.entries
         assert q.submit(FRAME) is False
 
     def test_a_refused_submit_sends_nothing(self) -> None:
         q, tp = make_queue(entries=1)
-        q.submit(FRAME)
+        q.used = q.entries
         assert q.submit(FRAME) is False
-        assert len(tp.submitted) == 1
+        assert tp.submitted == []
 
     def test_a_refused_submit_leaves_the_count_alone(self) -> None:
         q, _tp = make_queue(entries=1)
+        q.used = q.entries
         q.submit(FRAME)
-        q.submit(FRAME)
-        assert q.used == 1
+        assert q.used == q.entries
 
 
 class TestFailures:
@@ -167,7 +171,7 @@ class TestFailures:
 class TestPump:
     def test_pump_releases_completed_entries(self) -> None:
         q, _tp = make_queue()
-        q.submit(FRAME)
+        q.used = 1
         assert q.pump(1) == 1
         assert q.used == 0
         assert q.free_entries() == TX_QUEUE_ENTRIES
@@ -179,8 +183,7 @@ class TestPump:
 
     def test_pump_reports_how_many_it_released(self) -> None:
         q, _tp = make_queue()
-        for _ in range(3):
-            q.submit(FRAME)
+        q.used = 3
         assert q.pump(2) == 2
         assert q.used == 1
 
@@ -257,12 +260,13 @@ class TestStatusPump:
         assert q.used == 0
         assert q.statuses[0].success is False
 
-    def test_an_empty_fifo_leaves_the_entry_in_flight(self) -> None:
-        """No status yet means the transmit is still outstanding, which is what
-        stops a burst from overrunning the ring."""
+    def test_an_empty_fifo_does_not_strand_the_entry(self) -> None:
+        """The FIFO is a free-running counter, so most frames never get a status.
+        Retiring slots against it ratcheted used to the cap and refused every frame
+        after ~65 injects, measured on hardware with the endpoint still accepting."""
         q, tp = make_queue()
         q.submit(FRAME)
-        assert q.used == 1
+        assert q.used == 0
         assert q.statuses == []
 
     def test_several_statuses_backed_up_at_once_are_all_popped(self) -> None:
