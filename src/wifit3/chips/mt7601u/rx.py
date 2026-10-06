@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from .constants import (
     MT_RXD_INFO_TYPE,
+    MT_RXINFO_CRCERR,
     MT_RXINFO_L2PAD,
     MT_RXWI_ANT_AUX_LNA,
     MT_RXWI_CTL_MPDU_LEN,
@@ -122,8 +123,9 @@ def get_rssi(rate: int, ant: int, gain: int, lna_gain: int, rssi_offset: int) ->
 def decode_segment(seg: bytes, lna_gain: int = 0, rssi_offset: int = 0) -> RxFrame | None:
     """dma.c mt7601u_rx_process_seg + mt7601u_rx_skb_from_seg -- one segment to one frame.
 
-    Returns None for the frames dma.c drops: a non-packet FCE type, a zero or oversized
-    MPDU length, or a length that cannot fit a MAC header.
+    Returns None for the frames dma.c drops: a non-packet FCE type, an MPDU length under
+    10 or past the payload, or a length that cannot fit a MAC header. Also drops
+    MT_RXINFO_CRCERR, which the C leaves to MT_RX_FILTR_CFG_CRC_ERR in the MAC (main.c:117).
     """
     if _field_get(MT_RXD_INFO_TYPE, int.from_bytes(seg[-4:], "little")):
         return None                                 # dma.c:101 -- a non-pkt urb on the RX path
@@ -132,10 +134,13 @@ def decode_segment(seg: bytes, lna_gain: int = 0, rssi_offset: int = 0) -> RxFra
     payload = seg[MT_DMA_HDR_LEN + RXWI_LEN:len(seg) - MT_FCE_INFO_LEN]
 
     rxinfo = int.from_bytes(rxwi[0:4], "little")
+    if rxinfo & MT_RXINFO_CRCERR:
+        return None                                 # mac.h:54 -- the FCS did not check out
+
     ctl = int.from_bytes(rxwi[4:8], "little")
     true_len = _field_get(MT_RXWI_CTL_MPDU_LEN, ctl)
-    if not true_len or true_len > len(payload):
-        return None                                 # dma.c:41 -- bad frame length
+    if true_len < 10 or true_len > len(payload):
+        return None                                 # mac.c:470, dma.c:41 -- bad frame length
 
     hdr_len = _hdrlen_from_buf(payload[:true_len])
     if not hdr_len:

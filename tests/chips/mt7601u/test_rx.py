@@ -109,6 +109,15 @@ class TestDecodeSegment:
     def test_mpdu_len_beyond_the_payload_is_dropped(self) -> None:
         assert decode_segment(build_segment(mpdu_len=32, payload=b"\x80" * 4)) is None
 
+    def test_mpdu_len_under_ten_is_dropped(self) -> None:
+        assert decode_segment(build_segment(mpdu_len=9)) is None
+
+    def test_crc_error_frame_is_dropped(self) -> None:
+        """A frame the MAC flagged FCS-failed is noise wearing a plausible header."""
+        assert decode_segment(build_segment(mpdu_len=64)) is not None
+        assert decode_segment(build_segment(mpdu_len=64,
+                                           rxinfo=C.MT_RXINFO_CRCERR)) is None
+
     def test_l2pad_splits_header_from_body(self) -> None:
         # FC 0x0084 is a control frame, so the header is 16 bytes and the two pad
         # bytes the hardware inserted sit at offset 16. Reading the header as 10

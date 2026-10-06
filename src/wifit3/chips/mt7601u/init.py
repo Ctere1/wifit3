@@ -37,8 +37,11 @@ from .constants import (
     MT_MCU_MEMMAP_BBP,
     MT_MCU_MEMMAP_WLAN,
     MT_RX_FILTR_CFG,
+    MT_RX_FILTR_CFG_CRC_ERR,
     MT_RX_FILTR_CFG_DUP,
-    MT_RX_FILTR_CFG_PROMISC,
+    MT_RX_FILTR_CFG_PHY_ERR,
+    MT_RX_FILTR_CFG_RTS,
+    MT_RX_FILTR_CFG_VER_ERR,
     MT_RX_STA_CNT0,
     MT_RX_STA_CNT1,
     MT_RX_STA_CNT2,
@@ -87,14 +90,15 @@ BEACON_OFFSETS = (0xC000, 0xC200, 0xC400, 0xC600, 0xC800, 0xCA00, 0xCC00, 0xCE00
                   0xD000, 0xD200, 0xD400, 0xD600, 0xD800, 0xDA00, 0xDC00, 0xDE00)
 """init.c:319 -- 512 bytes per beacon slot, as absolute MT_BEACON_BASE offsets."""
 
-RX_FILTER_MONITOR = MT_RX_FILTR_CFG_PROMISC | MT_RX_FILTR_CFG_DUP
-"""Promiscuous capture, with only DUP kept alongside it.
+RX_FILTER_MONITOR = (MT_RX_FILTR_CFG_CRC_ERR | MT_RX_FILTR_CFG_PHY_ERR
+                     | MT_RX_FILTR_CFG_VER_ERR | MT_RX_FILTR_CFG_DUP
+                     | MT_RX_FILTR_CFG_RTS)
+"""main.c:116-125 applied to the init.c:238-244 default, for a monitor interface.
 
-init.c:239 sets every bit, but this silicon does not treat them as independent enables.
-Measured live on ch7 with wlan0 pinging the gateway at -38 dBm: the init.c value caught 250
-beacons and zero unicast data frames in 20 s, so no client MAC was ever derivable. CRC_ERR
-and PHY_ERR suppressed unicast outright. VER_ERR nearly killed RX (29 beacons in 16 s,
-versus 360 for this value). Keeping promisc+DUP discovered 18 clients over 60 s."""
+The register drops on set: main.c:107 sets a bit only when mac80211 did NOT ask for that
+class. A monitor asks for OTHER_BSS, CONTROL and PSPOLL and not FCSFAIL or PLCPFAIL, so it
+clears PROMISC, the main.c:119 control group and PSPOLL, and keeps CRC_ERR, PHY_ERR,
+VER_ERR and DUP. RTS is outside that control group, so it stays set."""
 
 ASIC_READY_ATTEMPTS = 101          # core.c:11 do/while(i--) from i=100 runs 101 times
 """core.c:11."""

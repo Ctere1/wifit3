@@ -88,12 +88,12 @@ def waivers() -> E.WaiverSet:
     return E.WaiverSet(
         E.Waiver(
             "RX filter: monitor, not managed STA",
-            "init.c:238-245 programs MT_RX_FILTR_CFG = 0x00017f97 for a managed STA. The "
-            "register drops on set -- main.c:106-109 sets each bit only when mac80211 did "
-            "NOT ask for those frames -- so a monitor has to clear bits the managed default "
-            "sets, and this port writes its own narrower value. Open question, needs the "
-            "dongle: main.c:116 CLEARS PROMISC (bit 2) for FIF_OTHER_BSS, while "
-            "init.py:90 sets it, which by that polarity drops frames not addressed to us.",
+            "init.c:238-245 programs MT_RX_FILTR_CFG = 0x00017f97 for a managed STA inside "
+            "mac_start. The register drops on set -- main.c:107 sets each bit only when "
+            "mac80211 did NOT ask for that class -- so main.c:116-125 reconfigures it per "
+            "interface, and this port writes the monitor result (0x00001093) where mac_start "
+            "writes the managed default. Same value the capture reconfigures to; the only "
+            "difference is that the port does not pass through the managed default first.",
             sub=_rx_filter_substituted,
             match=_rx_filter_reconfigured,
         ),

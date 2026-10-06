@@ -360,20 +360,22 @@ class TestMacStart:
                         C.MT_MAC_SYS_CTRL_ENABLE_TX | C.MT_MAC_SYS_CTRL_ENABLE_RX]
         assert tp.writes_to(C.MT_RX_FILTR_CFG) == [RX_FILTER_MONITOR]
 
-    def test_filter_clears_the_error_bits_that_drop_unicast(self) -> None:
-        """CRC_ERR and PHY_ERR must stay clear: set, they suppress every unicast frame.
-
-        Measured on live hardware, ch7, wlan0 pinging the gateway at -38 dBm: the init.c
-        value caught 250 beacons and zero unicast data frames in 20 s, so no client MAC was
-        ever derivable. This filter discovered 18 clients over the same window.
-        """
+    def test_filter_drops_the_error_classes_a_monitor_never_asks_for(self) -> None:
+        """main.c:117-118 keep CRC_ERR and PHY_ERR set unless mac80211 asks for FCSFAIL
+        or PLCPFAIL, which a monitor interface does not."""
         for bit in (C.MT_RX_FILTR_CFG_CRC_ERR, C.MT_RX_FILTR_CFG_PHY_ERR,
-                    C.MT_RX_FILTR_CFG_VER_ERR):
-            assert not RX_FILTER_MONITOR & bit
-
-    def test_filter_still_admits_promiscuous_and_duplicates(self) -> None:
-        for bit in (C.MT_RX_FILTR_CFG_PROMISC, C.MT_RX_FILTR_CFG_DUP):
+                    C.MT_RX_FILTR_CFG_VER_ERR, C.MT_RX_FILTR_CFG_DUP):
             assert RX_FILTER_MONITOR & bit
+
+    def test_filter_admits_other_bss_control_frames_and_pspoll(self) -> None:
+        """A monitor asks for FIF_OTHER_BSS, FIF_CONTROL and FIF_PSPOLL, so main.c:116-125
+        clears PROMISC, the control group and PSPOLL. RTS is outside that group."""
+        for bit in (C.MT_RX_FILTR_CFG_PROMISC, C.MT_RX_FILTR_CFG_ACK,
+                    C.MT_RX_FILTR_CFG_CTS, C.MT_RX_FILTR_CFG_CFEND,
+                    C.MT_RX_FILTR_CFG_CFACK, C.MT_RX_FILTR_CFG_BA,
+                    C.MT_RX_FILTR_CFG_CTRL_RSV, C.MT_RX_FILTR_CFG_PSPOLL):
+            assert not RX_FILTER_MONITOR & bit
+        assert RX_FILTER_MONITOR & C.MT_RX_FILTR_CFG_RTS
 
     def test_dma_busy_forever_raises(self) -> None:
         init_, tp = make_init()
