@@ -205,7 +205,7 @@ def main() -> None:
     out.append('"""MT7601U register addresses, bitfields, vendor requests, and accessors.')
     out.append("")
     out.append("Generated from driver_sources/mt7601u-source-v7.2/ (tag v7.2); every value carries")
-    out.append("its [SRC] file:line. Do NOT hand-edit: re-run tools/porting/mt7601u/gen_constants.py instead.")
+    out.append("its [SRC] file:line. Do NOT hand-edit: re-run scripts/chips/mt7601u/gen_constants.py instead.")
     out.append('"""')
     # eeprom.h's enum fields are emitted last but MT_EFUSE_USAGE_MAP_SIZE references
     # two of them, so the derived size is appended after the enum block instead.

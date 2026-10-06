@@ -13,7 +13,7 @@ The capture is truncated at 32 bytes per record (usbmon prints no continuation l
 so only the DMA info word and the full 20-byte txwi are recorded. That is exactly the
 descriptor header, and it is the part that was never machine-checked.
 
-Run: uv run python tools/porting/mt7601u/verify_tx.py
+Run: uv run python scripts/chips/mt7601u/verify_tx.py
 """
 from __future__ import annotations
 

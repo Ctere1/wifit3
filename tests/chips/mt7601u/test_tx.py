@@ -2,7 +2,7 @@
 
 Layout and field semantics come from tx.c (mt7601u_push_txwi) and dma.h
 (struct mt76_txwi). Byte-exact verification of the resulting wire descriptor is the job of
-tools/porting/mt7601u/verify_tx.py against a recorded kernel-driver injection.
+scripts/chips/mt7601u/verify_tx.py against a recorded kernel-driver injection.
 """
 from __future__ import annotations
 

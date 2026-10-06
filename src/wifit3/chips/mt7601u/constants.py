@@ -1,7 +1,7 @@
 """MT7601U register addresses, bitfields, vendor requests, and accessors.
 
 Generated from driver_sources/mt7601u-source-v7.2/ (tag v7.2); every value carries
-its [SRC] file:line. Do NOT hand-edit: re-run tools/porting/mt7601u/gen_constants.py instead.
+its [SRC] file:line. Do NOT hand-edit: re-run scripts/chips/mt7601u/gen_constants.py instead.
 """
 from __future__ import annotations
 

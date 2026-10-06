@@ -11,7 +11,7 @@ The txwi carries the length, the station slot and the ACK policy; the DMA info w
 carries the transfer length, destination port and packet type.
 
 The byte layout is verified op-for-op against a recorded kernel-driver injection by
-tools/porting/mt7601u/verify_tx.py.
+scripts/chips/mt7601u/verify_tx.py.
 """
 from __future__ import annotations
 

@@ -2,7 +2,7 @@
 
 Payloads here are taken from the monitor-mode capture, so the byte layouts are the ones
 the silicon actually produced. Wire-order behaviour of the whole bring-up is checked by
-tools/porting/mt7601u/verify_mt7601u.py; this pins the decode.
+scripts/chips/mt7601u/verify_mt7601u.py; this pins the decode.
 """
 from __future__ import annotations
 

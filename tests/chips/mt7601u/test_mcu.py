@@ -2,7 +2,7 @@
 
 No hardware: the transport is faked, so this covers the byte layout and the
 header validation. The wire bytes themselves are checked against the cold-boot
-capture by tools/porting/mt7601u/verify_mt7601u.py.
+capture by scripts/chips/mt7601u/verify_mt7601u.py.
 """
 from __future__ import annotations
 

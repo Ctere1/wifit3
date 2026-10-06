@@ -2,7 +2,7 @@
 
 No hardware: the transport is faked, so these pin the byte layouts and the
 control-flow order. The wire bytes are checked against the monitor-mode capture by
-tools/porting/mt7601u/verify_tune.py (55 recorded tunes).
+scripts/chips/mt7601u/verify_tune.py (55 recorded tunes).
 """
 from __future__ import annotations
 
