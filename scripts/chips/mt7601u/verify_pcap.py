@@ -248,7 +248,16 @@ def _run(cap: str | None) -> int:
     except Exception as e:  # noqa: BLE001
         print(f"\n[harness] bring-up raised {type(e).__name__}: {e}")
 
-    return walk.report(title)
+    rc = walk.report(title)
+    if walk.ledger.frontier is not None:
+        return rc
+    # _bringup ends at the first channel tune, so the rest of the capture is the
+    # operational phase (hopping, TX) that this walk is not scoped to drive.
+    remaining = len(capture.ops) - walk.i
+    print()
+    print(f"OVERALL: _bringup replayed against the capture with no divergence; "
+          f"{remaining} operational-phase ops after it are out of its scope.")
+    return 0 if walk.ledger.waived_count == 0 else 2
 
 
 def main() -> int:
