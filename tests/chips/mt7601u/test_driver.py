@@ -42,12 +42,12 @@ class TestReceiveArming:
     """
 
     def test_reader_starts_between_mcu_cmd_init_and_write_mac_initvals(self, driver) -> None:
-        src = inspect.getsource(driver.connect)
+        src = inspect.getsource(driver._bringup)
         assert src.index("_start_rx()") > src.index("mcu_cmd_init()")
         assert src.index("_start_rx()") < src.index("write_mac_initvals()")
 
     def test_reader_is_not_started_a_second_time(self, driver) -> None:
-        assert inspect.getsource(driver.connect).count("_start_rx()") == 1
+        assert inspect.getsource(driver._bringup).count("_start_rx()") == 1
 
 
 class TestBringUpOrder:
@@ -60,14 +60,14 @@ class TestBringUpOrder:
     """
 
     def test_the_wlan_clock_is_gated_before_the_firmware_is_pushed(self, driver) -> None:
-        src = inspect.getsource(driver.connect)
+        src = inspect.getsource(driver._bringup)
         assert src.index("chip_onoff(True)") < src.index("load_firmware(")
 
     def test_the_firmware_load_is_waited_for_on_both_sides(self, driver) -> None:
-        assert inspect.getsource(driver.connect).count("wait_asic_ready()") == 2
+        assert inspect.getsource(driver._bringup).count("wait_asic_ready()") == 2
 
     def test_the_csr_and_bbp_reset_follows_the_firmware_load(self, driver) -> None:
-        src = inspect.getsource(driver.connect)
+        src = inspect.getsource(driver._bringup)
         assert src.index("load_firmware(") < src.index("reset_csr_bbp()")
 
 
@@ -336,7 +336,8 @@ class TestBringUpFailsLoudlyOnAWedgedChip:
 
     def test_bring_up_probes_liveness_before_reading_the_eeprom(self, driver) -> None:
         src = inspect.getsource(driver.connect)
-        assert src.index("_require_live_chip()") < src.index("eeprom_dev.read()")
+        assert src.index("_require_live_chip()") < src.index("await self._bringup(")
+        assert "eeprom_dev.read()" in inspect.getsource(driver._bringup)
 
 
 class TestBringUpRefusesAKernelBoundChip:

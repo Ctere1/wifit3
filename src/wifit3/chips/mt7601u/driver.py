@@ -161,14 +161,22 @@ class MT7601UDriver(Driver):
             )
 
     async def connect(self, progress_cb: Optional[ProgressCallback] = None) -> bool:
-        def step(fraction: float, message: str) -> None:
-            if progress_cb is not None:
-                progress_cb(fraction, message)
-
+        """Host-side attach -- kernel-driver refusal, interface claim, pipe map -- plus wifit3's
+        own liveness probe, then the ported bring-up. The probe reads a register the kernel
+        never touches here, so it stays outside _bringup()."""
         self._refuse_kernel_bound_chip()
         self.transport.claim()
         self.transport.assign_pipes()
         self._require_live_chip()
+        return await self._bringup(progress_cb)
+
+    async def _bringup(self, progress_cb: Optional[ProgressCallback] = None) -> bool:
+        """The kernel's cold-boot register sequence, in its order (init.c:330
+        mt7601u_init_hardware). verify_pcap replays against this."""
+        def step(fraction: float, message: str) -> None:
+            if progress_cb is not None:
+                progress_cb(fraction, message)
+
         self.is_warm = False
 
         step(0.10, "Reading EEPROM")
