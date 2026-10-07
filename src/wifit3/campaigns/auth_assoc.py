@@ -117,6 +117,7 @@ class Association:
         self._assoc_ok = False
         self.auth_status: Optional[int] = None
         self.assoc_status: Optional[int] = None
+        self.state = 1          # 802.11: 1 unauthenticated, 2 authenticated, 3 associated
         self._active = False
 
     # ---- lifecycle ----------------------------------------------------------
@@ -160,6 +161,32 @@ class Association:
             self.fail_reason = "no Assoc resp"
         return False
 
+    async def authenticate(self) -> bool:
+        """Open-System auth only (state 1 -> 2). True once the AP accepts us."""
+        if self.iface.current_channel != self.channel:
+            await self.iface.set_channel(self.channel)
+        self._auth_ok = False
+        self.auth_status = None
+        logger.info("-> Auth Req to %s", self.bssid)
+        await self._send_until(auth_req(self.bssid_bytes, self.our_mac),
+                               lambda: self._auth_ok, self.auth_timeout)
+        return self._auth_ok
+
+    async def associate_as(self, ssid: str) -> Optional[int]:
+        """Assoc Req claiming ``ssid`` without re-authenticating (state 2 -> 3). Returns
+        the Assoc Resp status, or None when the AP stays silent. A refusal leaves us in
+        state 2, so the caller may claim another SSID straight away."""
+        self._assoc_ok = False
+        self.assoc_status = None
+        self.ssid = ssid
+        logger.info("-> Assoc Req to %s as %r", self.bssid, ssid)
+        await self._send_until(assoc_req(self.bssid_bytes, self.our_mac, ssid,
+                                         self.assoc_trailer_ies,
+                                         channel=self.channel, privacy=self.privacy),
+                               lambda: self.assoc_status is not None, self.assoc_timeout)
+        self.associated = self._assoc_ok
+        return self.assoc_status
+
     async def _send_until(self, frame: bytes, done, timeout: float,
                           resend_after: float = 0.4) -> None:
         """Send ``frame`` immediately, then poll ``done()`` up to ``timeout``, resending
@@ -181,6 +208,7 @@ class Association:
             desc = status_description(pkt.status)
             if pkt.status == 0:
                 self._assoc_ok = True
+                self.state = 3
                 logger.info("<- Assoc Resp (status 0: %s) from %s", desc, self.bssid)
             elif pkt.status is not None:
                 self.fail_reason = f"Assoc rejected (status {pkt.status}: {desc})"
@@ -190,6 +218,7 @@ class Association:
             desc = status_description(pkt.status)
             if pkt.status == 0:
                 self._auth_ok = True
+                self.state = 2
                 logger.info("<- Auth Resp (status 0: %s) from %s", desc, self.bssid)
             elif pkt.status is not None:
                 self.fail_reason = f"Auth rejected (status {pkt.status}: {desc})"
@@ -201,3 +230,4 @@ class Association:
             logger.info("<- %s (reason %s: %s) from %s", kind.upper(), pkt.reason, desc, self.bssid)
             self.associated = False
             self._assoc_ok = False
+            self.state = 2 if kind == "disassoc" else 1
