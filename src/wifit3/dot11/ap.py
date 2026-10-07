@@ -34,10 +34,10 @@ def auth_resp(bssid: bytes, client: bytes) -> bytes:
     return _resp_header(b"\xb0\x00", bssid, client) + b"\x00\x00\x02\x00\x00\x00"
 
 
-def assoc_resp(bssid: bytes, client: bytes, aid: int = 1) -> bytes:
-    """Association Response: ESS+Privacy capability, status 0 (success), AID, rate menus."""
+def assoc_resp(bssid: bytes, client: bytes, aid: int = 1, channel: int = 1) -> bytes:
+    """Association Response: ESS+Privacy capability, status 0 (success), AID, band-aware rates."""
     body = (struct.pack("<H", _CAP_ESS_PRIVACY) + b"\x00\x00" + struct.pack("<H", aid)
-            + rates_ie() + ext_rates_ie())
+            + rates_ie(channel) + ext_rates_ie(channel))
     return _resp_header(b"\x10\x00", bssid, client) + body
 
 
