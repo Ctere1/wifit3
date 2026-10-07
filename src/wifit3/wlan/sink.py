@@ -372,6 +372,14 @@ class WlanSink:
         ap.wps = True
         return True
 
+    def confirm_decloak(self, bssid: str, ssid: str, method: str) -> bool:
+        """Learn an SSID a campaign proved, not one carried by a received frame."""
+        ap = self.access_points.get(bssid.lower())
+        if ap is None or not self._is_real_ssid(ssid):
+            return False
+        self._decloak(ap, ssid, method)
+        return True
+
     def _decloak(self, ap: AccessPoint, ssid: str, method: str) -> None:
         """Learn a hidden AP's real SSID, tag how it was revealed."""
         if not self._is_real_ssid(ap.ssid):

@@ -257,7 +257,7 @@ def _rsn_ap(*, encryption="WPA2", akms=("PSK",), wpa3=False, transition_mode=Fal
         ssid=ssid, is_hidden=not (ssid and ssid != "<hidden>"), last_beacon_frame=last_beacon_frame,
         wpa3=wpa3, transition_mode=transition_mode, wep=None,
         pmf_required=pmf_required, pmf_capable=pmf_capable, bssid="aa:bb:cc:dd:ee:ff",
-        wps=wps, wps_locked=wps_locked, wps_version=wps_version)
+        wps=wps, wps_locked=wps_locked, wps_version=wps_version, siblings=[])
 
 
 def test_pmf_status_markup_gradient():
@@ -389,7 +389,7 @@ def test_status_footer_wep_is_fakeauth_and_usable_ivs():
 def _wep_btn_ap():
     return types.SimpleNamespace(encryption="WEP", wps=None, wpa3=False,
                                  transition_mode=False, wps_locked=False, is_hidden=False,
-                                 ssid="WepNet", akm_suites=[], bssid="aa:bb:cc:dd:ee:ff", last_beacon_frame=b"\x80\x00beacon")
+                                 ssid="WepNet", siblings=[], akm_suites=[], bssid="aa:bb:cc:dd:ee:ff", last_beacon_frame=b"\x80\x00beacon")
 
 
 def _wep_hidden_ap():

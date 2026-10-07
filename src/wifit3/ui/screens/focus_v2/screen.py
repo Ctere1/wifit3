@@ -42,6 +42,7 @@ from wifit3.ui.screens.focus_v2.eviltwin_modal import EvilTwinInputModal, _can_h
 from wifit3.campaigns.pin import (EMPTY_PIN_LABEL, WpsCampaign, load_run_state,
                                   run_progress_line)
 from wifit3.campaigns.deauth import DeauthCampaign
+from wifit3.campaigns.decloak import DecloakCampaign
 from wifit3.campaigns.pbc import WpsPbcCapture
 from wifit3.campaigns.probe import probe_ap
 from .campaign_controls import CampaignControls
@@ -88,6 +89,7 @@ _PAD_RATE = 0.4
 _PBC_RETRY_COOLDOWN_S = 3.0
 
 _ATTACK_BUTTONS = [
+    ("btn-decloak", "Decloak"),
     ("btn-gen-ivs", "ARP Replay"), ("btn-chop", "ChopChop"), ("btn-deauth", "AutoDeauth"),
     ("btn-pmkid", "PMKID"), ("btn-wps-pin", "WPS PIN"), ("btn-eviltwin", "EvilTwin"),
     ("btn-stop-pbc", "Stop PBC"),
@@ -703,6 +705,8 @@ class FocusViewV2(Screen):
             self._toggle_deauth()
         elif bid == "btn-pmkid":
             self._toggle_pmkid()
+        elif bid == "btn-decloak":
+            self._toggle_decloak()
         elif bid == "btn-wps-pin":
             self._toggle_wps_pin()
         elif bid == "btn-eviltwin":
@@ -950,6 +954,24 @@ class FocusViewV2(Screen):
                 f"[bold][red]0[/red]/{res.total_sent} de-auths ACK'd[/bold] [dim](silent AP & client)[/dim]"))
 
     # ----- PMKID -------------------------------------------------------------
+
+    def _toggle_decloak(self) -> None:
+        cur = self._controls.current
+        if cur is not None and cur.key == "decloak":
+            self._controls.request_stop()
+        else:
+            self._start_decloak()
+        self.refresh_buttons()
+
+    def _start_decloak(self) -> None:
+        ap = self._target_ap
+        array = self.app.array
+        if not ap or not array:
+            self._log("[red]✗ No target / interface. Aborting decloak.[/red]")
+            return
+        self._log(treelog.header(f"Decloaking {escape(ap.bssid)}"))
+        self._controls.start(DecloakCampaign, array, ap,
+                             log=lambda m: self._log(treelog.branch(m)))
 
     def _toggle_pmkid(self) -> None:
         cur = self._controls.current

@@ -115,6 +115,8 @@ class Association:
         self.fail_reason: Optional[str] = None
         self._auth_ok = False
         self._assoc_ok = False
+        self.auth_status: Optional[int] = None
+        self.assoc_status: Optional[int] = None
         self._active = False
 
     # ---- lifecycle ----------------------------------------------------------
@@ -139,6 +141,8 @@ class Association:
                 return False
             self._auth_ok = False
             self._assoc_ok = False
+            self.auth_status = None
+            self.assoc_status = None
             logger.info("-> Auth Req to %s", self.bssid)
             await self._send_until(auth_req(self.bssid_bytes, self.our_mac),
                                    lambda: self._auth_ok, self.auth_timeout)
@@ -173,6 +177,7 @@ class Association:
                 or pkt.raw[10:16] != self.bssid_bytes):         # by the AP we targeted
             return
         if isinstance(pkt, AssocRespPacket):
+            self.assoc_status = pkt.status
             desc = status_description(pkt.status)
             if pkt.status == 0:
                 self._assoc_ok = True
@@ -181,6 +186,7 @@ class Association:
                 self.fail_reason = f"Assoc rejected (status {pkt.status}: {desc})"
                 logger.info("<- Assoc Resp rejected (status %s: %s) from %s", pkt.status, desc, self.bssid)
         elif isinstance(pkt, AuthPacket):
+            self.auth_status = pkt.status
             desc = status_description(pkt.status)
             if pkt.status == 0:
                 self._auth_ok = True
