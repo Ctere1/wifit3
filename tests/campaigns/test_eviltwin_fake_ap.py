@@ -1,6 +1,8 @@
 """FakeAP responder as a state machine: feed parsed client frames, assert responses + stats."""
 import asyncio
 
+import pytest
+
 from wifit3.campaigns.eviltwin import FakeAP, ClientPhase
 from wifit3.dot11.parser import WlanFrameParser
 from wifit3.dot11.probe import probe_req
@@ -112,3 +114,47 @@ async def test_auth_to_a_different_bssid_ignored():
     fap.on_rx(_parse(auth_req(_OTHER, _CLIENT)))
     await _flush()
     assert fap.stats.auth == 0 and fap.stats.clients == {} and fap.iface.sent == []
+
+
+class _LifecycleIface(FakeIface):
+    def __init__(self, clear_error=None):
+        super().__init__()
+        self.clears = 0
+        self._clear_error = clear_error
+
+    async def clear_fake_mac(self) -> None:
+        self.clears += 1
+        if self._clear_error is not None:
+            raise self._clear_error
+
+
+class _RxSource:
+    def __init__(self):
+        self.registered = 0
+
+    def register_rx_callback(self, cb) -> None:
+        self.registered += 1
+
+    def unregister_rx_callback(self, cb) -> None:
+        self.registered -= 1
+
+
+async def test_stop_is_idempotent_and_reaps_the_beacon_task():
+    iface, rx = _LifecycleIface(), _RxSource()
+    fap = FakeAP(iface, _BSSID, _SSID, 1, twin_beacon=bytes(60), rx_source=rx)
+    await fap.start()
+    await _flush()
+    task = fap._beacon_task
+    await fap.stop()
+    await fap.stop()
+    assert task.done() and fap._beacon_task is None
+    assert rx.registered == 0 and iface.clears == 1
+
+
+async def test_stop_surfaces_a_teardown_failure_after_cleaning_up():
+    iface, rx = _LifecycleIface(clear_error=RuntimeError("clear failed")), _RxSource()
+    fap = FakeAP(iface, _BSSID, _SSID, 1, twin_beacon=bytes(60), rx_source=rx)
+    await fap.start()
+    with pytest.raises(RuntimeError, match="clear failed"):
+        await fap.stop()
+    assert rx.registered == 0

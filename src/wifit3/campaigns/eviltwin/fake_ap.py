@@ -61,29 +61,50 @@ class FakeAP:
         self.stats = FakeApStats()
         self._probe_resp = probe_resp(bssid, ssid, channel)
         self._running = False
+        self._fake_mac_armed = False
+        self._rx_registered = False
         self._beacon_task: Optional[asyncio.Task] = None
 
     # ----- lifecycle ---------------------------------------------------------
 
     async def start(self) -> None:
-        self._running = True
         if self.iface.current_channel != self.channel:
             await self.iface.set_channel(self.channel)
-        await self.iface.set_fake_mac(self.bssid, self.bssid)
+        armed_mac = await self.iface.set_fake_mac(self.bssid, self.bssid)
+        self._fake_mac_armed = armed_mac is not None
         if self.rx_source is not None:
             self.rx_source.register_rx_callback(self.on_rx)
+            self._rx_registered = True
+        self._running = True
         self._beacon_task = asyncio.create_task(self._beacon_loop())
 
     async def stop(self) -> None:
+        """Idempotent teardown: reap the beacon task, drop the RX hook, clear the fake MAC."""
         self._running = False
-        if self._beacon_task is not None:
-            self._beacon_task.cancel()
-        if self.rx_source is not None:
-            self.rx_source.unregister_rx_callback(self.on_rx)
-        try:
-            await self.iface.clear_fake_mac()
-        except Exception:                               # noqa: BLE001
-            pass
+        error = None
+        beacon_task, self._beacon_task = self._beacon_task, None
+        if beacon_task is not None:
+            beacon_task.cancel()
+            try:
+                await beacon_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                error = exc
+        if self._rx_registered:
+            self._rx_registered = False
+            try:
+                self.rx_source.unregister_rx_callback(self.on_rx)
+            except Exception as exc:
+                error = error or exc
+        if self._fake_mac_armed:
+            self._fake_mac_armed = False
+            try:
+                await self.iface.clear_fake_mac()
+            except Exception as exc:
+                error = error or exc
+        if error is not None:
+            raise error
 
     async def _beacon_loop(self) -> None:
         while self._running:
