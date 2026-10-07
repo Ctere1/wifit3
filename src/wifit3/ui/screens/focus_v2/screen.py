@@ -995,7 +995,7 @@ class FocusViewV2(Screen):
         if camp.revealed:
             self._log(treelog.leaf_ok(f"revealed [bold]{escape(camp.revealed)}[/bold]"))
         else:
-            self._log(treelog.leaf_fail(f"no match in {camp.tried} candidates"))
+            self._log(treelog.leaf_fail(f"no match in {camp.sent} guesses"))
 
     def _finish_pmkid(self, camp) -> None:
         """Handle a completed harvest."""
