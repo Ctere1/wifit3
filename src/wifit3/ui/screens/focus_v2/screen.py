@@ -991,6 +991,12 @@ class FocusViewV2(Screen):
         self._controls.start(PmkidHarvestAttack, array, ap,
                              log=lambda m: self._log(treelog.branch(m)))
 
+    def _finish_decloak(self, camp) -> None:
+        if camp.revealed:
+            self._log(treelog.leaf_ok(f"revealed [bold]{escape(camp.revealed)}[/bold]"))
+        else:
+            self._log(treelog.leaf_fail(f"no match in {camp.tried} candidates"))
+
     def _finish_pmkid(self, camp) -> None:
         """Handle a completed harvest."""
         if camp.pmkid:

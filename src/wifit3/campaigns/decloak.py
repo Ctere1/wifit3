@@ -166,32 +166,43 @@ class DecloakAttack:
             "[DECLOAK] directed probes silent; trying %d candidates by association",
             len(candidates),
         )
-        control = f"wifit3-control-{os.urandom(8).hex()}"
-        if (await self._associate_as(iface, control, should_stop)).associated:
-            await self._leave(iface)
-            logger.info("[DECLOAK] %s accepts any SSID; association cannot confirm one",
-                        self.target.bssid)
-            return None
-        for candidate in candidates:
-            if should_stop is not None and should_stop():
+        arm = self.array.lease(fake_mac=self.source_mac, bssid=self.bssid_bytes,
+                               iface=iface)
+        async with arm:
+            # Without active monitor the AP's Auth Resp goes unACKed, auth never completes,
+            # and every Assoc is answered with a class-2 deauth instead of a verdict.
+            sta = str_to_mac(arm.mac) if arm.mac else self.source_mac
+            control = f"wifit3-control-{os.urandom(8).hex()}"
+            probe = await self._associate_as(iface, control, should_stop, sta)
+            if probe.associated:
+                await self._leave(iface, sta)
+                logger.info("[DECLOAK] %s accepts any SSID; association cannot confirm one",
+                            self.target.bssid)
                 return None
-            association = await self._associate_as(iface, candidate, should_stop)
-            self.associations_tried += 1
-            if association.associated:
-                await self._leave(iface)
-                self.array.confirm_decloak(self.target.bssid, candidate, "assoc")
-                logger.info("[DECLOAK] %s accepted candidate %r",
-                            self.target.bssid, candidate)
-                return candidate
+            if probe.auth_status is None:
+                logger.info("[DECLOAK] %s never answered our Auth Req; association "
+                            "cannot confirm an SSID", self.target.bssid)
+                return None
+            for candidate in candidates:
+                if should_stop is not None and should_stop():
+                    return None
+                association = await self._associate_as(iface, candidate, should_stop, sta)
+                self.associations_tried += 1
+                if association.associated:
+                    await self._leave(iface, sta)
+                    self.array.confirm_decloak(self.target.bssid, candidate, "assoc")
+                    logger.info("[DECLOAK] %s accepted candidate %r",
+                                self.target.bssid, candidate)
+                    return candidate
         return None
 
-    async def _associate_as(self, iface, ssid: str, should_stop) -> Association:
+    async def _associate_as(self, iface, ssid: str, should_stop, our_mac: bytes) -> Association:
         association = Association(
             iface,
             self.target.bssid,
             ssid,
             self.target.channel,
-            our_mac=self.source_mac,
+            our_mac=our_mac,
             auth_timeout=0.2,
             assoc_timeout=0.3,
             assoc_trailer_ies=self.target.rsn_ie or b"",
@@ -205,10 +216,10 @@ class DecloakAttack:
             association.stop()
         return association
 
-    async def _leave(self, iface) -> None:
+    async def _leave(self, iface, our_mac: bytes) -> None:
         try:
             await iface.send_no_wait(
-                build_client_leaving(self.bssid_bytes, self.source_mac)
+                build_client_leaving(self.bssid_bytes, our_mac)
             )
         except Exception:
             logger.debug("[DECLOAK] client-leaving cleanup failed", exc_info=True)
@@ -264,8 +275,6 @@ class DecloakCampaign(Campaign):
             self.revealed = await self._attack.run(should_stop=lambda: self.stopped)
         finally:
             self.tried = self._attack.tried
-        self._log(f"revealed {self.revealed!r}" if self.revealed
-                  else f"no match in {self.tried} candidates")
 
     async def teardown(self) -> None:
         if self._attack is not None:
