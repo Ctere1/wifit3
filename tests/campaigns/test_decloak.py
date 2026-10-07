@@ -7,10 +7,11 @@ from unittest.mock import MagicMock
 
 from wifit3.campaigns.decloak import (
     SIBLING_SUFFIXES,
-    DecloakAttack,
+    DecloakCampaign,
     candidates_from_sibling,
     named_sibling_ssid,
 )
+from wifit3.campaigns.auth_assoc import AssocState
 from wifit3.models import AccessPoint
 from wifit3.dot11.parser import WlanFrameParser
 from wifit3.dot11.probe import probe_req
@@ -18,11 +19,11 @@ from wifit3.dot11.probe import probe_req
 _BSSID = "aa:bb:cc:dd:ee:ff"
 
 
-def _attack(candidates, *, target=None, iface=None):
+def _campaign(candidates, *, target=None):
     array = MagicMock()
     array.access_points = {}
-    return DecloakAttack(array, target or AccessPoint(bssid=_BSSID, channel=6),
-                         iface or MagicMock(), candidates)
+    return DecloakCampaign(array, target or AccessPoint(bssid=_BSSID, channel=6),
+                           candidates=candidates)
 
 
 # ----- candidate generation ----------------------------------------------------
@@ -76,8 +77,8 @@ def test_named_sibling_is_empty_without_siblings():
 def test_probe_req_round_trips_with_the_candidate_ssid():
     """Feed a frame we built back through the parser the receive path uses: the wire
     format is well formed and the SSID we asked for is what an AP would see."""
-    attack = _attack(["Foo-Guest"])
-    frame = probe_req(attack.bssid_bytes, attack.source_mac, "Foo-Guest", channel=6)
+    campaign = _campaign(["Foo-Guest"])
+    frame = probe_req(campaign.bssid_bytes, campaign.source_mac, "Foo-Guest", channel=6)
     parsed = WlanFrameParser.parse_80211_frame(frame, rssi=-30)
 
     assert parsed is not None
@@ -88,17 +89,17 @@ def test_probe_req_round_trips_with_the_candidate_ssid():
 
 
 def test_probe_req_round_trips_a_full_length_ssid():
-    attack = _attack(["X" * 32], target=AccessPoint(bssid="11:22:33:44:55:66", channel=44))
-    frame = probe_req(attack.bssid_bytes, attack.source_mac, "X" * 32, channel=44)
+    campaign = _campaign(["X" * 32],
+                         target=AccessPoint(bssid="11:22:33:44:55:66", channel=44))
+    frame = probe_req(campaign.bssid_bytes, campaign.source_mac, "X" * 32, channel=44)
     parsed = WlanFrameParser.parse_80211_frame(frame, rssi=-30)
     assert parsed is not None and parsed.ssid == "X" * 32
 
 
-def test_attack_registers_its_forged_mac():
-    """The source MAC is registered so the EAPOL/handshake/client paths never treat our
-    forged STA as a real one."""
-    attack = _attack(["Foo"])
-    attack.array.register_forged_mac.assert_called_once_with(attack.source_mac)
+async def test_teardown_unregisters_the_forged_mac():
+    campaign = _campaign(["Foo"])
+    await campaign.teardown()
+    campaign.array.unregister_own_mac.assert_called_once_with(campaign.source_mac)
 
 
 # ----- association sweep -------------------------------------------------------
@@ -110,7 +111,7 @@ class _FakeAssociation:
     def __init__(self, verdicts: dict, *, deauth_after: str = ""):
         self._verdicts = verdicts
         self._deauth_after = deauth_after
-        self.state = 2                          # _claim_each's caller authenticates first
+        self.state = AssocState.AUTHENTICATED   # _claim_each's caller authenticates first
         self.calls: list[str] = []
 
     def start(self) -> None:
@@ -121,40 +122,41 @@ class _FakeAssociation:
 
     async def authenticate(self) -> bool:
         self.calls.append("auth")
-        self.state = 2
+        self.state = AssocState.AUTHENTICATED
         return True
 
     async def associate_as(self, ssid: str):
         self.calls.append(f"assoc:{ssid}")
         status = self._verdicts.get(ssid)
         if status == 0:
-            self.state = 3
+            self.state = AssocState.ASSOCIATED
         elif ssid == self._deauth_after:
-            self.state = 1                      # the AP deauthed us: back to state 1
+            self.state = AssocState.UNAUTHENTICATED     # the AP deauthed us
         return status
 
 
 async def test_sweep_authenticates_once_for_every_candidate():
-    attack = _attack(["A", "B", "C"])
+    campaign = _campaign(["A", "B", "C"])
     association = _FakeAssociation({"C": 0})
-    found = await attack._claim_each(association, ["A", "B", "C"], lambda: False)
+    found = await campaign._claim_each(association, ["A", "B", "C"])
 
     assert found == "C"
     assert association.calls == ["assoc:A", "assoc:B", "assoc:C"]   # no re-auth
-    attack.array.confirm_decloak.assert_called_once_with(_BSSID, "C", "assoc")
+    campaign.array.decloak.assert_called_once_with(campaign.ap, "C", "assoc")
 
 
 async def test_sweep_reauthenticates_only_after_a_deauth():
-    attack = _attack(["A", "B"])
+    campaign = _campaign(["A", "B"])
     association = _FakeAssociation({}, deauth_after="A")
-    found = await attack._claim_each(association, ["A", "B"], lambda: False)
+    found = await campaign._claim_each(association, ["A", "B"])
 
     assert found is None
     assert association.calls == ["assoc:A", "auth", "assoc:B"]
 
 
 async def test_sweep_stops_when_asked():
-    attack = _attack(["A", "B"])
+    campaign = _campaign(["A", "B"])
+    campaign.stopped = True
     association = _FakeAssociation({"B": 0})
-    assert await attack._claim_each(association, ["A", "B"], lambda: True) is None
+    assert await campaign._claim_each(association, ["A", "B"]) is None
     assert association.calls == []

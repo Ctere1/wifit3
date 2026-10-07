@@ -252,8 +252,8 @@ class WlanArray:
     def register_forged_mac(self, mac) -> None:
         self._sink.register_forged_mac(mac)
 
-    def confirm_decloak(self, bssid: str, ssid: str, method: str) -> bool:
-        return self._sink.confirm_decloak(bssid, ssid, method)
+    def decloak(self, ap: AccessPoint, ssid: str, method: str) -> None:
+        self._sink.decloak(ap, ssid, method)
 
     def register_own_mac(self, mac) -> str:
         return self._sink.register_own_mac(mac)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from enum import IntEnum
 import time
 from typing import Callable, Optional
 
@@ -24,6 +25,15 @@ from wifit3.dot11.deauth import reason_description
 from wifit3.dot11.packet import AuthPacket, AssocRespPacket, DeauthPacket
 
 logger = logging.getLogger(__name__)
+
+
+class AssocState(IntEnum):
+    """Where a station stands with one AP (802.11-2020 11.3). AUTHENTICATED means
+    the 802.11 open-system exchange succeeded, not 802.1X authorization."""
+
+    UNAUTHENTICATED = 1
+    AUTHENTICATED = 2
+    ASSOCIATED = 3
 
 
 def build_client_leaving(bssid: bytes, our_mac: bytes, deauth: bool = True) -> bytes:
@@ -117,7 +127,7 @@ class Association:
         self._assoc_ok = False
         self.auth_status: Optional[int] = None
         self.assoc_status: Optional[int] = None
-        self.state = 1          # 802.11: 1 unauthenticated, 2 authenticated, 3 associated
+        self.state = AssocState.UNAUTHENTICATED
         self._active = False
 
     # ---- lifecycle ----------------------------------------------------------
@@ -162,7 +172,7 @@ class Association:
         return False
 
     async def authenticate(self) -> bool:
-        """Open-System auth only (state 1 -> 2). True once the AP accepts us."""
+        """Send an Auth Req and wait. True once the AP answers with status 0."""
         if self.iface.current_channel != self.channel:
             await self.iface.set_channel(self.channel)
         self._auth_ok = False
@@ -173,9 +183,9 @@ class Association:
         return self._auth_ok
 
     async def associate_as(self, ssid: str) -> Optional[int]:
-        """Assoc Req claiming ``ssid`` without re-authenticating (state 2 -> 3). Returns
-        the Assoc Resp status, or None when the AP stays silent. A refusal leaves us in
-        state 2, so the caller may claim another SSID straight away."""
+        """Send an Assoc Req claiming ``ssid``, without sending an Auth Req first.
+        Returns the Assoc Resp status code, or None when the AP never answers. A refusal
+        leaves us AUTHENTICATED, so the caller can claim the next SSID directly."""
         self._assoc_ok = False
         self.assoc_status = None
         self.ssid = ssid
@@ -208,7 +218,7 @@ class Association:
             desc = status_description(pkt.status)
             if pkt.status == 0:
                 self._assoc_ok = True
-                self.state = 3
+                self.state = AssocState.ASSOCIATED
                 logger.info("<- Assoc Resp (status 0: %s) from %s", desc, self.bssid)
             elif pkt.status is not None:
                 self.fail_reason = f"Assoc rejected (status {pkt.status}: {desc})"
@@ -218,7 +228,7 @@ class Association:
             desc = status_description(pkt.status)
             if pkt.status == 0:
                 self._auth_ok = True
-                self.state = 2
+                self.state = AssocState.AUTHENTICATED
                 logger.info("<- Auth Resp (status 0: %s) from %s", desc, self.bssid)
             elif pkt.status is not None:
                 self.fail_reason = f"Auth rejected (status {pkt.status}: {desc})"
@@ -230,4 +240,5 @@ class Association:
             logger.info("<- %s (reason %s: %s) from %s", kind.upper(), pkt.reason, desc, self.bssid)
             self.associated = False
             self._assoc_ok = False
-            self.state = 2 if kind == "disassoc" else 1
+            self.state = (AssocState.AUTHENTICATED if kind == "disassoc"
+                          else AssocState.UNAUTHENTICATED)

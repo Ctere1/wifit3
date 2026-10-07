@@ -198,8 +198,7 @@ class WlanSink:
             if frame_type == "beacon":
                 ap.beacons += 1
 
-            if self._is_real_ssid(ssid):
-                self._decloak(ap, ssid, frame_type)
+            self.decloak(ap, ssid, frame_type)
 
             self._record_ap_signal(ap, card_id, rssi)
 
@@ -299,8 +298,8 @@ class WlanSink:
 
         if frame_type in ("assoc_req", "reassoc_req"):
             ap = self.access_points.get(bssid)
-            if ap is not None and self._is_real_ssid(pkt.ssid):
-                self._decloak(ap, pkt.ssid, frame_type)
+            if ap is not None:
+                self.decloak(ap, pkt.ssid, frame_type)
         return True
 
     def _on_eapol_frame(self, pkt: Packet) -> bool:
@@ -372,16 +371,12 @@ class WlanSink:
         ap.wps = True
         return True
 
-    def confirm_decloak(self, bssid: str, ssid: str, method: str) -> bool:
-        """Learn an SSID a campaign proved, not one carried by a received frame."""
-        ap = self.access_points.get(bssid.lower())
-        if ap is None or not self._is_real_ssid(ssid):
-            return False
-        self._decloak(ap, ssid, method)
-        return True
-
-    def _decloak(self, ap: AccessPoint, ssid: str, method: str) -> None:
-        """Learn a hidden AP's real SSID, tag how it was revealed."""
+    def decloak(self, ap: AccessPoint, ssid: str, method: str) -> None:
+        """Set ap.ssid to ssid, ignoring a placeholder or empty one. Sets
+        ap.decloak_method to method only while ap has no usable SSID yet, so the
+        first source to name a hidden AP is the one recorded."""
+        if not self._is_real_ssid(ssid):
+            return
         if not self._is_real_ssid(ap.ssid):
             ap.decloak_method = method
         ap.ssid = ssid
