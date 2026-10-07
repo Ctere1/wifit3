@@ -169,7 +169,8 @@ class Association:
             await asyncio.sleep(0.02)
 
     def _rx_cb(self, pkt) -> None:
-        if not self._active or pkt.raw[4:10] != self.our_mac:   # addressed to us
+        if (not self._active or pkt.raw[4:10] != self.our_mac   # addressed to us
+                or pkt.raw[10:16] != self.bssid_bytes):         # by the AP we targeted
             return
         if isinstance(pkt, AssocRespPacket):
             desc = status_description(pkt.status)
