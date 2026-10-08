@@ -257,6 +257,7 @@ class Mercury(ProductName):
 class Mercusys(ProductName):
     MA30H = "Mercusys MA30H"
     MA30N = "Mercusys MA30N"
+    MW150US = "Mercusys MW150US"  # 2c4e:0102, rtl8xxxu core.c:7984
 
 
 class Microsoft(ProductName):
