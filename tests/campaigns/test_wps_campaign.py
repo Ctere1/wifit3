@@ -7,6 +7,7 @@ switch, success/PSK capture, and .run resume, without a radio or fake enrollee.
 
 import asyncio
 import concurrent.futures
+import multiprocessing.connection
 import threading
 import time
 from concurrent.futures.process import BrokenProcessPool
@@ -306,8 +307,10 @@ async def test_pixie_search_runs_in_a_worker_process(monkeypatch):
     assert c._pixie_pool is None   # and the worker was dropped once it answered
     assert workers, "the search never reached a worker process"
     for worker in workers:
-        worker.join(10)
-        assert not worker.is_alive(), "the search worker outlived the campaign"
+        # Wait on the sentinel, not is_alive(): the pool's manager thread reaps these workers too,
+        # and the thread that loses the waitpid race sees ECHILD, which is_alive() reports as alive.
+        died = multiprocessing.connection.wait([worker.sentinel], timeout=10)
+        assert died, "the search worker outlived the campaign"
 
 
 async def test_pixie_falls_back_to_a_thread_without_subprocesses(monkeypatch):
