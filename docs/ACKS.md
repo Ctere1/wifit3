@@ -138,9 +138,10 @@ Scope: the mainline (non-DKMS) Realtek variants (rtl8188eus, rtl8812au, rtl8821a
 rtw88_8814au stay `UNIMPLEMENTED` by choice: active monitor was never ported for them, so they are out
 of scope for this sweep, not regressions. The bench targets the DKMS drivers we ship.
 
-`enter_active_monitor`'s `bssid` is read only by rtl8922au, mt7921au and mt7925au, and is inert on all
-three: same auto-ACK with and without it, confirmed against a real AP (2026-10-07). The mt7921au and
-mt7925au docstrings claiming the AP's frames need it are wrong.
+`enter_active_monitor`'s `bssid` is read only by rtl8922au, mt7921au and mt7925au. On all three,
+injected unicast is auto-ACKed identically with and without it (2026-10-07, ACKs counted on a second
+card, controls at 0). Whether a live AP's frames differ is untested: sniffing for ACKs to our forged
+MAC during a real exchange needs a third card.
 
 Note on the retry histogram: the tx_retries per-inject copy count is only valid once each inject
 carries a distinct 802.11 sequence number. The MT76 chips transmit the MPDU's seq_ctrl verbatim, so a
