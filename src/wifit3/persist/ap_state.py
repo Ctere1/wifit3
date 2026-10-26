@@ -12,7 +12,7 @@ from wifit3.crack.hc22000_format import Hc22000Line, hashline_id, read_hc22000
 from wifit3.crack.wpa_psk import psk_matches
 from wifit3.models import AP_RECOVERED_CAPTURE_TYPES, PSK_CAPTURE_TYPES, CaptureType, PersistedCapture
 from wifit3.persist.common import safe_ssid
-from wifit3.persist.exhaustion import Exhaustion, read_exhaustion
+from wifit3.persist.exhaustion import ExhaustedWordlist, read_exhausted_wordlists
 from wifit3.persist.meta import meta_path, read_bssid_metas, read_meta, update_meta
 from wifit3.persist.pcap import read_pcap
 
@@ -94,7 +94,7 @@ class ApState:
     key_statuses: Mapping[tuple[CaptureType, str], PasswordStatus]    # by Key.id; see ``key_statuses``
     hashline_capture: Optional[PersistedCapture]    # the newest SSID's .hc22000; jobs are filed under it
     uncracked: tuple[DatedHashline, ...]            # the hashlines no key matches, newest first
-    uncracked_exhaustion: tuple[Exhaustion, ...]    # wordlists that ran out on the uncracked lines
+    exhausted_wordlists: Mapping[str, frozenset[ExhaustedWordlist]]   # by uncracked hashline id
     handshake_and_pmkid_files: tuple[PersistedCapture, ...]    # one per file, crackable or not, newest first
 
 
@@ -294,12 +294,12 @@ def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
                      key=lambda c: (safe_ssid(c.ssid) == newest_ssid, c.timestamp), reverse=True)
     cracked = {hid for key in keys for hid in key.hashline_ids}
     uncracked = tuple(h for h in hashlines if h.id not in cracked)
-    exhaustion = read_exhaustion(metas, [h.id for h in uncracked]) if uncracked else {}
+    exhausted = read_exhausted_wordlists(metas, [h.id for h in uncracked]) if uncracked else {}
     handshake_and_pmkid_files = {c.path: c for c in sorted(captures, key=lambda c: c.timestamp)
                                  if c.type in (CaptureType.HS, CaptureType.PMKID)}
     return ApState(bssid, ssids, tuple(hashlines), tuple(keys), status, status_key,
                    key_statuses(keys, hashlines, status, status_key),
-                   hc22000[0] if hc22000 else None, uncracked, tuple(exhaustion.values()),
+                   hc22000[0] if hc22000 else None, uncracked, MappingProxyType(exhausted),
                    tuple(reversed(handshake_and_pmkid_files.values())))
 
 

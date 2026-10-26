@@ -149,18 +149,18 @@ def test_each_write_notifies_its_ap_and_a_refresh_every_ap(tmp_path):
 
 
 def test_ap_state_lists_the_wordlists_that_ran_out_on_its_uncracked_lines(tmp_path):
-    from wifit3.persist.exhaustion import record_exhausted
+    from wifit3.persist.exhaustion import ExhaustedWordlist, record_exhausted
     v = Vault()
     ap = _ap_with_hs(pmkid=b"\x11" * 16)
     v.save_pmkid(ap, _CLIENT)
     [uncracked] = v.ap_state(ap.bssid).uncracked
-    assert v.ap_state(ap.bssid).uncracked_exhaustion == ()
+    assert dict(v.ap_state(ap.bssid).exhausted_wordlists) == {}
 
     record_exhausted(ap.ssid, ap.bssid, "9:100", "a.txt", [uncracked.id])
     v.notify_changed(ap.bssid)
 
-    [exhaustion] = v.ap_state(ap.bssid).uncracked_exhaustion
-    assert (exhaustion.wordlist_names, exhaustion.exhausted_hashlines, exhaustion.hashlines) == (("a.txt",), 1, 1)
+    assert dict(v.ap_state(ap.bssid).exhausted_wordlists) == {
+        uncracked.id: frozenset({ExhaustedWordlist("9:100", ("a.txt",))})}
 
 
 def test_save_wep_caches_key_and_dedupes(tmp_path):
@@ -331,6 +331,20 @@ def test_delete_ap_removes_every_ssids_files_and_cache_entries(tmp_path):
                                          tmp_path / "B_00-11-22-33-44-01.meta"))
     assert Path(other.path).exists() and (tmp_path / "A_00-11-22-33-44-02.meta").exists()
     assert len(v.persisted("00:11:22:33:44:02")) == 1
+
+
+def test_delete_key_removes_every_file_holding_it_and_the_keys_beside_it(tmp_path):
+    v = Vault()
+    ap = AccessPoint(bssid="00:11:22:33:44:01", ssid="A")
+    typed = v.save_wpa_psk("A", ap.bssid, "hunter22")
+    wps = v.save_wps_pin(ap, "12345670", "hunter22")
+    kept = v.save_wep_key(ap, b"abcde")
+    [psk] = [k for k in v.ap_state(ap.bssid).keys if k.type == CaptureType.WPA_PSK]
+
+    v.delete_key(psk)
+
+    assert not Path(typed.path).exists() and not Path(wps.path).exists() and Path(kept.path).exists()
+    assert [k.type for k in v.ap_state(ap.bssid).keys] == [CaptureType.WEP]
 
 
 def test_every_save_writes_the_meta(tmp_path):

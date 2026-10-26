@@ -24,6 +24,12 @@ class Exhaustion:
     latest: int             # epoch seconds of the newest record among the exhausted hashlines
 
 
+@dataclass(frozen=True)
+class ExhaustedWordlist:
+    identity: str
+    names: tuple[str, ...]      # as recorded, else the configured wordlist's; empty if unknown
+
+
 def capture_hashline_ids(capture_path: str) -> list[str]:
     """``hashline_id`` of each hashline in the capture file, deduped."""
     return list(dict.fromkeys(hashline_id(raw) for raw, _ in read_hc22000(capture_path)))
@@ -84,9 +90,8 @@ def _configured_wordlist_names() -> dict[str, str]:
     return names
 
 
-def read_exhaustion(metas: list[dict], hashline_ids: Iterable[str]) -> dict[str, Exhaustion]:
-    """Per wordlist identity that ran out on any of these hashlines, from the AP's .meta files
-    (every SSID's, see ``read_bssid_metas``)."""
+def _merged_records(metas: list[dict]) -> tuple[dict[str, dict[str, int]], dict[str, list[str]]]:
+    """Every SSID's exhaustion records and wordlist names, merged."""
     exhausted: dict[str, dict[str, int]] = {}
     names: dict[str, list[str]] = {}
     for meta in metas:
@@ -96,12 +101,39 @@ def read_exhaustion(metas: list[dict], hashline_ids: Iterable[str]) -> dict[str,
                 merged[hashline] = max(merged.get(hashline, 0), epoch)
         for identity, stored in _wordlist_names(meta).items():
             names.setdefault(identity, []).extend(n for n in stored if n not in names[identity])
+    return exhausted, names
+
+
+def _names_for(identities: Iterable[str], names: dict[str, list[str]]) -> dict[str, tuple[str, ...]]:
+    """Recorded names, else the configured wordlist's (stat'ed only when one is unnamed)."""
+    unnamed = [identity for identity in identities if not names.get(identity)]
+    configured = _configured_wordlist_names() if unnamed else {}
+    resolved = {identity: tuple(names.get(identity, ())) for identity in identities}
+    resolved.update({identity: (configured[identity],) for identity in unnamed if identity in configured})
+    return resolved
+
+
+def read_exhaustion(metas: list[dict], hashline_ids: Iterable[str]) -> dict[str, Exhaustion]:
+    """Per wordlist identity that ran out on any of these hashlines, from the AP's .meta files
+    (every SSID's, see ``read_bssid_metas``)."""
+    exhausted, names = _merged_records(metas)
     wanted = list(dict.fromkeys(hashline_ids))
     epochs_by_identity = {identity: epochs for identity, recorded in exhausted.items()
                           if (epochs := [recorded[hashline] for hashline in wanted if hashline in recorded])}
-    unnamed = [identity for identity in epochs_by_identity if not names.get(identity)]
-    configured = _configured_wordlist_names() if unnamed else {}
-    for identity in unnamed:
-        names[identity] = [configured[identity]] if identity in configured else []
-    return {identity: Exhaustion(identity, tuple(names[identity]), len(epochs), len(wanted), max(epochs))
+    resolved = _names_for(epochs_by_identity, names)
+    return {identity: Exhaustion(identity, resolved[identity], len(epochs), len(wanted), max(epochs))
             for identity, epochs in epochs_by_identity.items()}
+
+
+def read_exhausted_wordlists(metas: list[dict],
+                             hashline_ids: Iterable[str]) -> dict[str, frozenset[ExhaustedWordlist]]:
+    """Per hashline id, the wordlists that ran out on it; hashlines with none are left out."""
+    exhausted, names = _merged_records(metas)
+    wanted = set(hashline_ids)
+    identities_by_hashline: dict[str, set[str]] = {}
+    for identity, recorded in exhausted.items():
+        for hashline in wanted.intersection(recorded):
+            identities_by_hashline.setdefault(hashline, set()).add(identity)
+    resolved = _names_for({i for ids in identities_by_hashline.values() for i in ids}, names)
+    return {hashline: frozenset(ExhaustedWordlist(identity, resolved[identity]) for identity in identities)
+            for hashline, identities in identities_by_hashline.items()}

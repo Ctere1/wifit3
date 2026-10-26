@@ -5,8 +5,8 @@ from wifit3.crack.hc22000_format import hashline_id
 from wifit3.models import CaptureType, PersistedCapture
 from wifit3.persist.meta import meta_path, read_bssid_metas, read_meta, update_meta
 from wifit3.persist.config import Config
-from wifit3.persist.exhaustion import (Exhaustion, capture_hashline_ids, read_exhaustion,
-                                       record_exhausted, wordlist_identity)
+from wifit3.persist.exhaustion import (ExhaustedWordlist, Exhaustion, capture_hashline_ids, read_exhaustion,
+                                       read_exhausted_wordlists, record_exhausted, wordlist_identity)
 
 _BSSID = "02:00:00:00:00:01"
 _LINE_A = f"WPA*01*{'aa' * 16}*020000000001*020000000002*486f6d65***"
@@ -73,3 +73,13 @@ def test_a_record_with_no_name_and_no_configured_wordlist_has_no_names(tmp_path)
     a = hashline_id(_LINE_A)
     update_meta("Home", _BSSID, exhausted={"7:700": {a: 1}})
     assert read_exhaustion(read_bssid_metas(_BSSID), [a])["7:700"].wordlist_names == ()
+
+
+def test_read_exhausted_wordlists_lists_each_hashlines_wordlists(tmp_path):
+    a, b = hashline_id(_LINE_A), hashline_id(_LINE_B)
+    record_exhausted("Old", _BSSID, "9:100", "a.txt", [a, b])
+    record_exhausted("New", _BSSID, "8:800", "b.txt", [b])
+
+    found = read_exhausted_wordlists(read_bssid_metas(_BSSID), [a, b, hashline_id("WPA*other")])
+    assert found == {a: frozenset({ExhaustedWordlist("9:100", ("a.txt",))}),
+                     b: frozenset({ExhaustedWordlist("9:100", ("a.txt",)), ExhaustedWordlist("8:800", ("b.txt",))})}

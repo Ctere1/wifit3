@@ -417,6 +417,14 @@ class Vault:
         paths = {Path(c.path) for c in self.persisted(bssid)}
         paths.update(captures_dir.glob(f"*_{bssid_to_dashed(bssid)}[._]*"))
         paths.add(captures_dir / wps_run_state_name(bssid))
+        self._delete_files(bssid, paths)
+
+    def delete_key(self, key: Key) -> None:
+        """Delete every capture file holding ``key``; other keys in those files go with it."""
+        self._delete_files(key.newest_capture.bssid, {Path(c.path) for c in key.captures})
+
+    def _delete_files(self, bssid: str, paths: set[Path]) -> None:
+        """Delete ``paths``, drop their captures from the index and notify every BSSID that lost one."""
         for path in paths:
             path.unlink(missing_ok=True)
         changed = {bssid}
