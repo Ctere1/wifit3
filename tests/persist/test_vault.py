@@ -126,6 +126,7 @@ def test_ap_state_is_cached_until_that_ap_changes(tmp_path):
 
     v.save_wep_key(other, b"klmno")
     assert v.ap_state(home.bssid) is home_state
+    assert v.ap_state(other.bssid) is not other_state
     assert len(v.ap_state(other.bssid).keys) == 2
 
     v.refresh()
