@@ -188,6 +188,22 @@ def is_confirmed(key: Key, hashlines: Iterable[DatedHashline]) -> bool:
     return bool(_confirmations(key, hashlines))
 
 
+def _matching_key(hashline: DatedHashline, keys: list[Key]) -> Optional[Key]:
+    return next((k for k in keys if hashline.id in k.hashline_ids), None)
+
+
+def _evidence(hashlines: list[DatedHashline], keys: list[Key]) -> list[tuple[Optional[int], Optional[Key]]]:
+    """Each authorized hashline (with the password key matching it), correct live check and AP
+    recovery of a password key, newest first."""
+    evidence: list[tuple[Optional[int], Optional[Key]]] = [
+        (h.first_captured, _matching_key(h, keys)) for h in hashlines if h.line.authorized]
+    for key in keys:
+        evidence += [(v.at, key) for v in key.live_verifications if v.correct]
+        if (recovered_at := key.ap_recovered_at) is not None:
+            evidence.append((recovered_at, key))
+    return sorted(evidence, key=lambda e: epoch_sort_key(e[0]), reverse=True)
+
+
 def password_status(hashlines: Iterable[DatedHashline],
                     keys: Iterable[Key]) -> tuple[PasswordStatus, Optional[Key]]:
     """Judged on the newest authorized hashline, correct live check, or key the AP gave up; with
@@ -197,21 +213,11 @@ def password_status(hashlines: Iterable[DatedHashline],
     keys = [k for k in keys if k.is_password]
     if not keys:
         return PasswordStatus.NOT_CRACKED, None
-
-    def matching(hashline: DatedHashline) -> Optional[Key]:
-        return next((k for k in keys if hashline.id in k.hashline_ids), None)
-
-    evidence: list[tuple[Optional[int], Optional[Key]]] = [
-        (h.first_captured, matching(h)) for h in hashlines if h.line.authorized]
-    for key in keys:
-        evidence += [(v.at, key) for v in key.live_verifications if v.correct]
-        if (recovered_at := key.ap_recovered_at) is not None:
-            evidence.append((recovered_at, key))
+    evidence = _evidence(hashlines, keys)
     if not evidence:
-        newest_match = next((k for h in hashlines if (k := matching(h))), None)
+        newest_match = next((k for h in hashlines if (k := _matching_key(h, keys))), None)
         return PasswordStatus.NOT_VERIFIED, newest_match or keys[0]
 
-    evidence.sort(key=lambda e: epoch_sort_key(e[0]), reverse=True)
     newest_at, newest_key = evidence[0]
     if newest_key is not None:
         return PasswordStatus.CURRENT, newest_key
@@ -220,6 +226,23 @@ def password_status(hashlines: Iterable[DatedHashline],
     if unconfirmed_newer:
         return PasswordStatus.NOT_VERIFIED, unconfirmed_newer[0]
     return PasswordStatus.STALE, next((key for _, key in evidence if key is not None), None)
+
+
+def key_status(key: Key, state: ApState) -> PasswordStatus:
+    """The AP's status for its status key. Any other key: NOT_VERIFIED when nothing confirms it,
+    STALE when evidence newer than its last confirmation refutes it, else CURRENT."""
+    if key == state.status_key:
+        return state.status
+    if not is_confirmed(key, state.hashlines):
+        return PasswordStatus.NOT_VERIFIED
+    if not key.is_password:
+        return PasswordStatus.CURRENT
+    hashlines = list(state.hashlines)
+    newest_at = next((at for at, _ in _evidence(hashlines, [k for k in state.keys if k.is_password])
+                      if at is not None), None)
+    if newest_at is None or epoch_sort_key(confirmed_at(key, hashlines)) >= epoch_sort_key(newest_at):
+        return PasswordStatus.CURRENT
+    return PasswordStatus.STALE
 
 
 def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
