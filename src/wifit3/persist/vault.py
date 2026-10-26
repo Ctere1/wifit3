@@ -361,22 +361,28 @@ class Vault:
         ap_state.record_live_verification(key, correct)
         self.notify_changed(key.newest_capture.bssid)
 
-    def save_wep_key(self, ap: "AccessPoint", key: bytes) -> Optional[SaveResult]:
+    def save_wep_key(self, ap: "AccessPoint", key: bytes, manual: bool = False) -> Optional[SaveResult]:
+        """``manual``: typed in, not recovered from the AP, so unverified until a live check."""
         result = save.save_wep_key(ap, key)
         if result:
             update_meta(ap.ssid, ap.bssid)
         if result and result.was_new:
+            if manual:
+                ap_state.record_manual_capture(ap.ssid, ap.bssid, result.path)
             self._insert_capture(PersistedCapture(
                 type=CaptureType.WEP, timestamp=int(time.time()), path=str(result.path),
                 bssid=ap.bssid, value=key.hex(), ssid=ap.ssid))
         return result
 
-    def save_wps_pin(self, ap: "AccessPoint", pin: str,
-                     psk: Optional[str]) -> Optional[SaveResult]:
+    def save_wps_pin(self, ap: "AccessPoint", pin: str, psk: Optional[str],
+                     manual: bool = False) -> Optional[SaveResult]:
+        """``manual``: typed in, not recovered from the AP, so unverified until a live check."""
         result = save.save_wps_pin(ap, pin, psk)
         if result:
             update_meta(ap.ssid, ap.bssid)
         if result and result.was_new:
+            if manual:
+                ap_state.record_manual_capture(ap.ssid, ap.bssid, result.path)
             self._insert_capture(PersistedCapture(
                 type=CaptureType.WPS_PIN, timestamp=int(time.time()), path=str(result.path),
                 bssid=ap.bssid, value=psk, pin=pin, ssid=ap.ssid))

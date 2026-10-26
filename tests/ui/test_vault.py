@@ -326,6 +326,20 @@ async def test_the_psk_badge_turns_orange_once_a_newer_capture_refutes_the_psk(t
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
+async def test_a_wep_key_added_by_hand_reads_not_verified(tmp_path):
+    (tmp_path / "HomeNet_aa-bb-cc-dd-ee-ff_1000_handshake.pcap").write_bytes(b"")
+    app = WifiteApp()
+    async with app.run_test(size=(100, 40)) as pilot:
+        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
+        drawer._credential_added(ManualCredential(CaptureType.WEP, "HomeNet", "aa:bb:cc:dd:ee:ff", "abcde"))
+        await pilot.pause()
+
+        assert "NOT VERIFIED" in str(drawer.query_one(".status", Static).content)
+        assert drawer.query_one(_KeyRow).has_class("-not-verified")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
 async def test_add_credential_prefills_the_row_and_saves_a_psk_the_capture_refutes_as_stale(
         tmp_path, mocker):
     _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", _PMKID_LINE)

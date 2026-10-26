@@ -798,3 +798,21 @@ def test_ssid_prefers_a_capture_holding_the_real_ssid_over_a_newer_pcap(tmp_path
     assert v.persisted("02:00:00:00:00:50")[0].path.endswith(".pcap")
     assert v.ssid("02:00:00:00:00:50") == "Café"
     assert v.ssid("02:00:00:00:00:99") is None
+
+
+@pytest.mark.parametrize(("kind", "save"), [
+    (CaptureType.WEP, lambda v, ap, manual: v.save_wep_key(ap, b"abcde", manual=manual)),
+    (CaptureType.WPS_PIN, lambda v, ap, manual: v.save_wps_pin(ap, "12345670", None, manual=manual)),
+])
+def test_a_key_typed_in_is_not_verified_until_a_live_check_accepts_it(tmp_path, kind, save):
+    v = Vault()
+    typed, recovered = AccessPoint(bssid="02:00:00:00:00:01", ssid="A"), AccessPoint(bssid="02:00:00:00:00:02", ssid="B")
+    save(v, typed, True)
+    save(v, recovered, False)
+    [typed_key], [recovered_key] = v.ap_state(typed.bssid).keys, v.ap_state(recovered.bssid).keys
+    assert v.ap_state(typed.bssid).key_statuses[typed_key.id] is PasswordStatus.NOT_VERIFIED
+    assert v.ap_state(recovered.bssid).key_statuses[recovered_key.id] is PasswordStatus.CURRENT
+
+    v.record_live_verification(typed_key, correct=True)
+
+    assert v.ap_state(typed.bssid).key_statuses[typed_key.id] is PasswordStatus.CURRENT

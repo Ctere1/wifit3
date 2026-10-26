@@ -18,6 +18,7 @@ from wifit3.persist.pcap import read_pcap
 
 _HASHLINES_KEY = "hashlines"
 _LIVE_VERIFICATIONS_KEY = "live_verifications"
+_MANUAL_CAPTURES_KEY = "manual_captures"
 _PASSWORD_KEY_TYPES = frozenset({CaptureType.WPA_PSK, CaptureType.WEP})
 
 
@@ -54,6 +55,7 @@ class Key:
     captures: tuple[PersistedCapture, ...]  # every saved capture holding it, newest first
     hashline_ids: frozenset[str]
     live_verifications: tuple[LiveVerification, ...]
+    manual_capture_names: frozenset[str] = frozenset()     # its captures typed in through Add key
 
     @property
     def id(self) -> tuple[CaptureType, str]:
@@ -70,7 +72,8 @@ class Key:
     @property
     def ap_recovered_at(self) -> Optional[int]:
         """When the AP itself last gave the key up (WEP IVs, WPS), so it was correct then."""
-        return next((c.timestamp for c in self.captures if c.type in AP_RECOVERED_CAPTURE_TYPES), None)
+        return next((c.timestamp for c in self.captures if c.type in AP_RECOVERED_CAPTURE_TYPES
+                     and Path(c.path).name not in self.manual_capture_names), None)
 
 
 @dataclass(frozen=True)
@@ -146,6 +149,15 @@ def _stored_verifications(metas: list[dict]) -> dict[tuple[CaptureType, str], li
             if kind is not None and isinstance(value, str) and isinstance(at, int):
                 found.setdefault((kind, value), []).append(LiveVerification(at, bool(record.get("correct"))))
     return found
+
+
+def _manual_capture_names(metas: list[dict]) -> frozenset[str]:
+    names: set[str] = set()
+    for meta in metas:
+        stored = meta.get(_MANUAL_CAPTURES_KEY)
+        if isinstance(stored, list):
+            names.update(name for name in stored if isinstance(name, str))
+    return frozenset(names)
 
 
 def read_hashlines(bssid: str, captures: list[PersistedCapture]) -> dict[str, tuple[str, Hc22000Line]]:
@@ -265,12 +277,14 @@ def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
          for hid, (raw, line) in lines.items()),
         key=lambda h: epoch_sort_key(h.first_captured), reverse=True)
     verifications = _stored_verifications(metas)
+    manual_capture_names = _manual_capture_names(metas)
     keys = []
     for (key_type, value), key_captures in _key_captures(captures).items():
         matched = frozenset(h.id for h in hashlines
                             if key_type == CaptureType.WPA_PSK and psk_matches(value, h.line))
         keys.append(Key(key_type, value, tuple(key_captures), matched,
-                        tuple(sorted(verifications.get((key_type, value), []), key=lambda v: v.at))))
+                        tuple(sorted(verifications.get((key_type, value), []), key=lambda v: v.at)),
+                        manual_capture_names.intersection(Path(c.path).name for c in key_captures)))
     keys.sort(key=lambda k: epoch_sort_key(confirmed_at(k, hashlines)), reverse=True)
 
     status, status_key = password_status(hashlines, keys)
@@ -320,6 +334,15 @@ def record_hashline_dates(ssid: Optional[str], bssid: str, dates: Mapping[str, I
         captured = stored[hid]["captured"]
         captured.extend(e for e in epochs if e not in captured)
     update_meta(ssid, bssid, **{_HASHLINES_KEY: stored})
+
+
+def record_manual_capture(ssid: Optional[str], bssid: str, path: Path) -> None:
+    """Note in the SSID's .meta that this capture holds a key typed in through Add key."""
+    stored = read_meta(meta_path(ssid, bssid)).get(_MANUAL_CAPTURES_KEY)
+    stored = [name for name in stored if isinstance(name, str)] if isinstance(stored, list) else []
+    if path.name not in stored:
+        stored.append(path.name)
+    update_meta(ssid, bssid, **{_MANUAL_CAPTURES_KEY: stored})
 
 
 def record_live_verification(key: Key, correct: bool) -> None:

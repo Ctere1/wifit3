@@ -279,11 +279,11 @@ class VaultDrawer(ModalScreen):
                 if result is not None:
                     self._propagate_psk(ap.bssid, ap.ssid, credential.value)
             elif credential.kind == CaptureType.WPS_PIN:
-                result = vault.save_wps_pin(ap, credential.value, None)
+                result = vault.save_wps_pin(ap, credential.value, None, manual=True)
             else:
                 value = credential.value
                 key = bytes.fromhex(value) if len(value) in (10, 26) else value.encode("ascii")
-                result = vault.save_wep_key(ap, key)
+                result = vault.save_wep_key(ap, key, manual=True)
         except OSError as exc:
             self.notify(f"Could not save credential: {exc}", severity="error")
             return
