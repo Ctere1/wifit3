@@ -570,6 +570,22 @@ def _write_a_checked_wep_key_and_three_hashlines(tmp_path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
+@pytest.mark.parametrize("client_count", [3, 40])
+async def test_tall_wide_crack_buttons_sit_under_the_uncracked_list_and_stay_in_view(tmp_path, client_count):
+    lines = "".join(_EAPOL_LINE.replace("112233445566", f"1122334455{i:02x}") for i in range(client_count))
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", lines)
+    app = WifiteApp()
+    async with app.run_test(size=(160, 50)) as pilot:
+        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
+        uncracked = drawer.query_one(_UncrackedList)
+        tools = drawer.query_one(".tools")
+        assert tools.region.y == uncracked.region.bottom
+        assert uncracked.region.height == min(client_count, 12)
+        assert drawer.query_one("#vault-item").max_scroll_y == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
 async def test_a_refresh_shows_the_new_state_and_keeps_expansion_ticks_and_scroll(tmp_path):
     _write_a_checked_wep_key_and_three_hashlines(tmp_path)
     app = WifiteApp()

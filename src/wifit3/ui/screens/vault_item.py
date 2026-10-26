@@ -402,8 +402,7 @@ class _ApStatePanel(VerticalGroup):
     Screen.{TINY} _ApStatePanel Rule.uncracked-rule, Screen.{NARROW} _ApStatePanel Rule.uncracked-rule {{
         margin-top: 0;
     }}
-    Screen.{TALL}.{WIDE} _ApStatePanel {{ min-height: 100%; }}
-    Screen.{TALL}.{WIDE} _ApStatePanel .uncracked {{ height: 1fr; min-height: 8; max-height: 100%; }}
+    Screen.{TALL}.{WIDE} _ApStatePanel .uncracked {{ max-height: 12; }}
     """
 
     add_key_button: Button
