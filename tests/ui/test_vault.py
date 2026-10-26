@@ -457,7 +457,9 @@ async def test_a_refresh_shows_the_new_state_and_keeps_expansion_ticks_and_scrol
         drawer.query_one(_KeyRow).query_one(".expand", Button).press()
         drawer.query_one("#hashlines-0", Checkbox).value = False
         await pilot.pause()
-        item.scroll_to(y=3, animate=False)
+        scrolled = item.max_scroll_y
+        assert scrolled > 0
+        item.scroll_to(y=scrolled, animate=False)
         await pilot.pause()
         panel = drawer.query_one(_CapturePanel)
 
@@ -472,7 +474,7 @@ async def test_a_refresh_shows_the_new_state_and_keeps_expansion_ticks_and_scrol
         assert len(row.query(".row")) == 2
         assert [c.value for c in drawer.query(Checkbox).results(Checkbox)] == [False, True, True]
         assert "2 captures selected" in str(drawer.query_one(".selected-count", Label).content)
-        assert item.scroll_y == 3
+        assert item.scroll_y == scrolled
 
 
 @pytest.mark.asyncio

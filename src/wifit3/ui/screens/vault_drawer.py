@@ -67,6 +67,10 @@ class VaultDrawer(ModalScreen):
     VaultDrawer #vault-item Button.toggle { width: 3; background: transparent; }
     VaultDrawer.-tiny #vault-item Button.tool-btn { height: 1; border: none; min-width: 0; }
     VaultDrawer.-tiny #vault-item .ssids, VaultDrawer.-narrow #vault-item .ssids { display: none; }
+    VaultDrawer.-tiny #vault-item .status, VaultDrawer.-narrow #vault-item .status,
+    VaultDrawer.-tiny #vault-item Rule.uncracked-rule, VaultDrawer.-narrow #vault-item Rule.uncracked-rule {
+        margin-top: 0;
+    }
     VaultDrawer.-wide #vault-item .row > * { margin-right: 2; }
     VaultDrawer.-tall.-wide #vault-item _KeyRow .history,
     VaultDrawer.-tall.-wide #vault-item _KeyRow .collapse { display: block; }
