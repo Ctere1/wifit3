@@ -10,13 +10,13 @@ import sys
 import time
 import unicodedata
 import zipfile
-from dataclasses import replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional
 
-from wifit3.crack.hc22000_format import Hc22000Line, hashline_id, read_hc22000
+from wifit3.crack.hc22000_format import Hc22000Line
 from wifit3.crack.wpa_psk import psk_verdict
-from wifit3.models import PSK_CAPTURE_TYPES, WPS_CAPTURE_TYPES, CaptureType, PersistedCapture
+from wifit3.models import WPS_CAPTURE_TYPES, CaptureType, PersistedCapture
 from wifit3.persist import save
 from wifit3.persist.capture_history import load_capture_index, summarize
 from wifit3.persist.common import LEGACY_CAPTURE_RE, bssid_to_dashed, safe_ssid
@@ -77,9 +77,14 @@ def _open_in_file_manager(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+@dataclass(frozen=True)
+class HashlineSaveResult(SaveResult):
+    matches_saved_psk: Optional[bool] = None    # the new hashlines vs the saved PSKs (psk_verdict)
+
+
 def crosses_auto_crack_threshold(before: List[Hc22000Line], after: List[Hc22000Line]) -> bool:
-    """True when a save gives an AP its first line, or its first PMKID / authorized EAPOL
-    line after only M1+M2 lines; at most twice per AP."""
+    """True when a save gives an AP (all its SSIDs) its first line, or its first PMKID / authorized
+    EAPOL line after only M1+M2 lines; at most twice per AP."""
     if not before:
         return bool(after)
     return (not any(line.authorized for line in before)
@@ -225,15 +230,20 @@ class Vault:
         return result
 
     def known_psk(self, ap: "AccessPoint") -> Optional[str]:
-        """The passphrase held for this AP: recovered this session (PBC/PIN) or
-        loaded from a prior session's WPS file, else None. A WPS PIN alone does
-        not count."""
-        return (
-            ap.wps_pbc_psk
-            or ap.wps_pin_psk
-            or next((p.value for p in self.persisted(ap.bssid)
-                     if p.type in PSK_CAPTURE_TYPES and p.value), None)
-        )
+        """The passphrase held for this AP: recovered this session (PBC/PIN), else the saved one
+        (see ``_saved_psk``). A WPS PIN alone does not count."""
+        return ap.wps_pbc_psk or ap.wps_pin_psk or self._saved_psk(ap.bssid)
+
+    def _saved_psk(self, bssid: str) -> Optional[str]:
+        """The saved PSK the AP's password status names CURRENT or NOT VERIFIED; a STALE one is
+        not held."""
+        if not self.persisted(bssid):
+            return None
+        state = self.ap_state(bssid)
+        key = state.status_key
+        if key is None or key.type != CaptureType.WPA_PSK:
+            return None
+        return key.value if state.status in (PasswordStatus.CURRENT, PasswordStatus.NOT_VERIFIED) else None
 
     def has_psk(self, ap: "AccessPoint") -> bool:
         """True once we hold this AP's passphrase (see known_psk)."""
@@ -248,10 +258,8 @@ class Vault:
         """Save ``psk`` for every related AP (SSID family or sibling BSSID) with no PSK yet that
         it verifies against; returns their BSSIDs."""
         matched: List[str] = []
-        for bssid, captures in list(self._index.items()):
-            if bssid == source_bssid:
-                continue
-            if any(c.type in PSK_CAPTURE_TYPES and c.value for c in captures):
+        for bssid in list(self._index):
+            if bssid == source_bssid or self._saved_psk(bssid) is not None:
                 continue
             ssid = self.ssid(bssid)
             if not ((source_ssid and ssid and _related_ssids(source_ssid, ssid))
@@ -284,54 +292,52 @@ class Vault:
 
     # ----- writes (persist to disk, then fold into the cache) -----
 
-    def save_handshake(self, ap: "AccessPoint", client_mac: str) -> Optional[SaveResult]:
+    def save_handshake(self, ap: "AccessPoint", client_mac: str) -> Optional[HashlineSaveResult]:
         return self._save_hashlines(ap, CaptureType.HS, lambda: save.save_handshake(ap, client_mac))
 
-    def save_pmkid(self, ap: "AccessPoint", client_mac: str) -> Optional[SaveResult]:
+    def save_pmkid(self, ap: "AccessPoint", client_mac: str) -> Optional[HashlineSaveResult]:
         return self._save_hashlines(ap, CaptureType.PMKID, lambda: save.save_pmkid(ap, client_mac))
 
     def _save_hashlines(self, ap: "AccessPoint", kind: CaptureType,
-                        write: Callable[[], Optional[SaveResult]]) -> Optional[SaveResult]:
-        """Run ``write``; date its new hashlines in the .meta, check them against the saved PSKs,
-        then auto-crack them when no saved PSK matches."""
-        agg_path = save.HcFiles(Path(Config.captures_dir), ap.ssid, ap.bssid).agg_path
-        before = read_hc22000(agg_path)
-        was_current = load_ap_state(ap.bssid, self.persisted(ap.bssid)).status is PasswordStatus.CURRENT
+                        write: Callable[[], Optional[SaveResult]]) -> Optional[HashlineSaveResult]:
+        """Run ``write``; date its new hashlines in the .meta and check them against the saved PSKs,
+        then auto-crack the AP's uncracked hashlines (every SSID's) when no saved PSK matches."""
+        state = self.ap_state(ap.bssid)
+        before = read_hashlines(ap.bssid, self.persisted(ap.bssid))
         result = write()
         if result:
             update_meta(ap.ssid, ap.bssid)
-        if not (result and result.was_new):
-            return result
-        before_ids = {hashline_id(raw) for raw, _ in before}
-        new_lines = [(raw, line) for raw, line in read_hc22000(agg_path) if hashline_id(raw) not in before_ids]
-        if new_lines:
-            record_hashlines_captured(ap.ssid, ap.bssid, [raw for raw, _ in new_lines])
-            result = replace(result, matches_saved_key=self._matches_saved_key(ap, new_lines))
+        if not result:
+            return None
+        if not result.was_new:
+            return HashlineSaveResult(result.path, was_new=False)
         capture = PersistedCapture(type=kind, timestamp=int(time.time()), path=str(result.path),
                                    bssid=ap.bssid, ssid=ap.ssid)
+        after = read_hashlines(ap.bssid, [*self.persisted(ap.bssid), capture])
+        new_lines = {hid: raw_and_line for hid, raw_and_line in after.items() if hid not in before}
+        matches_saved_psk = None
+        if new_lines:
+            record_hashlines_captured(ap.ssid, ap.bssid, [raw for raw, _ in new_lines.values()])
+            psks = {k.value for k in state.keys if k.type == CaptureType.WPA_PSK}
+            psks |= {psk for psk in (ap.wps_pbc_psk, ap.wps_pin_psk) if psk}
+            matches_saved_psk = psk_verdict(psks, [line for _, line in new_lines.values()])
         self._insert_capture(capture)
-        if not result.matches_saved_key:
-            self._auto_crack(ap, capture, [line for _, line in before], was_current)
-        return result
+        if not matches_saved_psk:
+            self._auto_crack(ap, capture, [line for _, line in before.values()],
+                             [line for _, line in after.values()], state.status is PasswordStatus.CURRENT)
+        return HashlineSaveResult(result.path, was_new=True, matches_saved_psk=matches_saved_psk)
 
-    def _matches_saved_key(self, ap: "AccessPoint", lines: List[tuple[str, Hc22000Line]]) -> Optional[bool]:
-        psks = {p.value for p in self.persisted(ap.bssid) if p.type in PSK_CAPTURE_TYPES and p.value}
-        psks |= {psk for psk in (ap.wps_pbc_psk, ap.wps_pin_psk) if psk}
-        return psk_verdict(psks, [line for _, line in lines])
-
-    def _auto_crack(self, ap: "AccessPoint", capture: PersistedCapture,
-                    before: List[Hc22000Line], was_current: bool) -> None:
-        """Crack the uncracked hashlines when the save crossed the auto-crack threshold, or turned a
-        current password stale."""
+    def _auto_crack(self, ap: "AccessPoint", capture: PersistedCapture, before: List[Hc22000Line],
+                    after: List[Hc22000Line], was_current: bool) -> None:
+        """Crack the AP's uncracked hashlines when the save crossed the auto-crack threshold, or
+        turned a current password stale."""
         tool = self.manager.tools.get(Config.auto_crack) if Config.auto_crack else None
         if tool is None or not tool.can_crack(capture):
             return
         config = tool.auto_crack_config()
         if config is None:
             return
-        agg_path = save.HcFiles(Path(Config.captures_dir), ap.ssid, ap.bssid).agg_path
-        after = [line for _, line in read_hc22000(agg_path)]
-        state = load_ap_state(ap.bssid, self.persisted(ap.bssid))
+        state = self.ap_state(ap.bssid)
         became_stale = was_current and state.status is PasswordStatus.STALE
         if not (crosses_auto_crack_threshold(before, after) or became_stale):
             return

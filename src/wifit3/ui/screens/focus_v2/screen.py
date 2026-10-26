@@ -55,13 +55,15 @@ from wifit3.crack.handshake import handshake_uncrackable_label
 from wifit3.ui.encryption_format import psk_capture_supported
 from wifit3.models import AccessPoint, IdSource
 from wifit3.persist.config import Config
+from wifit3.persist.save import SaveResult
+from wifit3.persist.vault import HashlineSaveResult
 from wifit3.ui.vault.global_tracker import GlobalJobTracker
 
 from ... import focus_model as fm
 from ...capture_events import (
     CAPTURE_TOAST_TITLES, DECLOAK_METHOD_LABELS, CaptureEvent, CaptureEventDetector, CaptureKind,
 )
-from ...capture_log import saved_psk_check, short_sta
+from ...capture_log import saved_psk_markup, short_sta
 from ...eapol_aggregate import EapolAggregator
 from ... import pmkid_log
 from ...encryption_format import wep_key_ascii
@@ -120,14 +122,14 @@ _BUTTON_TIPS = {
 _FILENAME_MIDDLE = re.compile(r"_[0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5}_\d+_")
 
 
-def _save_line(result) -> str:
+def _save_line(result: SaveResult) -> str:
     """Short, dim 'saved/exists: captures/<essid>_…_<kind>.<ext>' line for a save result."""
     verb = "saved" if result.was_new else "exists"
     name = result.path.name
     m = _FILENAME_MIDDLE.search(name)
     short = f"{name[:m.start()]}_…_{name[m.end():]}" if m else name
     return (f"[dim]{verb}: {escape(str(Path(Config.captures_dir) / short))}[/dim]"
-            f"{saved_psk_check(result.matches_saved_key)}")
+            f"{saved_psk_markup(result.matches_saved_psk if isinstance(result, HashlineSaveResult) else None)}")
 
 
 def _wep_key_chip(key_hex) -> str:

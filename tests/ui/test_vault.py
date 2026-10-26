@@ -259,7 +259,9 @@ async def test_add_credential_prefills_the_row_and_saves_a_psk_the_handshake_ref
         verify.assert_called_once_with("aa:bb:cc:dd:ee:ff", "wrongpass")
         assert notify.call_args.args[0] == "PSK doesn't match the saved captures; added unverified"
         assert notify.call_args.kwargs["severity"] == "warning"
-        assert app.vault.known_psk(AccessPoint(bssid="aa:bb:cc:dd:ee:ff")) == "wrongpass"
+        assert [c.value for c in app.vault.persisted("aa:bb:cc:dd:ee:ff")
+                if c.type == CaptureType.WPA_PSK] == ["wrongpass"]
+        assert app.vault.known_psk(AccessPoint(bssid="aa:bb:cc:dd:ee:ff")) is None   # refuted, not held
 
         verify.return_value = True
         propagate = mocker.patch.object(app.vault, "propagate_verified_psk",

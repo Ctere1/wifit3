@@ -41,11 +41,11 @@ def _eapol_fields(ev: CaptureEvent) -> List[str]:
     return []                  # unclassified (group rekey etc.): label only
 
 
-def saved_psk_check(matches_saved_key: Optional[bool]) -> str:
+def saved_psk_markup(matches_saved_psk: Optional[bool]) -> str:
     """`` saved PSK matches`` (green) or `` saved PSK doesn't match`` (orange) for a new
     capture; empty when there was no saved PSK to check."""
-    if matches_saved_key is None:
+    if matches_saved_psk is None:
         return ""
-    if matches_saved_key:
+    if matches_saved_psk:
         return " [green]✓ saved PSK matches[/green]"
     return " [orange1]✗ saved PSK doesn't match[/orange1]"

@@ -149,7 +149,7 @@ def test_each_write_notifies_its_ap_and_a_refresh_every_ap(tmp_path):
 def test_ap_state_lists_the_wordlists_that_ran_out_on_its_uncracked_lines(tmp_path):
     from wifit3.persist.exhaustion import record_exhausted
     v = Vault()
-    ap = _ap_with_hs(pmkid=b"" * 16)
+    ap = _ap_with_hs(pmkid=b"\x11" * 16)
     v.save_pmkid(ap, _CLIENT)
     [uncracked] = v.ap_state(ap.bssid).uncracked
     assert v.ap_state(ap.bssid).uncracked_exhaustion == ()
@@ -344,7 +344,7 @@ def test_delete_capture_keeps_the_meta_of_another_ssid_on_the_bssid(tmp_path):
 
 def test_every_save_writes_the_meta(tmp_path):
     v = Vault()
-    ap = _ap_with_hs(pmkid=b"" * 16)
+    ap = _ap_with_hs(pmkid=b"\x11" * 16)
     v.save_handshake(ap, "11:22:33:44:55:66")
     v.save_pmkid(ap, "11:22:33:44:55:66")
     v.save_wps_pin(AccessPoint(bssid="00:11:22:33:44:02", ssid="Pin"), "12345670", "pw123456")
@@ -541,7 +541,7 @@ def test_save_does_not_submit_when_a_known_psk_matches_the_capture(tmp_path, moc
 
     result = v.save_pmkid(ap, _CLIENT)
 
-    assert result.matches_saved_key is True
+    assert result.matches_saved_psk is True
     v.manager.submit_job.assert_not_called()
 
 
@@ -553,7 +553,7 @@ def test_save_submits_when_no_known_psk_matches_the_capture(tmp_path, mocker):
 
     result = v.save_pmkid(ap, _CLIENT)
 
-    assert result.matches_saved_key is False
+    assert result.matches_saved_psk is False
     v.manager.submit_job.assert_called_once()
 
 
@@ -563,7 +563,7 @@ def test_an_unmatched_m1m2_capture_is_neither_a_match_nor_a_mismatch(tmp_path, m
     ap = _ap_with_hs()
     ap.wps_pbc_psk = "oldpsk"
 
-    assert v.save_handshake(ap, _CLIENT).matches_saved_key is None
+    assert v.save_handshake(ap, _CLIENT).matches_saved_psk is None
 
 
 @pytest.mark.parametrize(("already_stale", "submitted"), [(False, True), (True, False)])
@@ -577,11 +577,59 @@ def test_past_the_threshold_only_a_current_password_turning_stale_submits(
         v.save_pmkid(_ap_with_pmkid_for("newpsk", "11:22:33:44:55:02"), "11:22:33:44:55:02")
     lines = (tmp_path / "HomeNet_aa-bb-cc-dd-ee-ff.hc22000").read_text(encoding="utf-8").split()
     write_hashline_dates("HomeNet", "aa:bb:cc:dd:ee:ff", {raw: 1700000000 + i for i, raw in enumerate(lines)})
+    v.notify_changed("aa:bb:cc:dd:ee:ff")
     v.manager.submit_job.reset_mock()
 
     v.save_pmkid(_ap_with_pmkid_for("newpsk", "11:22:33:44:55:03"), "11:22:33:44:55:03")
 
     assert v.manager.submit_job.called is submitted
+
+
+def test_a_psk_a_newer_capture_refutes_is_not_held(tmp_path, mocker):
+    _write_wpa_psk(tmp_path, "aa-bb-cc-dd-ee-ff", ssid="HomeNet", psk="oldpsk")
+    v = Vault()
+    mocker.patch.object(v.manager, "submit_job")
+    ap = AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="HomeNet")
+    assert v.known_psk(ap) == "oldpsk"
+
+    assert v.save_pmkid(_ap_with_pmkid_for("newpsk"), _CLIENT).matches_saved_psk is False
+
+    assert v.known_psk(ap) is None and not v.has_psk(ap)
+
+
+def test_the_auto_crack_threshold_counts_every_ssid_of_the_ap(tmp_path, mocker):
+    v = Vault()
+    mocker.patch.object(v.manager, "submit_job")
+    v.save_pmkid(_ap_with_pmkid_for("somepsk"), _CLIENT)
+    assert v.manager.submit_job.call_count == 1
+
+    renamed = _ap_with_hs(ssid="HomeNet_5G", client_mac="11:22:33:44:55:77")
+    assert v.save_handshake(renamed, "11:22:33:44:55:77").was_new
+
+    assert v.manager.submit_job.call_count == 1
+
+
+class _CountingVault(Vault):
+    """Counts the AP states it computes rather than reads from its cache."""
+    computed = 0
+
+    def ap_state(self, bssid: str):
+        if bssid not in self._ap_states:
+            self.computed += 1
+        return super().ap_state(bssid)
+
+
+def test_a_save_computes_the_ap_state_once(tmp_path, mocker):
+    v = _CountingVault()
+    mocker.patch.object(v.manager, "submit_job")
+    ap = _ap_with_hs(pmkid=b"\x11" * 16)
+    v.save_handshake(ap, _CLIENT)
+    computed = v.computed
+
+    ap.handshakes[_CLIENT].messages[0] = _ef(1, nonce=b"\xA1" + b"\x00" * 31, payload_mic=b"\x00" * 16)
+    assert v.save_handshake(ap, _CLIENT).was_new
+
+    assert v.computed == computed + 1
 
 
 def test_save_dates_its_new_hashlines_in_the_meta(tmp_path, mocker):
