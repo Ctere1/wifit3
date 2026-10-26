@@ -11,7 +11,7 @@ from textual.containers import Horizontal
 from textual.widgets import DataTable, Input, Tabs, Tab
 from textual.widget import Widget
 
-from wifit3.models import CaptureType, PersistedCapture
+from wifit3.models import PSK_CAPTURE_TYPES, CaptureType, PersistedCapture
 from wifit3.persist.meta import meta_path, read_meta
 from textual.message import Message
 
@@ -136,7 +136,7 @@ class VaultTable(Widget):
             has_pmk = False
             
             for _, caps in self._aps.values():
-                if any(c.type in (CaptureType.WPS_PIN, CaptureType.WPS_PBC, CaptureType.WPA_PSK) and c.value for c in caps):
+                if any(c.type in PSK_CAPTURE_TYPES and c.value for c in caps):
                     has_psk = True
                 if any(c.type == CaptureType.WEP for c in caps):
                     has_wep = True
@@ -187,7 +187,7 @@ class VaultTable(Widget):
                          *(Path(c.path).name for c in caps)]):
                     continue
                 # Check filter
-                if self._current_tab == "tab-psk" and not any(c.type in (CaptureType.WPS_PIN, CaptureType.WPS_PBC, CaptureType.WPA_PSK) and c.value for c in caps): continue
+                if self._current_tab == "tab-psk" and not any(c.type in PSK_CAPTURE_TYPES and c.value for c in caps): continue
                 if self._current_tab == "tab-wep" and not any(c.type == CaptureType.WEP for c in caps): continue
                 if self._current_tab == "tab-pin" and not any(c.type == CaptureType.WPS_PIN and c.pin is not None for c in caps): continue
                 if self._current_tab == "tab-hs" and not any(c.type == CaptureType.HS for c in caps): continue
@@ -198,7 +198,7 @@ class VaultTable(Widget):
                 bssid_suffix = f" [dim]{bssid}[/dim]" if ssid_counts.get(ssid or "", 0) > 1 else ""
                 
                 badges = []
-                if any(c.type in (CaptureType.WPS_PIN, CaptureType.WPS_PBC, CaptureType.WPA_PSK) and c.value for c in caps):
+                if any(c.type in PSK_CAPTURE_TYPES and c.value for c in caps):
                     badges.append("[bold green]✓PSK[/]")
                 if any(c.type == CaptureType.WPS_PIN and c.pin is not None for c in caps):
                     badges.append("[bold green]✓PIN[/]")

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from wifit3.crack.hc22000_format import parse_hc22000
+from wifit3.crack.hc22000_format import read_hc22000
 from wifit3.models import PersistedCapture, ToolCapability, ToolResult, ToolStatus
 from wifit3.models.jobs import JobAction, JobState, ToolName
 from wifit3.persist.config import Config
@@ -33,16 +33,7 @@ class _ServerRun:
 
 
 def uploadable_hashlines(capture_path: str) -> list[str]:
-    try:
-        text = Path(capture_path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    lines = []
-    for raw in text.splitlines():
-        line = parse_hc22000(raw)
-        if line is not None and line.kind in _UPLOADED_KINDS:
-            lines.append(raw.strip())
-    return list(dict.fromkeys(lines))
+    return list(dict.fromkeys(raw for raw, line in read_hc22000(capture_path) if line.kind in _UPLOADED_KINDS))
 
 
 class HashtopolisTool(VaultTool):

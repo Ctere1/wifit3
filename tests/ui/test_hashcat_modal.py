@@ -15,7 +15,8 @@ from wifit3.persist.meta import update_meta
 from wifit3.ui.vault.modals.cpu_crack import CpuCrackConfigModal
 from wifit3.ui.vault.modals.hashcat import HashcatConfigModal, _default_hashcat_path
 from wifit3.ui.vault.modals.wordlists import _RemoveButton, _UseCheckbox, _exhausted_tooltip
-from wifit3.vault.exhaustion import Exhaustion, hashline_id, wordlist_identity
+from wifit3.crack.hc22000_format import hashline_id
+from wifit3.vault.exhaustion import Exhaustion, wordlist_identity
 from tests.ui.wait_until import wait_until
 
 

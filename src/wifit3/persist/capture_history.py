@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from wifit3.crack.hc22000_format import parse_hc22000
-from wifit3.models import CaptureType, PersistedCapture
+from wifit3.models import PSK_CAPTURE_TYPES, CaptureType, PersistedCapture
 from wifit3.persist.common import (
     AGGREGATED_HC22000_RE,
     LEGACY_CAPTURE_RE,
@@ -180,6 +180,5 @@ def summarize(index: Dict[str, List[PersistedCapture]]) -> tuple[int, int, int, 
         hs += CaptureType.HS in types
         pmkid += CaptureType.PMKID in types
         wep += CaptureType.WEP in types
-        psk += any(c.type in (CaptureType.WPS_PIN, CaptureType.WPS_PBC, CaptureType.WPA_PSK)
-                   and c.value for c in caps)
+        psk += any(c.type in PSK_CAPTURE_TYPES and c.value for c in caps)
     return hs, pmkid, wep, psk

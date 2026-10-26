@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from wifit3.crack.hc22000_format import parse_hc22000
+from wifit3.crack.hc22000_format import hashline_id, parse_hc22000
 from wifit3.models import CaptureType, PersistedCapture
 from wifit3.persist.capture_history import load_capture_index
 from wifit3.persist.ap_state import (
@@ -17,7 +17,6 @@ from wifit3.persist.ap_state import (
     record_live_verification,
 )
 from wifit3.persist.pcap import write_pcap
-from wifit3.vault.exhaustion import hashline_id
 
 # hashcat wiki example_hashes, mode 22000 (password "hashcat!"); message pair a2 = M2+M3.
 _BSSID = "64:66:b3:8e:c3:fc"
@@ -133,12 +132,6 @@ def test_a_recorded_live_verification_is_read_back(tmp_path):
     state = _state()
     assert state.status is PasswordStatus.CURRENT
     assert [v.correct for v in state.keys[0].live_verifications] == [True]
-
-
-def test_pair_labels_name_both_messages():
-    assert [_hashline(raw, 1).pair_label for raw in (_EAPOL_LINE, _CHALLENGE_LINE)] == ["M2+M3", "M1+M2"]
-    pmkid = f"WPA*01*{_MIC}*6466b38ec3fc*225edc49b7aa*{_SSID.encode().hex()}***"
-    assert _hashline(pmkid, 1).pair_label == "PMKID"
 
 
 def test_a_wps_pin_capture_gives_a_pin_key_and_a_wpa_psk_key(tmp_path):

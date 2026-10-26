@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Generic, Optional, Self, TypeVar
 
-from wifit3.crack.hc22000_format import parse_hc22000
+from wifit3.crack.hc22000_format import read_hc22000
 from wifit3.crack.passwords import ssid_variants
 from wifit3.models import PersistedCapture, ToolResult, ToolStatus
 from wifit3.models.jobs import JobAction, JobState
@@ -29,9 +29,7 @@ def expand_wordlists(wordlist_paths: list[str]) -> list[str]:
 
 def capture_ssid_variants(capture_path: str) -> list[str]:
     """``ssid_variants`` of every ESSID in the capture's hashlines, deduped."""
-    text = Path(capture_path).read_text(encoding="utf-8", errors="replace")
-    essids = dict.fromkeys(bytes.fromhex(line.essid).decode("utf-8", errors="replace")
-                           for line in map(parse_hc22000, text.splitlines()) if line is not None)
+    essids = dict.fromkeys(line.ssid for _, line in read_hc22000(capture_path))
     return list(dict.fromkeys(psk for essid in essids for psk in ssid_variants(essid)))
 
 

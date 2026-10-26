@@ -1,27 +1,20 @@
 """One AP's keys, hashlines and SSIDs across every SSID it has had, and its password status."""
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Iterable, Optional
 
-from wifit3.crack import wpa_psk
-from wifit3.crack.hc22000_format import Hc22000Line, parse_hc22000
-from wifit3.dot11.wpa import derive_pmk
-from wifit3.models import CaptureType, PersistedCapture
+from wifit3.crack.hc22000_format import Hc22000Line, hashline_id, read_hc22000
+from wifit3.crack.wpa_psk import psk_matches
+from wifit3.models import AP_RECOVERED_CAPTURE_TYPES, PSK_CAPTURE_TYPES, CaptureType, PersistedCapture
 from wifit3.persist.meta import bssid_meta_paths, meta_path, read_meta, update_meta
 from wifit3.persist.pcap import read_pcap
-from wifit3.vault.exhaustion import hashline_id
 
 _HASHLINES_KEY = "hashlines"
 _LIVE_VERIFICATIONS_KEY = "live_verifications"
-_RAW_PMK_RE = re.compile(r"[0-9a-fA-F]{64}")
-_PAIR_LABELS = {0: "M1+M2", 1: "M1+M4", 2: "M2+M3", 3: "M2+M3", 4: "M3+M4", 5: "M3+M4"}
-
-_pmk_cache: dict[tuple[str, bytes], bytes] = {}
 _pcap_cache: dict[tuple[str, int], list[tuple[bytes, int]]] = {}
 
 
@@ -43,10 +36,6 @@ class DatedHashline:
     @property
     def first_captured(self) -> int:
         return min(self.captured, default=0)
-
-    @property
-    def pair_label(self) -> str:
-        return "PMKID" if self.line.is_pmkid else _PAIR_LABELS.get(self.line.eapol_message_pair, "M??")
 
     @property
     def client(self) -> str:
@@ -71,7 +60,7 @@ class Key:
     @property
     def from_access_point(self) -> bool:
         """Recovered from the AP itself (WEP key, WPS M7), so correct when it was recovered."""
-        return self.capture.type in (CaptureType.WEP, CaptureType.WPS_PIN, CaptureType.WPS_PBC)
+        return self.capture.type in AP_RECOVERED_CAPTURE_TYPES
 
 
 @dataclass(frozen=True)
@@ -95,20 +84,6 @@ class ApState:
     def uncracked(self) -> tuple[DatedHashline, ...]:
         cracked = {h for key in self.keys for h in key.hashline_ids}
         return tuple(h for h in self.hashlines if h.id not in cracked)
-
-
-def _pmk(passphrase: str, essid: bytes) -> bytes:
-    if _RAW_PMK_RE.fullmatch(passphrase):
-        return bytes.fromhex(passphrase)
-    cached = _pmk_cache.get((passphrase, essid))
-    if cached is None:
-        cached = _pmk_cache[(passphrase, essid)] = derive_pmk(passphrase, essid)
-    return cached
-
-
-def psk_matches(passphrase: str, line: Hc22000Line) -> bool:
-    """Whether the passphrase (or 64-hex raw PMK) cracks the hashline; PMKs are cached."""
-    return wpa_psk.psk_matches(_pmk(passphrase, bytes.fromhex(line.essid)), line)
 
 
 def _pcap_frames(path: Path) -> list[tuple[bytes, int]]:
@@ -168,14 +143,9 @@ def read_hashlines(bssid: str, captures: list[PersistedCapture]) -> dict[str, tu
     compact_bssid = bssid.replace(":", "").lower()
     found: dict[str, tuple[str, Hc22000Line]] = {}
     for path in dict.fromkeys(c.path for c in captures if c.path.endswith(".hc22000")):
-        try:
-            text = Path(path).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        for raw in text.splitlines():
-            line = parse_hc22000(raw)
-            if line is not None and line.mac_ap == compact_bssid:
-                found.setdefault(hashline_id(raw), (raw.strip(), line))
+        for raw, line in read_hc22000(path):
+            if line.mac_ap == compact_bssid:
+                found.setdefault(hashline_id(raw), (raw, line))
     return found
 
 
@@ -187,7 +157,7 @@ def _keys_from_captures(captures: list[PersistedCapture]) -> list[tuple[CaptureT
             found.setdefault((CaptureType.WEP, capture.value), capture)
         if capture.type == CaptureType.WPS_PIN and capture.pin is not None:
             found.setdefault((CaptureType.WPS_PIN, capture.pin), capture)
-        if capture.type in (CaptureType.WPA_PSK, CaptureType.WPS_PIN, CaptureType.WPS_PBC) and capture.value:
+        if capture.type in PSK_CAPTURE_TYPES and capture.value:
             found.setdefault((CaptureType.WPA_PSK, capture.value), capture)
     return [(capture_type, value, capture) for (capture_type, value), capture in found.items()]
 
@@ -235,9 +205,7 @@ def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
             dates.setdefault(hid, set()).update(found)
 
     hashlines = {
-        hid: DatedHashline(hid, raw, line,
-                           bytes.fromhex(line.essid).decode("utf-8", errors="replace"),
-                           tuple(sorted(dates.get(hid, ()))))
+        hid: DatedHashline(hid, raw, line, line.ssid, tuple(sorted(dates.get(hid, ()))))
         for hid, (raw, line) in lines.items()}
     verifications = _stored_verifications(metas)
     keys = []

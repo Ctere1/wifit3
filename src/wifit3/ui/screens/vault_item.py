@@ -84,7 +84,7 @@ def when(epoch: int) -> str:
 def hashline_groups(hashlines: tuple[DatedHashline, ...]) -> list[list[DatedHashline]]:
     """Runs of hashlines from the same minute, message pair, client and SSID."""
     def same(h: DatedHashline) -> tuple:
-        return h.first_captured // 60, h.pair_label, h.client, h.ssid, h.line.authorized
+        return h.first_captured // 60, h.line.pair_label, h.client, h.ssid, h.line.authorized
     return [list(group) for _, group in groupby(hashlines, same)]
 
 
@@ -104,7 +104,7 @@ def _hashline_columns(group: list[DatedHashline], state: ApState) -> list[Label]
     else:
         verdict = Label("challenge", classes="verdict challenge")
         verdict.tooltip = _CHALLENGE_TOOLTIP
-    columns = _columns(state, first.first_captured, first.pair_label, f"…{first.client}", verdict)
+    columns = _columns(state, first.first_captured, first.line.pair_label, f"…{first.client}", verdict)
     columns.append(Label(f"×{len(group)}" if len(group) > 1 else "", classes="count"))
     if len(state.ssids) > 1:
         columns.append(Label(first.ssid, classes="row-ssid", markup=False))

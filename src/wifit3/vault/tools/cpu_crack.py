@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
 from wifit3.crack import wpa_psk
-from wifit3.crack.hc22000_format import Hc22000Line, parse_hc22000
+from wifit3.crack.hc22000_format import Hc22000Line, read_hc22000
 from wifit3.crack.passwords import DEFAULT_PASSWORDS_PATH, read_passwords, ssid_passwords
 from wifit3.dot11 import wpa
 from wifit3.models import PersistedCapture, ToolCapability, ToolResult, ToolStatus
@@ -67,10 +67,8 @@ class _WordlistRun:
 
 def _lines_by_essid(capture_path: str) -> dict[bytes, list[Hc22000Line]]:
     by_essid: dict[bytes, list[Hc22000Line]] = {}
-    for raw in Path(capture_path).read_text(encoding="utf-8", errors="replace").splitlines():
-        line = parse_hc22000(raw)
-        if line is not None:
-            by_essid.setdefault(bytes.fromhex(line.essid), []).append(line)
+    for _, line in read_hc22000(capture_path):
+        by_essid.setdefault(bytes.fromhex(line.essid), []).append(line)
     return by_essid
 
 
@@ -166,7 +164,7 @@ class CpuCrackTool(CrackerTool[CpuCrackQueue]):
     def _psk_cracks(psk: str, lines_by_essid: dict[bytes, list[Hc22000Line]]) -> bool:
         for essid, lines in lines_by_essid.items():
             pmk = wpa.derive_pmk(psk, essid)
-            if any(wpa_psk.psk_matches(pmk, line) for line in lines):
+            if any(wpa_psk.pmk_matches(pmk, line) for line in lines):
                 return True
         return False
 

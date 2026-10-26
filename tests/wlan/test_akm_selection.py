@@ -8,7 +8,7 @@ from wifit3.crack.handshake import (
     crackable_pairs, handshake_uncrackable_label, pmkid_crackable, withheld_capture_label,
 )
 from wifit3.crack.hc22000_format import eapol_hashlines, parse_hc22000, pmkid_hashline
-from wifit3.crack.wpa_psk import psk_matches
+from wifit3.crack.wpa_psk import pmk_matches
 from wifit3.dot11.parser import WlanFrameParser
 from wifit3.dot11.wpa import derive_ft_pmk_r0, ft_pmk_r1_name
 from wifit3.wlan.sink import WlanSink
@@ -148,8 +148,8 @@ def test_matching_m2_confirms_pmkid_akm_and_hashline(akm, m1_flags, m2_flags, di
     assert hashline == (
         f"WPA*01*{pmkid.hex()}*020000000001*020000000002*4c6162***"
         + ("03" if akm == 6 else ""))
-    assert psk_matches(_PMK, parse_hc22000(hashline))
-    assert not psk_matches(bytes(32), parse_hc22000(hashline))
+    assert pmk_matches(_PMK, parse_hc22000(hashline))
+    assert not pmk_matches(bytes(32), parse_hc22000(hashline))
 
 
 def test_matching_ft_psk_m2_confirms_pmkid_with_its_ft_identifiers():
@@ -164,8 +164,8 @@ def test_matching_ft_psk_m2_confirms_pmkid_with_its_ft_identifiers():
     hs = _handshake(sink)
     assert hs.pmkid_akm == 4 and pmkid_crackable(hs)
     hashline = parse_hc22000(pmkid_hashline("Lab", hs))
-    assert hashline.kind == "03" and psk_matches(_PMK, hashline)
-    assert not psk_matches(bytes(32), hashline)
+    assert hashline.kind == "03" and pmk_matches(_PMK, hashline)
+    assert not pmk_matches(bytes(32), hashline)
 
 
 @pytest.mark.parametrize("m1_overrides, m2_overrides", [

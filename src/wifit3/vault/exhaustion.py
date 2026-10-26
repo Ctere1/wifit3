@@ -1,11 +1,10 @@
 """Which wordlists ran to the end against which hashlines, kept in the AP's .meta file."""
-import hashlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from wifit3.crack.hc22000_format import parse_hc22000
+from wifit3.crack.hc22000_format import hashline_id, read_hc22000
 from wifit3.crack.passwords import DEFAULT_PASSWORDS_PATH, SSID_VARIANTS_VERSION
 from wifit3.models import PersistedCapture
 from wifit3.persist.config import Config
@@ -24,15 +23,9 @@ class Exhaustion:
     latest: int             # epoch seconds of the newest record among the exhausted hashlines
 
 
-def hashline_id(line: str) -> str:
-    return hashlib.sha256(line.strip().lower().encode()).hexdigest()[:16]
-
-
 def capture_hashline_ids(capture_path: str) -> list[str]:
     """``hashline_id`` of each hashline in the capture file, deduped."""
-    text = Path(capture_path).read_text(encoding="utf-8", errors="replace")
-    return list(dict.fromkeys(hashline_id(line) for line in text.splitlines()
-                              if parse_hc22000(line) is not None))
+    return list(dict.fromkeys(hashline_id(raw) for raw, _ in read_hc22000(capture_path)))
 
 
 def wordlist_identity(path: str | Path) -> str:

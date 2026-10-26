@@ -12,7 +12,7 @@ from wifit3.vault.tools.base import VaultTool
 from wifit3.vault.tools.cpu_crack import CpuCrackTool
 from wifit3.vault.tools.hashcat import HashcatTool
 from wifit3.vault.tools.hashtopolis import HashtopolisTool
-from wifit3.crack.hc22000_format import parse_hc22000
+from wifit3.crack.hc22000_format import read_hc22000
 from wifit3.persist.config import Config
 
 
@@ -240,18 +240,7 @@ class JobManager:
     def _essid_from_capture(self, capture_path: str) -> Optional[str]:
         """The AP's real SSID decoded from the capture's hashline (lossless), unlike the
         sanitized name recovered from the filename."""
-        try:
-            text = Path(capture_path).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return None
-        for line in text.splitlines():
-            parsed = parse_hc22000(line)
-            if parsed and parsed.essid:
-                try:
-                    return bytes.fromhex(parsed.essid).decode("utf-8", errors="replace")
-                except ValueError:
-                    return None
-        return None
+        return next((line.ssid for _, line in read_hc22000(capture_path) if line.essid), None)
 
     def stop_job(self, job_id: str) -> bool:
         """Stop a running job; it reports STOPPED once its process is gone."""
