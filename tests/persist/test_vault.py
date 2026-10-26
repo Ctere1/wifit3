@@ -142,7 +142,7 @@ def test_each_write_notifies_its_ap_and_a_refresh_every_ap(tmp_path):
     [key] = v.ap_state(ap.bssid).keys
     v.record_live_verification(key, correct=True)
     assert v.ap_state(ap.bssid).keys[0].live_verifications[0].correct
-    v.delete_capture(v.persisted(ap.bssid)[0])
+    v.delete_ap(ap.bssid)
     v.refresh()
 
     assert changed == [ap.bssid, ap.bssid, ap.bssid, None]
@@ -313,35 +313,24 @@ def test_all_captures_flat_across_aps(tmp_path):
     assert {c.bssid for c in caps} == {"00:11:22:33:44:01", "00:11:22:33:44:02"}
 
 
-def test_delete_capture_removes_file_and_cache_entry(tmp_path):
+def test_delete_ap_removes_every_ssids_files_and_cache_entries(tmp_path):
     v = Vault()
-    ap = AccessPoint(bssid="00:11:22:33:44:01", ssid="A")
-    r = v.save_wep_key(ap, b"abcde")
-    assert Path(r.path).exists()
-    v.delete_capture(v.persisted(ap.bssid)[0])
-    assert not Path(r.path).exists()
-    assert v.persisted(ap.bssid) == []
+    a = v.save_wep_key(AccessPoint(bssid="00:11:22:33:44:01", ssid="A"), b"abcde")
+    b = v.save_wep_key(AccessPoint(bssid="00:11:22:33:44:01", ssid="B"), b"fghij")
+    other = v.save_wep_key(AccessPoint(bssid="00:11:22:33:44:02", ssid="A"), b"klmno")
+    run_file = tmp_path / "wps_00-11-22-33-44-01.run"
+    run_file.write_text("{}", encoding="utf-8")
+    potfile = Path(a.path).with_suffix(".potfile")
+    potfile.write_text("", encoding="utf-8")
 
+    v.delete_ap("00:11:22:33:44:01")
 
-def test_delete_capture_removes_the_meta_with_the_last_capture(tmp_path):
-    v = Vault()
-    ap = AccessPoint(bssid="00:11:22:33:44:01", ssid="A")
-    v.save_wep_key(ap, b"abcde")
-    v.save_wep_key(ap, b"fghij")
-    meta = tmp_path / "A_00-11-22-33-44-01.meta"
-    v.delete_capture(v.persisted(ap.bssid)[0])
-    assert meta.exists()
-    v.delete_capture(v.persisted(ap.bssid)[0])
-    assert not meta.exists()
-
-
-def test_delete_capture_keeps_the_meta_of_another_ssid_on_the_bssid(tmp_path):
-    v = Vault()
-    v.save_wep_key(AccessPoint(bssid="00:11:22:33:44:01", ssid="A"), b"abcde")
-    v.save_wep_key(AccessPoint(bssid="00:11:22:33:44:01", ssid="B"), b"fghij")
-    v.delete_capture(next(c for c in v.persisted("00:11:22:33:44:01") if c.ssid == "A"))
-    assert not (tmp_path / "A_00-11-22-33-44-01.meta").exists()
-    assert (tmp_path / "B_00-11-22-33-44-01.meta").exists()
+    assert v.persisted("00:11:22:33:44:01") == []
+    assert not any(p.exists() for p in (Path(a.path), Path(b.path), run_file, potfile,
+                                         tmp_path / "A_00-11-22-33-44-01.meta",
+                                         tmp_path / "B_00-11-22-33-44-01.meta"))
+    assert Path(other.path).exists() and (tmp_path / "A_00-11-22-33-44-02.meta").exists()
+    assert len(v.persisted("00:11:22:33:44:02")) == 1
 
 
 def test_every_save_writes_the_meta(tmp_path):
@@ -359,14 +348,12 @@ def test_every_save_writes_the_meta(tmp_path):
         "Wep_00-11-22-33-44-05.meta"]
 
 
-def test_delete_capture_drops_all_entries_sharing_a_path(tmp_path):
-    # An aggregate .hc22000 backs both an HS and a PMKID entry: deleting drops both.
+def test_delete_ap_drops_the_hs_and_pmkid_entries_of_one_aggregate(tmp_path):
     agg = tmp_path / "Net_00-11-22-33-44-03.hc22000"
     agg.write_text(_PMKID_AND_EAPOL_LINES, encoding="utf-8")
     v = Vault()
-    caps = v.persisted("00:11:22:33:44:03")
-    assert {c.type for c in caps} == {CaptureType.HS, CaptureType.PMKID}
-    v.delete_capture(caps[0])
+    assert {c.type for c in v.persisted("00:11:22:33:44:03")} == {CaptureType.HS, CaptureType.PMKID}
+    v.delete_ap("00:11:22:33:44:03")
     assert v.persisted("00:11:22:33:44:03") == []
     assert not agg.exists()
 
@@ -793,14 +780,13 @@ def test_propagate_saves_only_related_aps_it_verifies_without_a_psk(tmp_path):
     assert v.known_psk(AccessPoint(bssid="02:00:00:00:00:40")) == "kept"
 
 
-def test_delete_capture_removes_the_meta_of_a_loaded_capture_with_a_real_ssid(tmp_path):
+def test_delete_ap_removes_the_meta_of_a_loaded_capture_with_a_real_ssid(tmp_path):
     (tmp_path / "Caf__02-00-00-00-00-40_1700000001_wpa_psk.txt").write_text(
         "SSID: Café\nBSSID: x\nPSK: pw\n", encoding="utf-8")
     meta = update_meta("Café", "02:00:00:00:00:40", nickname="kitchen")
     v = Vault()
-    capture = v.persisted("02:00:00:00:00:40")[0]
-    assert capture.ssid == "Café" and meta == tmp_path / "Caf__02-00-00-00-00-40.meta"
-    v.delete_capture(capture)
+    assert meta == tmp_path / "Caf__02-00-00-00-00-40.meta"
+    v.delete_ap("02:00:00:00:00:40")
     assert not meta.exists()
 
 

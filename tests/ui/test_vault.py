@@ -18,6 +18,7 @@ from wifit3.ui.app import WifiteApp
 from wifit3.ui.screens.vault_drawer import VaultDrawer
 from wifit3.ui.screens.vault_item import VaultItemView, _ApStatePanel, _CrackerButton, _HashlineGroupCheckbox, _KeyRow
 from wifit3.ui.vault.modals.add_credential import AddCredentialModal, ManualCredential
+from wifit3.ui.vault.modals.confirm import ConfirmModal
 from wifit3.ui.vault.modals.nickname import NicknameModal
 from tests.hashline_dates import write_hashline_dates
 
@@ -251,6 +252,28 @@ async def test_show_directory_warns_when_there_are_no_captures_yet(tmp_path, moc
         view.action_show_directory()
 
         notify.assert_called_once_with("No captures yet", severity="warning")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+@pytest.mark.parametrize(("answer", "deleted"), [("#yes", True), ("#no", False)])
+async def test_d_asks_then_deletes_every_file_of_the_selected_ap(tmp_path, answer, deleted):
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff_1000_wep_key.txt", _WEP_TXT)
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", _PMKID_LINE)
+    app = _RecordingApp()
+    async with app.run_test(size=(100, 40)) as pilot:
+        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
+        await pilot.press("d")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmModal)
+        assert "Delete HomeNet? 1 capture, 1 key" in str(app.screen.query_one("#prompt", Label).content)
+        await pilot.click(answer)
+        await pilot.pause()
+
+        assert app.screen is drawer
+        assert (drawer.query_one("#vault-aps", DataTable).row_count == 0) is deleted
+        assert (list(tmp_path.glob("HomeNet_*")) == []) is deleted
+        assert ("Deleted HomeNet" in app.notified) is deleted
 
 
 @pytest.mark.asyncio

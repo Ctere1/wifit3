@@ -46,6 +46,11 @@ def bssid_to_dashed(bssid: str) -> str:
     return bssid.replace(":", "-").lower()
 
 
+def wps_run_state_name(bssid: str) -> str:
+    """The WPS PIN campaign's resume file in captures/."""
+    return f"wps_{bssid_to_dashed(bssid)}.run"
+
+
 def bssid_to_colon(dashed: str) -> str:
     """``aa-bb-cc-dd-ee-ff`` -> ``aa:bb:cc:dd:ee:ff``."""
     return dashed.replace("-", ":").lower()

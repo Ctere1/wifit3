@@ -20,7 +20,7 @@ from wifit3.models import WPS_CAPTURE_TYPES, CaptureType, PersistedCapture
 from wifit3.persist import ap_state, save
 from wifit3.persist.ap_state import ApState, Key, PasswordStatus, read_hashlines
 from wifit3.persist.capture_history import load_capture_index, summarize
-from wifit3.persist.common import LEGACY_CAPTURE_RE, bssid_to_dashed, safe_ssid
+from wifit3.persist.common import LEGACY_CAPTURE_RE, bssid_to_dashed, safe_ssid, wps_run_state_name
 from wifit3.persist.config import Config
 from wifit3.persist.meta import meta_path, update_meta
 from wifit3.persist.save import SaveResult
@@ -400,25 +400,27 @@ class Vault:
 
     # ----- filesystem ops (the screen goes through these, never touches disk) -----
 
-    def delete_capture(self, capture: PersistedCapture) -> None:
-        """Delete a capture's file and drop every cache entry backed by it (an
-        aggregate .hc22000 backs both an HS and a PMKID entry)."""
-        Path(capture.path).unlink(missing_ok=True)
-        changed: List[str] = []
-        for bssid in list(self._index):
-            remaining = [c for c in self._index[bssid] if c.path != capture.path]
-            if len(remaining) == len(self._index[bssid]):
+    def delete_ap(self, bssid: str) -> None:
+        """Delete every file of the AP in captures/ (each SSID's captures and .meta, the WPS
+        resume file) and drop the cache entries backed by them."""
+        captures_dir = Path(Config.captures_dir)
+        paths = {Path(c.path) for c in self.persisted(bssid)}
+        paths.update(captures_dir.glob(f"*_{bssid_to_dashed(bssid)}[._]*"))
+        paths.add(captures_dir / wps_run_state_name(bssid))
+        for path in paths:
+            path.unlink(missing_ok=True)
+        changed = {bssid}
+        for indexed_bssid in list(self._index):
+            remaining = [c for c in self._index[indexed_bssid] if Path(c.path) not in paths]
+            if len(remaining) == len(self._index[indexed_bssid]):
                 continue
-            changed.append(bssid)
+            changed.add(indexed_bssid)
             if remaining:
-                self._index[bssid] = remaining
+                self._index[indexed_bssid] = remaining
             else:
-                del self._index[bssid]
-        meta_name = safe_ssid(capture.ssid)
-        if not any(safe_ssid(c.ssid) == meta_name for c in self.persisted(capture.bssid)):
-            meta_path(capture.ssid, capture.bssid).unlink(missing_ok=True)
-        for bssid in changed:
-            self.notify_changed(bssid)
+                del self._index[indexed_bssid]
+        for changed_bssid in changed:
+            self.notify_changed(changed_bssid)
 
     def zip_captures(self, captures: List[PersistedCapture],
                      save_as: Optional[Path] = None) -> Optional[Path]:

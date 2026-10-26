@@ -1,5 +1,6 @@
 from typing import Optional
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal
 from textual.widgets import Footer, DataTable, Input
@@ -10,11 +11,22 @@ from textual.binding import Binding
 from .vault_breakpoints import COMPACT, NARROW, SHORT, TALL, TINY, WIDE
 from .vault_table import VaultTable
 from .vault_item import AddKeyPressed, VaultItemView
-from wifit3.models import AccessPoint, CaptureType
+from wifit3.models import AccessPoint, CaptureType, PersistedCapture
+from wifit3.persist.ap_state import ApState
 from wifit3.persist.meta import meta_path, read_meta, update_meta
 from wifit3.ui.vault.job_pane import JobTrackerPane
 from wifit3.ui.vault.modals.add_credential import AddCredentialModal, ManualCredential
+from wifit3.ui.vault.modals.confirm import ConfirmModal
 from wifit3.ui.vault.modals.nickname import NicknameModal
+
+
+def _ap_contents_text(captures: list[PersistedCapture], state: ApState) -> str:
+    capture_count = len({c.path for c in captures if c.type in (CaptureType.HS, CaptureType.PMKID)})
+    pin_count = sum(1 for k in state.keys if k.type == CaptureType.WPS_PIN)
+    key_count = sum(1 for k in state.keys if k.is_password)
+    counts = [(capture_count, "capture"), (pin_count, "PIN"), (key_count, "key")]
+    return ", ".join(f"{n} {noun}{'' if n == 1 else 's'}" for n, noun in counts if n)
+
 
 class VaultDrawer(ModalScreen):
     """The Vault drawer overlay."""
@@ -31,6 +43,7 @@ class VaultDrawer(ModalScreen):
         Binding("/", "focus_search", "Search", show=False),
         Binding("a", "add_credential", "Add", show=True),
         Binding("n", "set_nickname", "Nickname", show=True),
+        Binding("d", "delete_ap", "Delete", show=True),
         Binding("z", "export_zip", "Export Zip", show=True),
         Binding("o", "show_directory", "Show Dir", show=True),
         Binding("q", "app.quit", "Quit", show=True),
@@ -223,6 +236,27 @@ class VaultDrawer(ModalScreen):
             self.notify("Nickname saved" if value else "Nickname cleared")
 
         self.app.push_screen(NicknameModal(ssid, current), _save)
+
+    def action_delete_ap(self) -> None:
+        ssid, bssid = self._selected_network()
+        if not bssid:
+            self.notify("Select an AP first", severity="warning")
+            return
+        name = self.query_one("#vault-table", VaultTable).display_name(bssid, ssid)
+        contents = _ap_contents_text(self.app.vault.persisted(bssid), self.app.vault.ap_state(bssid))
+        prompt = f"Delete [bold]{escape(name)}[/]?" + (f" {contents}" if contents else "")
+
+        def _delete(confirmed: Optional[bool]) -> None:
+            if not confirmed:
+                return
+            try:
+                self.app.vault.delete_ap(bssid)
+            except OSError as exc:
+                self.notify(f"Could not delete {name}: {exc}", severity="error")
+                return
+            self.notify(f"Deleted {name}")
+
+        self.app.push_screen(ConfirmModal(prompt), _delete)
 
     @on(AddKeyPressed)
     def _add_key_pressed(self, event: AddKeyPressed) -> None:
