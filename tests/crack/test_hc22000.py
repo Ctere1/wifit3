@@ -196,3 +196,12 @@ def test_parse_hc22000_malformed():
     assert parse_hc22000("") is None
     assert parse_hc22000("NOTWPA*01*abc*def") is None
     assert parse_hc22000("WPA*01*short") is None
+
+
+def test_eapol_message_pair_and_authorized_read_bits_0_to_2():
+    def eapol(pair: str):
+        return parse_hc22000(f"WPA*02*{_COMMON}*{'22' * 32}*01020304*{pair}")
+    assert [eapol(p).eapol_message_pair for p in ("00", "80", "a2", "05")] == [0, 0, 2, 5]
+    assert [eapol(p).authorized for p in ("00", "80", "a2", "01")] == [False, False, True, True]
+    pmkid = parse_hc22000(f"WPA*01*{_COMMON}***")
+    assert pmkid.is_pmkid and pmkid.authorized

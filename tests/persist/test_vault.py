@@ -504,12 +504,12 @@ def test_save_submits_when_no_known_psk_matches_the_capture(tmp_path, mocker):
 def test_past_the_threshold_only_a_current_password_turning_stale_submits(
         tmp_path, mocker, before, submitted):
     from types import SimpleNamespace
-    from wifit3.persist.crack_state import PasswordStatus
+    from wifit3.persist.ap_state import PasswordStatus
     v = Vault()
     mocker.patch.object(v.manager, "submit_job")
     mocker.patch("wifit3.persist.vault.crosses_auto_crack_threshold", return_value=False)
     mocker.patch("wifit3.persist.vault.psk_matches", return_value=False)
-    mocker.patch("wifit3.persist.vault.load_crack_state", side_effect=[
+    mocker.patch("wifit3.persist.vault.load_ap_state", side_effect=[
         SimpleNamespace(status=PasswordStatus[before]),
         SimpleNamespace(status=PasswordStatus.STALE, uncracked=[SimpleNamespace(raw="WPA*02*x")])])
     ap = _ap_with_hs()

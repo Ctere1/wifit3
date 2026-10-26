@@ -415,17 +415,95 @@ async def test_a_hashline_capture_offers_each_cracker_by_its_label(tmp_path, wid
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
-async def test_cracker_buttons_go_compact_on_one_row_in_a_narrow_pane(tmp_path):
+@pytest.mark.parametrize(("width", "height"), [(40, 1), (80, 3)])
+async def test_cracker_buttons_are_one_line_on_one_row_only_in_a_tiny_drawer(tmp_path, width, height):
     _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", _EAPOL_LINE)
     app = WifiteApp()
-    async with app.run_test(size=(40, 40)) as pilot:
+    async with app.run_test(size=(width, 40)) as pilot:
         view = await _open_vault(app)
         await pilot.pause()
 
         buttons = list(view.query_one(_CapturePanel).query(".tool-btn").results(Button))
         assert [str(button.label) for button in buttons] == ["Hashcat", "CPU Crack", "Hashtopolis"]
-        assert all(button.compact for button in buttons)
+        assert [button.region.height for button in buttons] == [height] * 3
         assert buttons[0].region.y == buttons[1].region.y == buttons[2].region.y
+
+
+_OTHER_CLIENT_LINE = _EAPOL_LINE.replace("112233445566", "112233445577")
+_LIVE_CHECK = {"kind": "WEP", "key": "6162636465", "correct": True}
+
+
+def _write_a_checked_wep_key_and_three_hashlines(tmp_path) -> None:
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", _EAPOL_LINE + _OTHER_CLIENT_LINE + _PMKID_LINE)
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff_1000_wep_key.txt", _WEP_TXT)
+    _write(tmp_path, "Cafe_02-00-00-00-00-01_1000_wep_key.txt", _WEP_TXT.replace("aa:bb:cc:dd:ee:ff", "02:00:00:00:00:01"))
+    update_meta("HomeNet", "aa:bb:cc:dd:ee:ff", live_verifications=[{**_LIVE_CHECK, "at": 1000}])
+
+
+async def _open_vault_on_home_net(app, pilot) -> VaultDrawer:
+    app.push_screen(VaultDrawer("aa:bb:cc:dd:ee:ff"))
+    await pilot.pause()
+    return app.screen
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_a_refresh_shows_the_new_state_and_keeps_expansion_ticks_and_scroll(tmp_path):
+    _write_a_checked_wep_key_and_three_hashlines(tmp_path)
+    app = WifiteApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        drawer = await _open_vault_on_home_net(app, pilot)
+        item = drawer.query_one("#vault-item")
+        drawer.query_one(_KeyRow).query_one(".expand", Button).press()
+        drawer.query_one("#hashlines-0", Checkbox).value = False
+        await pilot.pause()
+        item.scroll_to(y=3, animate=False)
+        await pilot.pause()
+        panel = drawer.query_one(_CapturePanel)
+
+        update_meta("HomeNet", "aa:bb:cc:dd:ee:ff",
+                    live_verifications=[{**_LIVE_CHECK, "at": 1000}, {**_LIVE_CHECK, "at": 2000}])
+        app.vault.refresh()
+        await pilot.pause(0.1)
+
+        assert drawer.query_one(_CapturePanel) is not panel
+        row = drawer.query_one(_KeyRow)
+        assert row.has_class("-expanded")
+        assert len(row.query(".row")) == 2
+        assert [c.value for c in drawer.query(Checkbox).results(Checkbox)] == [False, True, True]
+        assert "2 captures selected" in str(drawer.query_one(".selected-count", Label).content)
+        assert item.scroll_y == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_another_aps_capture_leaves_the_pane_alone(tmp_path):
+    _write_a_checked_wep_key_and_three_hashlines(tmp_path)
+    app = WifiteApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        drawer = await _open_vault_on_home_net(app, pilot)
+        panel = drawer.query_one(_CapturePanel)
+        table = drawer.query_one("#vault-aps", DataTable)
+
+        app.vault.save_wpa_psk("Cafe", "02:00:00:00:00:01", "cafepass")
+        await pilot.pause(0.1)
+
+        assert drawer.query_one(_CapturePanel) is panel
+        assert "✓PSK" in str(table.get_row("02:00:00:00:00:01")[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_only_the_verdict_carries_the_tooltip(tmp_path):
+    _write_a_checked_wep_key_and_three_hashlines(tmp_path)
+    app = WifiteApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        drawer = await _open_vault_on_home_net(app, pilot)
+        rows = list(drawer.query(".uncracked .row"))
+
+        assert [str(row.query_one(".verdict").tooltip) for row in rows] == [
+            "PMKID or M3/M4: the AP accepted this password"] * 3
+        assert all(row.tooltip is None and row.query_one(".date").tooltip is None for row in rows)
 
 
 @pytest.mark.asyncio
@@ -458,3 +536,21 @@ async def test_unchecked_hashlines_are_left_out_of_the_crack_job(tmp_path, mocke
             checkbox.value = False
         await pilot.pause(0)
         assert all(button.disabled for button in panel.query(".tool-btn").results(Button))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+@pytest.mark.parametrize(("size", "expanded", "ssid_shown"), [((160, 50), True, True), ((80, 40), False, False)])
+async def test_a_tall_wide_drawer_starts_key_histories_expanded_and_shows_the_ssid(
+        tmp_path, size, expanded, ssid_shown):
+    _write_a_checked_wep_key_and_three_hashlines(tmp_path)
+    app = WifiteApp()
+    async with app.run_test(size=size) as pilot:
+        drawer = await _open_vault_on_home_net(app, pilot)
+        history = drawer.query_one(_KeyRow).query_one(".history")
+        assert history.display is expanded
+        assert drawer.query_one(".ssids").display is ssid_shown
+
+        drawer.query_one(_KeyRow).query_one(".collapse" if expanded else ".expand", Button).press()
+        await pilot.pause()
+        assert history.display is not expanded

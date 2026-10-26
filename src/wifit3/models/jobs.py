@@ -35,7 +35,7 @@ class JobState:
     """Schema for jobs.json persistence."""
     job_id: str                 # Unique ID (tool_name + capture_path + timestamp)
     tool_name: str
-    capture_path: str           # names the potfile and log; the hashlines when hashlines_path is unset
+    capture_path: str           # the AP's .hc22000 the job was submitted for; names its potfile and log
     status: ToolStatus
     progress_msg: str           # e.g., "12% (ETA: 1h)" or error reason
     display_name: str = "Unknown Job"           # Human-readable name (e.g. "Hashcat (ASUS)")
@@ -43,7 +43,7 @@ class JobState:
     detail: str = ""                            # what the work is on, e.g. "rockyou.txt (2/3)"
     key: Optional[str] = None                   # recovered PSK; None for tools that recover none
     auto_crack: bool = False                    # submitted by auto-crack on capture, not by the user
-    hashlines_path: Optional[str] = None        # the chosen hashlines, when not all of the capture's
+    hashlines_path: Optional[str] = None        # the hashlines to crack; None only in jobs from an older jobs.json
     # Tool-specific tracking data (only one of these usually populated)
     pid: Optional[int] = None
     log_path: Optional[str] = None

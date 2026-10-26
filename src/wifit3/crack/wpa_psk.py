@@ -72,7 +72,7 @@ def _ft_psk_matches(pmk: bytes, line: Hc22000Line) -> bool:
     frame_nonce = eapol[_SNONCE_OFFSET:_SNONCE_OFFSET + _NONCE_LEN]
     field_nonce = bytes.fromhex(line.anonce)
     message_pair = _message_pair_bits(line)
-    if message_pair & 7 in _FT_MESSAGE_PAIRS_WITH_SNONCE_FIELD:
+    if line.eapol_message_pair in _FT_MESSAGE_PAIRS_WITH_SNONCE_FIELD:
         snonce, anonce = field_nonce, frame_nonce
     else:
         snonce, anonce = frame_nonce, field_nonce

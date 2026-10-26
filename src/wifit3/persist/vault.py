@@ -14,18 +14,17 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional
 
-from wifit3.crack import wpa_psk
 from wifit3.crack.hc22000_format import Hc22000Line, parse_hc22000
-from wifit3.dot11.wpa import derive_pmk
 from wifit3.models import CaptureType, PersistedCapture
 from wifit3.persist import save
 from wifit3.persist.capture_history import load_capture_index, summarize
 from wifit3.persist.common import LEGACY_CAPTURE_RE, bssid_to_dashed, safe_ssid
 from wifit3.persist.config import Config
-from wifit3.persist.crack_state import (
+from wifit3.persist.ap_state import (
     PasswordStatus,
-    load_crack_state,
+    load_ap_state,
     psk_matches,
+    read_hashlines,
     record_hashlines_captured,
 )
 from wifit3.persist.meta import meta_path, update_meta
@@ -40,7 +39,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _BAND_SUFFIX_RE = re.compile(r"(?:[\s_-]+(?:2[._]?4|5|6)g(?:hz)?)$", re.IGNORECASE)
-_RAW_PMK_RE = re.compile(r"[0-9a-fA-F]{64}")
 
 
 def _ssid_family(ssid: str) -> str:
@@ -77,17 +75,13 @@ def _open_in_file_manager(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
-def _is_m1m2_eapol(line: Hc22000Line) -> bool:
-    return line.kind in {"02", "04"} and int(line.message_pair or "0", 16) & 0x07 == 0
-
-
 def crosses_auto_crack_threshold(before: List[Hc22000Line], after: List[Hc22000Line]) -> bool:
     """True when a save gives an AP its first line, or its first PMKID / authorized EAPOL
     line after only M1+M2 lines; at most twice per AP."""
     if not before:
         return bool(after)
-    return (all(_is_m1m2_eapol(line) for line in before)
-            and any(not _is_m1m2_eapol(line) for line in after))
+    return (not any(line.authorized for line in before)
+            and any(line.authorized for line in after))
 
 
 class Vault:
@@ -231,30 +225,10 @@ class Vault:
     def verify_wpa_psk(self, bssid: str, psk: str) -> Optional[bool]:
         """Check a PSK or 64-hex raw PMK against the AP's saved hashlines. False only if a
         non-M1+M2 line rejects it (M1+M2 may hold a wrong passphrase); None if unverifiable."""
-        lines_by_essid: Dict[bytes, List[Hc22000Line]] = {}
-        paths = {c.path for c in self.persisted(bssid)
-                 if c.type in (CaptureType.HS, CaptureType.PMKID) and c.path.endswith(".hc22000")}
-        compact_bssid = bssid.replace(":", "").lower()
-        for path in paths:
-            try:
-                text = Path(path).read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            for raw_line in text.splitlines():
-                line = parse_hc22000(raw_line)
-                if line is None or line.mac_ap != compact_bssid:
-                    continue
-                lines_by_essid.setdefault(bytes.fromhex(line.essid), []).append(line)
-        if not lines_by_essid:
-            return None
-        raw_pmk = bytes.fromhex(psk) if _RAW_PMK_RE.fullmatch(psk) else None
-        for essid, lines in lines_by_essid.items():
-            pmk = raw_pmk or derive_pmk(psk, essid)
-            if any(wpa_psk.psk_matches(pmk, line) for line in lines):
-                return True
-        if all(_is_m1m2_eapol(line) for lines in lines_by_essid.values() for line in lines):
-            return None
-        return False
+        lines = [line for _, line in read_hashlines(bssid, self.persisted(bssid)).values()]
+        if any(psk_matches(psk, line) for line in lines):
+            return True
+        return False if any(line.authorized for line in lines) else None
 
     def propagate_verified_psk(self, source_bssid: str, source_ssid: Optional[str],
                                psk: str) -> List[str]:
@@ -309,7 +283,7 @@ class Vault:
         """Run ``write``; date its new hashlines in the .meta, check them against the saved PSKs,
         then auto-crack them when no saved PSK matches."""
         before = self._hc_raw_lines(ap)
-        was_current = load_crack_state(ap.bssid, self.persisted(ap.bssid)).status is PasswordStatus.CURRENT
+        was_current = load_ap_state(ap.bssid, self.persisted(ap.bssid)).status is PasswordStatus.CURRENT
         result = write()
         if result:
             update_meta(ap.ssid, ap.bssid)
@@ -354,7 +328,7 @@ class Vault:
         if config is None:
             return
         after = [parse_hc22000(raw) for raw in self._hc_raw_lines(ap)]
-        state = load_crack_state(ap.bssid, self.persisted(ap.bssid))
+        state = load_ap_state(ap.bssid, self.persisted(ap.bssid))
         became_stale = was_current and state.status is PasswordStatus.STALE
         if not (crosses_auto_crack_threshold(before, after) or became_stale):
             return

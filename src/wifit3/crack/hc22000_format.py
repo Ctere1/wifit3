@@ -84,6 +84,20 @@ class Hc22000Line:
     r0khid: str = ""    # field 10 (FT only)
     r1khid: str = ""    # field 11 (FT only)
 
+    @property
+    def is_pmkid(self) -> bool:
+        return self.kind in ("01", "03")
+
+    @property
+    def eapol_message_pair(self) -> int:
+        """Bits 0-2 of the message-pair field: which EAPOL messages the line pairs (0 = M1+M2)."""
+        return int(self.message_pair or "0", 16) & 0x07
+
+    @property
+    def authorized(self) -> bool:
+        """A PMKID, or an EAPOL pair other than M1+M2: the AP accepted the password."""
+        return self.is_pmkid or self.eapol_message_pair != 0
+
 
 def _is_hex(value: str, *, exact: int | None = None, maximum: int | None = None) -> bool:
     if len(value) % 2 or not re.fullmatch(r"[0-9a-fA-F]*", value):

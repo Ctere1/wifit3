@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from itertools import groupby
 from typing import Optional
 
@@ -11,20 +12,18 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalGroup, VerticalScroll
 from textual.content import Content
-from textual.events import Resize
 from textual.message import Message
-from textual.reactive import reactive
-from textual.widgets import Button, Checkbox, Collapsible, Label, Rule, Static
+from textual.widgets import Button, Checkbox, Label, Rule, Static
 
 from wifit3.campaigns.pin import EMPTY_PIN_LABEL
-from wifit3.models import PersistedCapture
-from wifit3.persist.crack_state import (
-    CrackState,
-    Hashline,
+from wifit3.models import CaptureType, PersistedCapture
+from wifit3.persist.ap_state import (
+    ApState,
+    DatedHashline,
     Key,
-    KeyKind,
+    LiveVerification,
     PasswordStatus,
-    load_crack_state,
+    load_ap_state,
     record_live_verification,
 )
 from wifit3.ui.vault.tools_ui import UI_TOOLS
@@ -44,11 +43,11 @@ _KEY_CHIP_STYLE = {
     PasswordStatus.NOT_VERIFIED: "black bold on $warning",
     PasswordStatus.STALE: "black bold on #ffaf00",
 }
-_KEY_LABEL = {KeyKind.PSK: "PSK", KeyKind.WPS: "PIN", KeyKind.WEP: "Key"}
-_KEY_BADGE_STYLE = {KeyKind.PSK: "$text-success", KeyKind.WPS: "$text-accent", KeyKind.WEP: "$text-secondary"}
-_AUTHORIZED_TOOLTIP = "authorized: PMKID or M3/M4, the AP accepted this password"
-_CHALLENGE_TOOLTIP = "challenge: no M3/M4, could be a wrong password"
-_COMPACT_TOOL_BUTTONS_BELOW = 60
+_KEY_LABEL = {CaptureType.WPA_PSK: "PSK", CaptureType.WPS_PIN: "PIN", CaptureType.WEP: "Key"}
+_KEY_BADGE = {CaptureType.WPA_PSK: ("PSK", "$text-success"), CaptureType.WPS_PIN: ("WPS", "$text-accent"),
+              CaptureType.WEP: ("WEP", "$text-secondary")}
+_AUTHORIZED_TOOLTIP = "PMKID or M3/M4: the AP accepted this password"
+_CHALLENGE_TOOLTIP = "No M3/M4: could be a wrong password"
 
 
 def _hex_to_ascii(hex_key: Optional[str]) -> str:
@@ -63,40 +62,72 @@ def _hex_to_ascii(hex_key: Optional[str]) -> str:
 
 def key_text(key: Key) -> str:
     """The key as the user types it: a WEP key in ASCII when printable, else hex."""
-    if key.kind == KeyKind.WEP:
+    if key.capture_type == CaptureType.WEP:
         return _hex_to_ascii(key.value) or key.value
-    if key.kind == KeyKind.WPS:
+    if key.capture_type == CaptureType.WPS_PIN:
         return key.value or EMPTY_PIN_LABEL
     return key.value
 
 
 def when(epoch: int) -> str:
-    """``today 19:37``, ``Oct 22 19:37``, ``Oct 22 2025``; ``no date`` for 0."""
+    """``today  19:37``, ``Oct 22 19:37``, ``Oct 22 2025``; ``no date`` for 0."""
     if not epoch:
         return "no date"
     moment, now = time.localtime(epoch), time.localtime()
     if moment.tm_year != now.tm_year:
         return time.strftime("%b %d %Y", moment)
     if moment.tm_yday == now.tm_yday:
-        return time.strftime("today %H:%M", moment)
+        return time.strftime("today  %H:%M", moment)
     return time.strftime("%b %d %H:%M", moment)
 
 
-def hashline_groups(hashlines: tuple[Hashline, ...]) -> list[list[Hashline]]:
+def hashline_groups(hashlines: tuple[DatedHashline, ...]) -> list[list[DatedHashline]]:
     """Runs of hashlines from the same minute, message pair, client and SSID."""
-    def same(h: Hashline) -> tuple:
-        return h.first_captured // 60, h.pair_label, h.client, h.ssid, h.authorized
+    def same(h: DatedHashline) -> tuple:
+        return h.first_captured // 60, h.pair_label, h.client, h.ssid, h.line.authorized
     return [list(group) for _, group in groupby(hashlines, same)]
 
 
-def _hashline_row(group: list[Hashline], state: CrackState) -> Content:
+def _columns(state: ApState, epoch: int, pair: str, client: str, verdict: Label) -> list[Label]:
+    columns = [Label(when(epoch), classes="date"), Label(pair, classes="pair")]
+    if len({h.client for h in state.hashlines}) > 1:
+        columns.append(Label(client, classes="client"))
+    columns.append(verdict)
+    return columns
+
+
+def _hashline_columns(group: list[DatedHashline], state: ApState) -> list[Label]:
     first = group[0]
-    client = f" …{first.client}" if len({h.client for h in state.hashlines}) > 1 else ""
-    verdict = "[$text-success]authorized[/]" if first.authorized else "[$text-warning]challenge[/]"
-    times = f" [dim]×{len(group)}[/]" if len(group) > 1 else ""
-    ssid = f" {escape(first.ssid)}" if len(state.ssids) > 1 else ""
-    return Content.from_markup(
-        f"[dim]{when(first.first_captured)}[/] {first.pair_label:5}{client} {verdict}{times}{ssid}")
+    if first.line.authorized:
+        verdict = Label("authorized", classes="verdict authorized")
+        verdict.tooltip = _AUTHORIZED_TOOLTIP
+    else:
+        verdict = Label("challenge", classes="verdict challenge")
+        verdict.tooltip = _CHALLENGE_TOOLTIP
+    columns = _columns(state, first.first_captured, first.pair_label, f"…{first.client}", verdict)
+    columns.append(Label(f"×{len(group)}" if len(group) > 1 else "", classes="count"))
+    if len(state.ssids) > 1:
+        columns.append(Label(first.ssid, classes="row-ssid", markup=False))
+    return columns
+
+
+def _live_verification_columns(verification: LiveVerification, state: ApState) -> list[Label]:
+    verdict = (Label("✓ verified live", classes="verdict live verified") if verification.correct
+               else Label("✗ rejected live", classes="verdict live rejected"))
+    return _columns(state, verification.at, "", "", verdict)
+
+
+def _key_id(key: Key) -> tuple[CaptureType, str]:
+    return key.capture_type, key.value
+
+
+@dataclass(frozen=True)
+class _UserChoices:
+    expanded_keys: frozenset[tuple[CaptureType, str]]
+    collapsed_keys: frozenset[tuple[CaptureType, str]]
+    unchecked_hashline_ids: frozenset[str]
+    scroll_y: float
+    uncracked_scroll_y: float
 
 
 class _KeyRow(VerticalGroup):
@@ -106,34 +137,32 @@ class _KeyRow(VerticalGroup):
     _KeyRow .no-toggle { width: 3; }
     _KeyRow .key-text { width: 1fr; text-wrap: nowrap; text-overflow: ellipsis; }
     _KeyRow Button { margin-left: 1; }
-    _KeyRow .history { height: auto; padding-left: 2; }
+    _KeyRow .history { height: auto; padding-left: 1; }
     _KeyRow .history-rows { height: auto; max-height: 8; scrollbar-size-vertical: 1; }
-    _KeyRow .history-rows Static { text-wrap: nowrap; text-overflow: ellipsis; }
+    _KeyRow .history, _KeyRow .collapse { display: none; }
+    _KeyRow.-expanded .history, _KeyRow.-expanded .collapse { display: block; }
+    _KeyRow.-expanded .expand { display: none; }
     """
 
-    def __init__(self, key: Key, state: CrackState) -> None:
-        super().__init__()
+    def __init__(self, key: Key, state: ApState, classes: str = "") -> None:
+        super().__init__(classes=classes)
         self.key = key
         self._state = state
         self._verify_task: Optional[asyncio.Task] = None
 
-    def _history(self) -> list[tuple[int, Content, Optional[str]]]:
-        rows: list[tuple[int, Content, Optional[str]]] = [
-            (v.at, Content.from_markup(
-                f"[dim]{when(v.at)}[/] " + ("[$text-success]✓ verified live[/]" if v.correct
-                                            else "[#ffaf00]✗ rejected live[/]")), None)
-            for v in self.key.live_verifications]
+    def _history(self) -> list[tuple[int, list[Label]]]:
+        rows = [(v.at, _live_verification_columns(v, self._state)) for v in self.key.live_verifications]
         matched = tuple(h for h in self._state.hashlines if h.id in self.key.hashline_ids)
-        for group in hashline_groups(matched):
-            tooltip = _AUTHORIZED_TOOLTIP if group[0].authorized else _CHALLENGE_TOOLTIP
-            rows.append((group[0].first_captured, _hashline_row(group, self._state), tooltip))
+        rows += [(group[0].first_captured, _hashline_columns(group, self._state))
+                 for group in hashline_groups(matched)]
         return sorted(rows, key=lambda row: row[0], reverse=True)
 
     def compose(self) -> ComposeResult:
         history = self._history()
         with Horizontal(classes="key-line"):
             if history:
-                yield Button("▶", compact=True, classes="toggle", tooltip="Show captures and verifications")
+                yield Button("▶", compact=True, classes="toggle expand", tooltip="Show captures and verifications")
+                yield Button("▼", compact=True, classes="toggle collapse", tooltip="Hide captures and verifications")
             else:
                 yield Label("", classes="no-toggle")
             yield Label(Content.from_markup(self._summary_markup()), classes="key-text")
@@ -141,32 +170,36 @@ class _KeyRow(VerticalGroup):
             yield Button("Verify", compact=True, variant="primary", classes="verify-btn",
                          tooltip="Connect to the live AP and verify this key")
         if history:
-            with Vertical(classes="history") as body:
-                body.display = False
+            with Vertical(classes="history"):
                 with VerticalScroll(classes="history-rows"):
-                    for _, row, tooltip in history:
-                        static = Static(row)
-                        static.tooltip = tooltip
-                        yield static
+                    for _, columns in history:
+                        yield Horizontal(*columns, classes="row")
 
     def _summary_markup(self) -> str:
         key = self.key
-        markup = (f"[bold {_KEY_BADGE_STYLE[key.kind]}]{key.kind.value}[/] "
-                  f"[black bold on lightgreen] {escape(key_text(key))} [/]")
+        badge, style = _KEY_BADGE[key.capture_type]
+        markup = f"[bold {style}]{badge}[/] [black bold on lightgreen] {escape(key_text(key))} [/]"
         total = len(self._state.hashlines)
-        if key.kind == KeyKind.PSK and total:
+        if key.capture_type == CaptureType.WPA_PSK and total:
             markup += f" [dim]({len(key.hashline_ids)}/{total} captures)[/]"
-            authorized = any(h.authorized for h in self._state.hashlines if h.id in key.hashline_ids)
+            authorized = any(h.line.authorized for h in self._state.hashlines if h.id in key.hashline_ids)
             if not authorized and not any(v.correct for v in key.live_verifications):
                 markup += " [#ffaf00]unverified[/]"
         return markup
 
-    @on(Button.Pressed, ".toggle")
-    def _toggle(self, event: Button.Pressed) -> None:
+    @on(Button.Pressed, ".expand")
+    def _expand(self, event: Button.Pressed) -> None:
         event.stop()
-        body = self.query_one(".history")
-        body.display = not body.display
-        event.button.label = "▼" if body.display else "▶"
+        self.remove_class("-collapsed").add_class("-expanded")
+        if event.button.has_focus:
+            self.call_after_refresh(self.query_one(".collapse", Button).focus)
+
+    @on(Button.Pressed, ".collapse")
+    def _collapse(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.remove_class("-expanded").add_class("-collapsed")
+        if event.button.has_focus:
+            self.call_after_refresh(self.query_one(".expand", Button).focus)
 
     @on(Button.Pressed, ".copy-btn")
     def _copy(self, event: Button.Pressed) -> None:
@@ -192,7 +225,7 @@ class _KeyRow(VerticalGroup):
         button.label = "Verifying…"
         try:
             res = await LiveKeyVerifier().verify_credential(
-                self.key.capture, self.app.array, target_type=self.key.verify_type)
+                self.key.capture, self.app.array, target_type=self.key.capture_type)
             if res.status in (VerifyStatus.SUCCESS, VerifyStatus.INCORRECT):
                 record_live_verification(self.key, correct=res.status == VerifyStatus.SUCCESS)
             severity = {VerifyStatus.SUCCESS: "information",
@@ -218,42 +251,66 @@ class _CapturePanel(VerticalGroup):
     DEFAULT_CSS = """
     _CapturePanel { height: auto; max-width: 81; }
     _CapturePanel Rule.-horizontal { margin: 0; color: $panel-lighten-2; }
-    _CapturePanel .status { width: 100%; text-align: center; }
+    _CapturePanel Rule.uncracked-rule { margin-top: 1; }
+    _CapturePanel .status { width: 100%; text-align: center; margin-top: 1; }
+    _CapturePanel .ssids { height: auto; }
     _CapturePanel .section-line { height: 1; }
     _CapturePanel .section { text-style: bold; color: $text-muted; width: auto; margin-right: 2; }
+    _CapturePanel .ssids .section { width: 4; }
     _CapturePanel .ssid { width: 1fr; text-wrap: nowrap; text-overflow: ellipsis; }
     _CapturePanel .dates { width: auto; color: $text-muted; margin-left: 1; }
-    _CapturePanel Collapsible { padding: 0; border: none; background: transparent; }
-    _CapturePanel Collapsible > Contents { padding: 0 0 0 2; }
     _CapturePanel .none-yet { color: $text-muted; padding-left: 2; }
     _CapturePanel .tools { height: auto; }
     _CapturePanel .tools Button { margin-right: 1; }
     _CapturePanel .selected-count, _CapturePanel .exhausted { color: $text-muted; }
     _CapturePanel .uncracked { height: auto; max-height: 8; scrollbar-size-vertical: 1; }
-    _CapturePanel Checkbox { width: 100%; }
+    _CapturePanel .row { height: 1; }
+    _CapturePanel .row > * { margin-right: 1; text-wrap: nowrap; }
+    _CapturePanel .row Checkbox { width: 3; text-overflow: clip; }
+    _CapturePanel .row:focus-within { background: $block-hover-background; }
+    _CapturePanel .row .date { width: 12; color: $text-muted; }
+    _CapturePanel .row .pair { width: 5; }
+    _CapturePanel .row .client { width: 6; color: $text-muted; }
+    _CapturePanel .row .verdict { width: 10; }
+    _CapturePanel .row .live { width: auto; }
+    _CapturePanel .row .count { width: 4; color: $text-muted; }
+    _CapturePanel .row .row-ssid { width: 1fr; text-overflow: ellipsis; }
+    _CapturePanel .authorized, _CapturePanel .verified { color: $text-success; }
+    _CapturePanel .challenge { color: $text-warning; }
+    _CapturePanel .rejected { color: #ffaf00; }
     """
 
-    def __init__(self, state: CrackState) -> None:
+    def __init__(self, state: ApState, choices: Optional[_UserChoices]) -> None:
         super().__init__()
         self._state = state
+        self._choices = choices
         self._groups = hashline_groups(state.uncracked)
 
     def compose(self) -> ComposeResult:
         state = self._state
         yield Static(Content.from_markup(self._status_markup()), classes="status")
         yield Rule()
-        yield from self._compose_ssids()
-        yield Rule()
+        with Vertical(classes="ssids"):
+            yield from self._compose_ssids()
+            yield Rule()
         with Horizontal(classes="section-line"):
             yield Label("KEYS", classes="section")
             yield Button("Add key", compact=True, classes="add-key", tooltip="Add a PSK, WPS PIN or WEP key")
         for key in state.keys:
-            yield _KeyRow(key, state)
+            yield _KeyRow(key, state, self._key_row_classes(key))
         if not state.keys:
             yield Label("none yet", classes="none-yet")
         if state.uncracked:
-            yield Rule()
+            yield Rule(classes="uncracked-rule")
             yield from self._compose_uncracked()
+
+    def _key_row_classes(self, key: Key) -> str:
+        choices = self._choices
+        if choices is None:
+            return ""
+        if _key_id(key) in choices.expanded_keys:
+            return "-expanded"
+        return "-collapsed" if _key_id(key) in choices.collapsed_keys else ""
 
     def _status_markup(self) -> str:
         state = self._state
@@ -261,7 +318,7 @@ class _CapturePanel(VerticalGroup):
         key = state.status_key
         if key is None:
             return status
-        chip = f"[{_KEY_CHIP_STYLE[state.status]}] {_KEY_LABEL[key.kind]}: {escape(key_text(key))} [/]"
+        chip = f"[{_KEY_CHIP_STYLE[state.status]}] {_KEY_LABEL[key.capture_type]}: {escape(key_text(key))} [/]"
         return f"{chip} {status}"
 
     def _compose_ssids(self) -> ComposeResult:
@@ -269,14 +326,15 @@ class _CapturePanel(VerticalGroup):
         if len(ssids) <= 1:
             with Horizontal(classes="section-line"):
                 yield Label("SSID", classes="section")
-                yield Label(escape(ssids[0].ssid) if ssids else "‹hidden›", classes="ssid")
+                yield Label(ssids[0].ssid if ssids else "‹hidden›", classes="ssid", markup=False)
             return
-        with Collapsible(title=f"SSIDs ({len(ssids)}): {ssids[0].ssid}", collapsed=True):
-            for i, span in enumerate(ssids):
-                with Horizontal(classes="section-line"):
-                    yield Label(escape(span.ssid), classes="ssid")
-                    if i:
-                        yield Label(f"{when(span.first_seen)} → {when(span.last_seen)}", classes="dates")
+        for i, history in enumerate(ssids):
+            first, last = when(history.first_seen), when(history.last_seen)
+            dates = first if first == last else f"{first} → {last}"
+            with Horizontal(classes="section-line"):
+                yield Label("" if i else "SSID", classes="section")
+                yield Label(history.ssid, classes="ssid", markup=False)
+                yield Label(dates, classes="dates")
 
     def _compose_uncracked(self) -> ComposeResult:
         state = self._state
@@ -284,12 +342,16 @@ class _CapturePanel(VerticalGroup):
         with Horizontal(classes="section-line"):
             yield Label("UNCRACKED", classes="section")
             yield Label(f"[dim]({len(uncracked)}/{len(state.hashlines)} captures)[/]")
+        unchecked = self._choices.unchecked_hashline_ids if self._choices else frozenset()
+        checked = [not all(h.id in unchecked for h in group) for group in self._groups]
+        selected = sum(len(group) for group, ticked in zip(self._groups, checked) if ticked)
         capture = state.hashline_capture
         crackers = [t for t in self.app.vault.manager.tools.values() if capture and t.can_crack(capture)]
         with Horizontal(classes="tools"):
             for tool in crackers:
-                yield Button(tool.label, "primary", classes=f"tool-btn launch-tool-{tool.name}")
-        yield Label(self._selected_markup(len(uncracked)), classes="selected-count")
+                yield Button(tool.label, "primary", classes=f"tool-btn launch-tool-{tool.name}",
+                             disabled=selected == 0)
+        yield Label(self._selected_markup(selected), classes="selected-count")
         exhausted = exhausted_wordlist_names(state.bssid, [h.id for h in uncracked])
         if exhausted:
             names = [name if count == len(uncracked) else f"{name} ({count}/{len(uncracked)})"
@@ -297,9 +359,8 @@ class _CapturePanel(VerticalGroup):
             yield Static(f"exhausted: {escape(', '.join(names))}", classes="exhausted")
         with VerticalScroll(classes="uncracked"):
             for i, group in enumerate(self._groups):
-                tooltip = _AUTHORIZED_TOOLTIP if group[0].authorized else _CHALLENGE_TOOLTIP
-                yield Checkbox(_hashline_row(group, state), True, compact=True, id=f"hashlines-{i}",
-                               tooltip=tooltip)
+                yield Horizontal(Checkbox("", checked[i], compact=True, id=f"hashlines-{i}"),
+                                 *_hashline_columns(group, state), classes="row")
 
     @staticmethod
     def _selected_markup(count: int) -> str:
@@ -309,9 +370,20 @@ class _CapturePanel(VerticalGroup):
         return [h.raw for i, group in enumerate(self._groups)
                 if self.query_one(f"#hashlines-{i}", Checkbox).value for h in group]
 
-    def on_resize(self, event: Resize) -> None:
-        for button in self.query(".tool-btn").results(Button):
-            button.compact = event.size.width < _COMPACT_TOOL_BUTTONS_BELOW
+    def user_choices(self, scroll_y: float) -> _UserChoices:
+        """What the user expanded, collapsed and unticked, and where the pane and list are scrolled."""
+        rows = list(self.query(_KeyRow).results(_KeyRow))
+        unchecked = frozenset(h.id for i, group in enumerate(self._groups)
+                              if not self.query_one(f"#hashlines-{i}", Checkbox).value for h in group)
+        uncracked_scroll_y = next((w.scroll_y for w in self.query(".uncracked").results(VerticalScroll)), 0.0)
+        return _UserChoices(frozenset(_key_id(r.key) for r in rows if r.has_class("-expanded")),
+                            frozenset(_key_id(r.key) for r in rows if r.has_class("-collapsed")),
+                            unchecked, scroll_y, uncracked_scroll_y)
+
+    def restore_scroll(self) -> None:
+        if self._choices is not None:
+            for widget in self.query(".uncracked").results(VerticalScroll):
+                widget.scroll_to(y=self._choices.uncracked_scroll_y, animate=False)
 
     @on(Checkbox.Changed)
     def _selection_changed(self, event: Checkbox.Changed) -> None:
@@ -373,7 +445,12 @@ class VaultItemView(Vertical):
     VaultItemView #vault-item-empty { color: $text-muted; }
     """
 
-    _state: reactive[tuple] = reactive(("", None, ()), recompose=True)
+    def __init__(self, id: Optional[str] = None) -> None:
+        super().__init__(id=id)
+        self._bssid = ""
+        self._ssid: Optional[str] = None
+        self._state: Optional[ApState] = None
+        self._choices: Optional[_UserChoices] = None
 
     def cancel_verification(self) -> None:
         """Cancel any running live verification."""
@@ -381,18 +458,37 @@ class VaultItemView(Vertical):
             panel.cancel_verification()
 
     def load(self, bssid: str, ssid: Optional[str], captures: list[PersistedCapture]) -> None:
-        self.cancel_verification()
-        self._state = (bssid, ssid, tuple(captures))
+        """Show this AP; reloading the AP in view keeps what the user expanded, ticked and scrolled."""
+        state = load_ap_state(bssid, captures) if bssid else None
+        if (bssid, ssid, state) == (self._bssid, self._ssid, self._state):
+            return
+        panels = list(self.query(_CapturePanel).results(_CapturePanel))
+        if bssid == self._bssid and panels:
+            self._choices = panels[0].user_choices(self.scroll_y)
+        else:
+            self.cancel_verification()
+            self._choices = None
+        self._bssid, self._ssid, self._state = bssid, ssid, state
+        self.refresh(recompose=True)
+
+    async def recompose(self) -> None:
+        await super().recompose()
+        if self._choices is not None:
+            self.call_after_refresh(self._restore_scroll, self._choices.scroll_y)
+
+    def _restore_scroll(self, scroll_y: float) -> None:
+        self.scroll_to(y=scroll_y, animate=False)
+        for panel in self.query(_CapturePanel).results(_CapturePanel):
+            panel.restore_scroll()
 
     def compose(self) -> ComposeResult:
-        bssid, ssid, captures = self._state
-        if not bssid:
+        if self._state is None:
             self.border_title = "Vault Detail"
             yield Label("Select an AP to view its captures", id="vault-item-empty")
             return
 
-        name = ssid or "‹hidden›"
+        name = self._ssid or "‹hidden›"
         title = Content.from_markup(f"[$background bold on $primary] {escape(name)} [/]")
-        title = title.append(Content.from_text(f" ({bssid}) "))
+        title = title.append(Content.from_text(f" ({self._bssid}) "))
         self.border_title = title
-        yield _CapturePanel(load_crack_state(bssid, list(captures)))
+        yield _CapturePanel(self._state, self._choices)

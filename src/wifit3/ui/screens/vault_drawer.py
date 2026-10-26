@@ -20,7 +20,7 @@ class VaultDrawer(ModalScreen):
 
     _SELECTION_DELAY = 0.08
 
-    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (90, "-compact"), (105, "-wide")]
+    HORIZONTAL_BREAKPOINTS = [(0, "-tiny"), (60, "-narrow"), (90, "-compact"), (105, "-wide")]
     VERTICAL_BREAKPOINTS = [(0, "-short"), (36, "-tall")]
 
     BINDINGS = [
@@ -48,11 +48,11 @@ class VaultDrawer(ModalScreen):
         transition: offset 200ms in_out_cubic;
     }
 
-    VaultDrawer.-narrow #vault-main, VaultDrawer.-compact #vault-main {
+    VaultDrawer.-tiny #vault-main, VaultDrawer.-narrow #vault-main, VaultDrawer.-compact #vault-main {
         layout: vertical;
     }
-    VaultDrawer.-narrow #vault-table, VaultDrawer.-compact #vault-table,
-    VaultDrawer.-narrow #vault-item, VaultDrawer.-compact #vault-item {
+    VaultDrawer.-tiny #vault-table, VaultDrawer.-narrow #vault-table, VaultDrawer.-compact #vault-table,
+    VaultDrawer.-tiny #vault-item, VaultDrawer.-narrow #vault-item, VaultDrawer.-compact #vault-item {
         width: 100%;
         height: 1fr;
     }
@@ -65,6 +65,17 @@ class VaultDrawer(ModalScreen):
     }
     VaultDrawer #vault-item Button.-textual-compact { min-width: 0; margin-right: 0; }
     VaultDrawer #vault-item Button.toggle { width: 3; background: transparent; }
+    VaultDrawer.-tiny #vault-item Button.tool-btn { height: 1; border: none; min-width: 0; }
+    VaultDrawer.-tiny #vault-item .ssids, VaultDrawer.-narrow #vault-item .ssids { display: none; }
+    VaultDrawer.-wide #vault-item .row > * { margin-right: 2; }
+    VaultDrawer.-tall.-wide #vault-item _KeyRow .history,
+    VaultDrawer.-tall.-wide #vault-item _KeyRow .collapse { display: block; }
+    VaultDrawer.-tall.-wide #vault-item _KeyRow .expand,
+    VaultDrawer.-tall.-wide #vault-item _KeyRow.-collapsed .history,
+    VaultDrawer.-tall.-wide #vault-item _KeyRow.-collapsed .collapse { display: none; }
+    VaultDrawer.-tall.-wide #vault-item _KeyRow.-collapsed .expand { display: block; }
+    VaultDrawer.-tall.-wide #vault-item _CapturePanel { min-height: 100%; }
+    VaultDrawer.-tall.-wide #vault-item .uncracked { height: 1fr; min-height: 8; max-height: 100%; }
     """
 
     def __init__(self, preselected_bssid: Optional[str] = None) -> None:
