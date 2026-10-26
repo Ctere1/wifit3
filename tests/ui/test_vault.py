@@ -20,6 +20,9 @@ from wifit3.ui.screens.vault_item import VaultItemView, date_text, _ApStatePanel
 from wifit3.ui.vault.modals.add_credential import AddCredentialModal, ManualCredential
 from wifit3.ui.vault.modals.confirm import ConfirmModal
 from wifit3.ui.vault.modals.nickname import NicknameModal
+from wifit3.crack import wpa_psk
+from wifit3.dot11.wpa import derive_pmk
+from wifit3.ui.colors import PASSWORD_MISMATCH_COLOR
 from tests.hashline_dates import write_hashline_dates
 
 _EAPOL_LINE = ("WPA*02*" + "0" * 32 + "*aabbccddeeff*112233445566*5465737431*" + "a" * 64 + "*"
@@ -291,6 +294,34 @@ async def test_an_ap_with_only_pcaps_says_how_many_captures_none_crackable(tmp_p
         await _open_vault(app, pilot, "02:00:00:00:00:01")
         assert not any("none crackable" in str(label.content)
                        for label in app.screen.query(".none-yet").results(Label))
+
+
+def _psk_badge_style(table: DataTable, bssid: str) -> str:
+    cell = table.get_row(bssid)[0]
+    start = cell.plain.index("✓PSK")
+    return " ".join(str(span.style) for span in cell.spans if span.start <= start < span.end)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_the_psk_badge_turns_orange_once_a_newer_capture_refutes_the_psk(tmp_path):
+    for ssid, bssid in (("HomeNet", "aa:bb:cc:dd:ee:ff"), ("Cafe", "02:00:00:00:00:01")):
+        _write(tmp_path, f"{ssid}_{bssid.replace(':', '-')}_1000_wps_pbc.txt",
+               f"SSID: {ssid}\nBSSID: {bssid}\nPSK: old-pass\n")
+    pmkid = wpa_psk.pmkid(derive_pmk("new-pass", b"HomeNet"), bytes.fromhex("aabbccddeeff"),
+                          bytes.fromhex("021122334455"))
+    line = f"WPA*01*{pmkid.hex()}*aabbccddeeff*021122334455*{b'HomeNet'.hex()}***"
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", line + "\n")
+    write_hashline_dates("HomeNet", "aa:bb:cc:dd:ee:ff", {line: 2000})
+    app = WifiteApp()
+    async with app.run_test(size=(100, 40)) as pilot:
+        drawer = await _open_vault(app, pilot)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        table = drawer.query_one("#vault-aps", DataTable)
+
+        assert PASSWORD_MISMATCH_COLOR in _psk_badge_style(table, "aa:bb:cc:dd:ee:ff")
+        assert "green" in _psk_badge_style(table, "02:00:00:00:00:01")
 
 
 @pytest.mark.asyncio

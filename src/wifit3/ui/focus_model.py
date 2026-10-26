@@ -8,6 +8,7 @@ from typing import Optional, TYPE_CHECKING
 from rich.markup import escape
 from wifit3.wlan.array import WlanArray
 
+from .colors import PASSWORD_MISMATCH_COLOR
 from .encryption_format import format_encryption_markup, wep_key_hex_and_ascii
 from ..campaigns.campaign import Campaign
 from ..campaigns.pmkid import PmkidHarvestAttack
@@ -269,8 +270,13 @@ def status_under_card() -> str:
     return ""
 
 
-def _psk_chip(psk: str, state: ApState) -> str:
+def _psk_chip(psk: Optional[str], state: ApState) -> Optional[str]:
     key = state.status_key
+    if psk is None:
+        if state.status is not PasswordStatus.STALE or key is None or key.type != CaptureType.WPA_PSK:
+            return None
+        return (f"[black bold on {PASSWORD_MISMATCH_COLOR}] PSK: {escape(key.value)} [/] "
+                f"[bold {PASSWORD_MISMATCH_COLOR}]{state.status.value}[/]")
     if state.status is PasswordStatus.NOT_VERIFIED and key is not None and key.value == psk:
         return f"[black bold on yellow] PSK: {escape(psk)} [/black bold on yellow] [bold yellow]NOT VERIFIED[/bold yellow]"
     return f"[black bold on green] ✓ PSK: {escape(psk)} [/black bold on green]"
@@ -310,11 +316,11 @@ def status_headlines(ap: AccessPoint, array: WlanArray, vault: Vault) -> list[st
     if wep_key_hex:
         return [f"[black bold on green] ✓ WEP key: {escape(wep_key_hex_and_ascii(wep_key_hex))} [/black bold on green]",
                 "[dim]● Listening for WEP IVs[/dim]"]
-    psk = vault.known_psk(ap)
-    if psk:
+    psk_chip = _psk_chip(vault.known_psk(ap), vault.ap_state(ap.bssid))
+    if psk_chip:
         tail = ("[dim]● Not yet supported: no crack path for this AKM[/dim]"
                 if unsupported else "[dim]● Listening for handshake + PMKID[/dim]")
-        return [_psk_chip(psk, vault.ap_state(ap.bssid)), tail]
+        return [psk_chip, tail]
 
     if Config.is_silenced(ap.bssid):
         return ["[dim]● Silenced[/dim]",

@@ -27,6 +27,10 @@ from tests.wlan.mocks import build_ap
 from wifit3.ui.screens.focus_v2 import FocusViewV2
 from wifit3.persist.config import Config
 from wifit3.persist.vault import Vault
+from wifit3.crack import wpa_psk
+from wifit3.dot11.wpa import derive_pmk
+from wifit3.ui.colors import PASSWORD_MISMATCH_COLOR
+from tests.hashline_dates import write_hashline_dates
 
 
 @pytest.fixture(autouse=True)
@@ -349,6 +353,20 @@ def test_a_psk_nothing_confirms_reads_not_verified():
     _write_saved_psk("wpa_psk", "cracked")
     headline = fm.status_headlines(build_ap(akms=["PSK"], akm_suites=[2]), None, Vault())[0]
     assert "✓" not in headline and "PSK: cracked" in headline and "NOT VERIFIED" in headline
+
+
+def test_a_psk_a_newer_capture_refutes_reads_stale_in_orange():
+    _write_saved_psk("wps_pbc", "old-pass")
+    pmkid = wpa_psk.pmkid(derive_pmk("new-pass", b"TESTNET"), bytes.fromhex("aabbccddee01"),
+                          bytes.fromhex("021122334455"))
+    line = f"WPA*01*{pmkid.hex()}*aabbccddee01*021122334455*{b'TESTNET'.hex()}***"
+    (Path(Config.captures_dir) / "TESTNET_aa-bb-cc-dd-ee-01.hc22000").write_text(line + "\n", encoding="utf-8")
+    write_hashline_dates("TESTNET", "aa:bb:cc:dd:ee:01", {line: 1700000500})
+
+    headline = fm.status_headlines(build_ap(akms=["PSK"], akm_suites=[2]), None, Vault())[0]
+
+    assert headline == (f"[black bold on {PASSWORD_MISMATCH_COLOR}] PSK: old-pass [/] "
+                        f"[bold {PASSWORD_MISMATCH_COLOR}]STALE PASSWORD[/]")
 
 
 def test_headline_live_pbc_outranks_listening():

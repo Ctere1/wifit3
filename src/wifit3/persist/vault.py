@@ -176,6 +176,10 @@ class Vault:
             self._record_pcap_dates(state)
         return state
 
+    def cached_ap_state(self, bssid: str) -> Optional[ApState]:
+        """The AP's state if ``ap_state`` already computed it since the AP last changed."""
+        return self._ap_states.get(bssid)
+
     @staticmethod
     def _record_pcap_dates(state: ApState) -> None:
         """Save the dates read from pcaps to the .meta, so they are read once; the state already
