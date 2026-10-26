@@ -5,8 +5,7 @@ import asyncio
 import os
 
 import pytest
-from textual.containers import VerticalScroll
-from textual.widgets import Button, Checkbox, DataTable, Input, Label, Static
+from textual.widgets import Button, DataTable, Input, Label, Static
 
 from wifit3.campaigns.live_check import LiveKeyVerifier, VerifyResult, VerifyStatus
 from wifit3.models import AccessPoint, CaptureType, PersistedCapture, ToolName
@@ -16,7 +15,7 @@ from wifit3.persist.meta import meta_path, read_meta, update_meta
 from wifit3.persist.save import SaveResult
 from wifit3.ui.app import WifiteApp
 from wifit3.ui.screens.vault_drawer import VaultDrawer
-from wifit3.ui.screens.vault_item import VaultItemView, date_text, _ApStatePanel, _CrackerButton, _HashlineGroupCheckbox, _KeyRow
+from wifit3.ui.screens.vault_item import VaultItemView, date_text, _ApStatePanel, _CrackerButton, _KeyRow, _UncrackedList
 from wifit3.ui.vault.modals.add_credential import AddCredentialModal, ManualCredential
 from wifit3.ui.vault.modals.confirm import ConfirmModal
 from wifit3.ui.vault.modals.nickname import NicknameModal
@@ -33,6 +32,12 @@ _LONG_WEP_TXT = "SSID: HomeNet\nBSSID: aa:bb:cc:dd:ee:ff\nWEP key (hex):   " + "
 
 def _write(d, name, content):
     (d / name).write_text(content, encoding="utf-8")
+
+
+def _pmkid_line(psk: str, mac_ap: str) -> str:
+    """A HomeNet PMKID line that ``psk`` cracks."""
+    pmkid = wpa_psk.pmkid(derive_pmk(psk, b"HomeNet"), bytes.fromhex(mac_ap), bytes.fromhex("021122334455"))
+    return f"WPA*01*{pmkid.hex()}*{mac_ap}*021122334455*{b'HomeNet'.hex()}***\n"
 
 async def _open_vault(app, pilot, bssid: str | None = None) -> VaultDrawer:
     """Push the drawer and wait until it has laid out its content and slid open."""
@@ -340,14 +345,14 @@ async def test_a_wep_key_added_by_hand_reads_not_verified(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
-async def test_add_credential_prefills_the_row_and_saves_a_psk_the_capture_refutes_as_stale(
-        tmp_path, mocker):
-    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", _PMKID_LINE)
-    write_hashline_dates("HomeNet", "aa:bb:cc:dd:ee:ff", {_PMKID_LINE: 1_700_000_000})
-    app = WifiteApp()
+async def test_add_key_refuses_a_psk_that_cracks_no_saved_capture_and_adds_one_that_does(tmp_path):
+    right = _pmkid_line("rightpass", "aabbccddeeff")
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", right)
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-fe.hc22000", _pmkid_line("rightpass", "aabbccddeefe"))
+    write_hashline_dates("HomeNet", "aa:bb:cc:dd:ee:ff", {right: 1_700_000_000})
+    app = _RecordingApp()
     async with app.run_test() as pilot:
-        view = await _open_vault(app, pilot)
-        notify = mocker.patch.object(view, "notify")
+        view = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
 
         await pilot.press("a")
         await pilot.pause(0)
@@ -361,37 +366,34 @@ async def test_add_credential_prefills_the_row_and_saves_a_psk_the_capture_refut
         await pilot.pause(0)
 
         assert app.screen is view
-        assert notify.call_args.args[0] == "PSK doesn't match the saved captures; added unverified"
-        assert notify.call_args.kwargs["severity"] == "warning"
-        assert [c.value for c in app.vault.persisted("aa:bb:cc:dd:ee:ff")
-                if c.type == CaptureType.WPA_PSK] == ["wrongpass"]
-        state = app.vault.ap_state("aa:bb:cc:dd:ee:ff")
-        assert (state.status, state.status_key) == (PasswordStatus.STALE, None)
-        assert app.vault.known_psk(AccessPoint(bssid="aa:bb:cc:dd:ee:ff")) is None   # refuted, not held
+        assert app.notified[-1] == "PSK doesn't crack any saved capture"
+        assert not [c for c in app.vault.persisted("aa:bb:cc:dd:ee:ff") if c.type == CaptureType.WPA_PSK]
 
-        verify = mocker.patch.object(app.vault, "verify_wpa_psk", return_value=True)
-        propagate = mocker.patch.object(app.vault, "propagate_verified_psk",
-                                        return_value=["02:00:00:00:00:10"])
-        view._credential_added(ManualCredential(CaptureType.WPA_PSK, "HomeNet",
-                                                "aa:bb:cc:dd:ee:ff", "rightpass"))
+        view._credential_added(ManualCredential(CaptureType.WPA_PSK, "HomeNet", "aa:bb:cc:dd:ee:ff", "rightpass"))
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert "rightpass" in {c.value for c in app.vault.persisted("aa:bb:cc:dd:ee:ff")}
-        propagate.assert_called_once_with("aa:bb:cc:dd:ee:ff", "HomeNet", "rightpass")
-        assert [c.args[0] for c in notify.call_args_list[-2:]] == [
-            "Credential verified and added to Vault",
-            "PSK also verified and saved for 1 related APs"]
+        assert app.notified[-2:] == ["Credential verified and added to Vault",
+                                     "PSK also verified and saved for 1 related APs"]
+        assert app.vault.ap_state("aa:bb:cc:dd:ee:ff").status is PasswordStatus.CURRENT
 
-        verify.return_value = None
-        view._credential_added(ManualCredential(CaptureType.WPA_PSK, "HomeNet",
-                                                "aa:bb:cc:dd:ee:ff", "uncheckable"))
-        assert notify.call_args.args == ("Credential added to Vault",)
 
-        view._credential_added(ManualCredential(CaptureType.WPS_PIN, "Other",
-                                                "02:00:00:00:00:20", "1234"))
-        pin = app.vault.persisted("02:00:00:00:00:20")[0]
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_add_key_adds_a_psk_as_not_verified_when_the_ap_has_nothing_to_crack(tmp_path):
+    (tmp_path / "Other_02-00-00-00-00-20_1000_handshake.pcap").write_bytes(b"")
+    app = _RecordingApp()
+    async with app.run_test() as pilot:
+        view = await _open_vault(app, pilot, "02:00:00:00:00:20")
+
+        view._credential_added(ManualCredential(CaptureType.WPA_PSK, "Other", "02:00:00:00:00:20", "anything"))
+        await app.workers.wait_for_complete()
+
+        assert app.notified[-1] == "Credential added to Vault"
+        assert app.vault.ap_state("02:00:00:00:00:20").status is PasswordStatus.NOT_VERIFIED
+
+        view._credential_added(ManualCredential(CaptureType.WPS_PIN, "Other", "02:00:00:00:00:20", "1234"))
+        pin = next(c for c in app.vault.persisted("02:00:00:00:00:20") if c.type == CaptureType.WPS_PIN)
         assert pin.pin == "1234" and pin.value is None
-
 
 
 @pytest.mark.asyncio
@@ -575,7 +577,8 @@ async def test_a_refresh_shows_the_new_state_and_keeps_expansion_ticks_and_scrol
         drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
         item = drawer.query_one("#vault-item")
         drawer.query_one(_KeyRow).toggle_button.press()
-        drawer.query(_HashlineGroupCheckbox).first(_HashlineGroupCheckbox).value = False
+        uncracked = drawer.query_one(_UncrackedList)
+        uncracked.deselect(uncracked.groups()[0])
         await pilot.pause()
         scrolled = item.max_scroll_y
         assert scrolled > 0
@@ -590,7 +593,8 @@ async def test_a_refresh_shows_the_new_state_and_keeps_expansion_ticks_and_scrol
         row = drawer.query_one(_KeyRow)
         assert row.has_class("-expanded")
         assert len(row.query(".row")) == 2
-        assert [c.value for c in drawer.query(Checkbox).results(Checkbox)] == [False, True, True]
+        uncracked = drawer.query_one(_UncrackedList)
+        assert [group in uncracked.selected for group in uncracked.groups()] == [False, True, True]
         assert "2 captures selected" in str(drawer.query_one(".selected-count", Label).content)
         assert item.scroll_y == scrolled
 
@@ -603,8 +607,8 @@ async def test_another_aps_capture_leaves_the_pane_alone(tmp_path):
     async with app.run_test(size=(80, 40)) as pilot:
         drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
         table = drawer.query_one("#vault-aps", DataTable)
-        checkbox = drawer.query(_HashlineGroupCheckbox).last(_HashlineGroupCheckbox)
-        checkbox.focus()
+        uncracked = drawer.query_one(_UncrackedList)
+        uncracked.focus()
         drawer.query_one(_KeyRow).toggle_button.press()
         await pilot.pause()
 
@@ -612,22 +616,23 @@ async def test_another_aps_capture_leaves_the_pane_alone(tmp_path):
         await pilot.pause()
 
         assert "✓PSK" in str(table.get_row("02:00:00:00:00:01")[0])
-        assert app.focused is checkbox
+        assert app.focused is uncracked
         assert drawer.query_one(_KeyRow).expanded
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
-async def test_only_the_verdict_carries_the_tooltip(tmp_path):
+async def test_each_uncracked_row_reads_its_pair_client_and_verdict(tmp_path):
     _write_a_checked_wep_key_and_three_hashlines(tmp_path)
     app = WifiteApp()
     async with app.run_test(size=(80, 40)) as pilot:
         drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
-        rows = list(drawer.query(".uncracked .row"))
+        uncracked = drawer.query_one(_UncrackedList)
+        prompts = [" ".join(str(uncracked.get_option_at_index(i).prompt).split())
+                   for i in range(uncracked.option_count)]
 
-        assert [str(row.query_one(".verdict").tooltip) for row in rows] == [
-            "PMKID or M3/M4: the AP accepted this password"] * 3
-        assert all(row.tooltip is None and row.query_one(".date").tooltip is None for row in rows)
+        assert prompts == ["no date M2+M3 …55:66 authorized Test1", "no date M2+M3 …55:77 authorized Test1",
+                           "no date PMKID …55:66 authorized Test1"]
 
 
 @pytest.mark.asyncio
@@ -639,11 +644,13 @@ async def test_unchecked_hashlines_are_left_out_of_the_crack_job(tmp_path, mocke
         view = await _open_vault(app, pilot)
         submit = mocker.patch.object(app.vault.manager, "submit_job", return_value="job")
         panel = view.query_one(_ApStatePanel)
-        checkboxes = list(panel.query(_HashlineGroupCheckbox).results(_HashlineGroupCheckbox))
-        assert len(checkboxes) == 3
+        uncracked = panel.query_one(_UncrackedList)
+        groups = uncracked.groups()
+        assert len(groups) == 3
         assert "3 captures selected to crack" in str(panel.query_one(".selected-count", Label).content)
 
-        checkboxes[0].value = False
+        uncracked.focus()
+        await pilot.press("space")      # the first row is highlighted
         await pilot.pause(0)
         assert "2 captures selected to crack" in str(panel.query_one(".selected-count", Label).content)
         next(b for b in panel.query(_CrackerButton).results(_CrackerButton) if b.tool.name == "cpu_crack").press()
@@ -652,10 +659,9 @@ async def test_unchecked_hashlines_are_left_out_of_the_crack_job(tmp_path, mocke
         await pilot.pause()
 
         chosen = submit.call_args.kwargs["hashlines"]
-        assert len(chosen) == 2 and checkboxes[0].group[0].raw not in chosen
+        assert len(chosen) == 2 and groups[0][0].raw not in chosen
 
-        for checkbox in checkboxes:
-            checkbox.value = False
+        uncracked.deselect_all()
         await pilot.pause(0)
         assert all(button.disabled for button in panel.query(_CrackerButton).results(_CrackerButton))
 
@@ -896,8 +902,10 @@ async def test_hashtopolis_is_offered_only_for_a_selection_holding_a_line_it_can
                            if b.tool.name == ToolName.HASHTOPOLIS)
         assert not hashtopolis.disabled
 
-        for checkbox in drawer.query(_HashlineGroupCheckbox).results(_HashlineGroupCheckbox):
-            checkbox.value = checkbox.group[0].line.kind == "03"
+        uncracked = drawer.query_one(_UncrackedList)
+        for group in uncracked.groups():
+            if group[0].line.kind != "03":
+                uncracked.deselect(group)
         await pilot.pause()
 
         assert hashtopolis.disabled
@@ -905,20 +913,19 @@ async def test_hashtopolis_is_offered_only_for_a_selection_holding_a_line_it_can
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
-async def test_a_refresh_keeps_the_uncracked_lists_scroll_and_the_focused_checkbox(tmp_path):
+async def test_a_refresh_keeps_the_uncracked_lists_scroll_focus_and_highlighted_row(tmp_path):
     lines = "".join(_EAPOL_LINE.replace("112233445566", f"1122334455{n:02x}") for n in range(12))
     _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", lines)
     _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff_1000_wep_key.txt", _WEP_TXT)
     app = WifiteApp()
     async with app.run_test(size=(80, 40)) as pilot:
         drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
-        uncracked = drawer.query_one(".uncracked", VerticalScroll)
-        uncracked.scroll_to(y=uncracked.max_scroll_y, animate=False)
-        last = list(drawer.query(_HashlineGroupCheckbox).results(_HashlineGroupCheckbox))[-1]
-        last.focus()
+        uncracked = drawer.query_one(_UncrackedList)
+        uncracked.focus()
+        await pilot.press("end")
         await pilot.pause()
-        scrolled, focused_group = uncracked.scroll_y, last.group
-        assert scrolled > 0
+        scrolled, highlighted = uncracked.scroll_y, uncracked.highlighted_group()
+        assert scrolled > 0 and highlighted == uncracked.groups()[-1]
 
         update_meta("HomeNet", "aa:bb:cc:dd:ee:ff", live_verifications=[{**_LIVE_CHECK, "at": 2000}])
         app.vault.notify_changed("aa:bb:cc:dd:ee:ff")
@@ -926,5 +933,108 @@ async def test_a_refresh_keeps_the_uncracked_lists_scroll_and_the_focused_checkb
             await pilot.pause()
         await pilot.pause()
 
-        assert drawer.query_one(".uncracked", VerticalScroll).scroll_y == scrolled
-        assert isinstance(app.focused, _HashlineGroupCheckbox) and app.focused.group == focused_group
+        uncracked = drawer.query_one(_UncrackedList)
+        assert uncracked.scroll_y == scrolled
+        assert app.focused is uncracked and uncracked.highlighted_group() == highlighted
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+@pytest.mark.parametrize(("answer", "deleted"), [("#yes", True), ("#no", False)])
+async def test_deleting_a_wps_psk_asks_naming_the_pin_that_goes_with_it(tmp_path, answer, deleted):
+    app = _RecordingApp()
+    ap = AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="HomeNet")
+    app.vault.save_wps_pin(ap, "12345670", "hunter22")
+    app.vault.save_wep_key(ap, b"abcde")
+    async with app.run_test(size=(120, 40)) as pilot:
+        drawer = await _open_vault(app, pilot, ap.bssid)
+        psk_row = next(r for r in drawer.query(_KeyRow).results(_KeyRow) if r.key.type == CaptureType.WPA_PSK)
+        psk_row.delete_button.press()
+        await pilot.pause()
+
+        assert isinstance(app.screen, ConfirmModal)
+        assert (str(app.screen.query_one("#prompt", Label).content)
+                == "Delete PSK hunter22? Also removes WPS PIN 12345670.")
+        await pilot.click(answer)
+        await pilot.pause()
+
+        types = sorted(row.key.type for row in drawer.query(_KeyRow).results(_KeyRow))
+        assert types == ([CaptureType.WEP] if deleted else sorted([CaptureType.WEP, CaptureType.WPA_PSK,
+                                                                   CaptureType.WPS_PIN]))
+        assert ("Deleted PSK hunter22" in app.notified) is deleted
+
+
+def _write_three_hashlines_one_exhausted_by_two_wordlists(tmp_path) -> None:
+    from wifit3.persist.exhaustion import record_exhausted
+    from wifit3.crack.hc22000_format import hashline_id
+
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", _EAPOL_LINE + _OTHER_CLIENT_LINE + _PMKID_LINE)
+    record_exhausted("HomeNet", "aa:bb:cc:dd:ee:ff", "9:100", "rockyou.txt", [hashline_id(_EAPOL_LINE)])
+    record_exhausted("HomeNet", "aa:bb:cc:dd:ee:ff", "8:800", "default.txt",
+                     [hashline_id(_EAPOL_LINE), hashline_id(_PMKID_LINE)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_each_uncracked_row_counts_its_exhausted_wordlists_and_the_highlighted_one_names_them(tmp_path):
+    _write_three_hashlines_one_exhausted_by_two_wordlists(tmp_path)
+    app = WifiteApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
+        uncracked = drawer.query_one(_UncrackedList)
+        prompts = [str(uncracked.get_option_at_index(i).prompt) for i in range(uncracked.option_count)]
+        assert [p.split("authorized")[-1].strip() for p in prompts] == ["2 wordlists", "", "1 wordlist"]
+
+        uncracked.focus()
+        await pilot.press("home")
+        await pilot.pause()
+        assert str(drawer.query_one(".exhausted-names", Static).content) == "exhausted: default.txt, rockyou.txt"
+        await pilot.press("down")
+        await pilot.pause()
+        assert str(drawer.query_one(".exhausted-names", Static).content) == ""
+
+
+def test_a_group_counts_wordlists_that_ran_out_on_only_some_of_its_lines_as_partly():
+    from wifit3.crack.hc22000_format import hashline_id, parse_hc22000
+    from wifit3.persist.ap_state import DatedHashline
+    from wifit3.persist.exhaustion import ExhaustedWordlist
+    from wifit3.ui.screens.vault_item import _exhausted_count_text
+
+    a, b = (DatedHashline(hashline_id(raw), raw.strip(), parse_hc22000(raw), ())
+            for raw in (_EAPOL_LINE, _OTHER_CLIENT_LINE))
+    rockyou, default = ExhaustedWordlist("9:100", ("rockyou.txt",)), ExhaustedWordlist("8:800", ("default.txt",))
+    group = (a, b)
+    assert _exhausted_count_text(group, {a.id: frozenset({rockyou, default}), b.id: frozenset({rockyou})}) == (
+        "1 wordlist +1 partly")
+    assert _exhausted_count_text(group, {a.id: frozenset({rockyou})}) == "1 wordlist partly"
+    assert _exhausted_count_text(group, {}) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+@pytest.mark.parametrize(("size", "button_height"), [((46, 29), 1), ((80, 40), 1), ((120, 40), 3), ((160, 50), 3)])
+async def test_layout_at_each_drawer_size(tmp_path, size, button_height):
+    psk = "hunter22"
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", _pmkid_line(psk, "aabbccddeeff") + _EAPOL_LINE)
+    app = WifiteApp()
+    app.vault.save_wpa_psk("HomeNet", "aa:bb:cc:dd:ee:ff", psk)
+    async with app.run_test(size=size) as pilot:
+        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
+        row = drawer.query_one(_KeyRow)
+        if not row.expanded:
+            row.toggle_button.press()
+            await pilot.pause()
+
+        assert {b.region.height for b in (row.copy_button, row.verify_button, row.delete_button)} == {button_height}
+        key_text = row.query_one(".key-text", Label)
+        value_x = key_text.region.x + len("PSK  ")
+        assert row.query_one(".history .row .date").region.x == value_x
+        assert key_text.region.y + key_text.region.height // 2 == row.copy_button.region.y + button_height // 2
+
+        panel = drawer.query_one(_ApStatePanel)
+        uncracked = drawer.query_one(_UncrackedList)
+        tools = list(drawer.query(_CrackerButton).results(_CrackerButton))
+        count = drawer.query_one(".selected-count", Label)
+        assert uncracked.content_region.x == panel.content_region.x + 2
+        assert tools[0].region.y >= uncracked.region.bottom
+        assert count.region.y >= tools[0].region.bottom and count.content_region.x == panel.content_region.x + 4

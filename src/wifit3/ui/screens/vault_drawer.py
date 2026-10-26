@@ -10,7 +10,7 @@ from textual.binding import Binding
 
 from .vault_breakpoints import COMPACT, NARROW, SHORT, TALL, TINY, WIDE
 from .vault_table import VaultTable
-from .vault_item import AddKeyPressed, VaultItemView
+from .vault_item import AddKeyPressed, DeleteKeyPressed, VaultItemView, key_description
 from wifit3.models import AccessPoint, CaptureType, PersistedCapture
 from wifit3.persist.ap_state import ApState
 from wifit3.persist.meta import meta_path, read_meta, update_meta
@@ -43,7 +43,7 @@ class VaultDrawer(ModalScreen):
         Binding("/", "focus_search", "Search", show=False),
         Binding("a", "add_credential", "Add", show=True),
         Binding("n", "set_nickname", "Nickname", show=True),
-        Binding("d", "delete_ap", "Delete", show=True),
+        Binding("d", "delete_ap", "Del", show=True),
         Binding("z", "export_zip", "Export Zip", show=True),
         Binding("o", "show_directory", "Show Dir", show=True),
         Binding("q", "app.quit", "Quit", show=True),
@@ -81,6 +81,7 @@ class VaultDrawer(ModalScreen):
         min-width: 0;
         margin-right: 0;
     }
+    VaultDrawer #vault-item .key-line Button.key-btn { margin-left: 1; }
     VaultDrawer.-tiny #vault-item Button.tool-btn { min-width: 0; }
     """
 
@@ -258,6 +259,28 @@ class VaultDrawer(ModalScreen):
 
         self.app.push_screen(ConfirmModal(prompt), _delete)
 
+    @on(DeleteKeyPressed)
+    def _delete_key_pressed(self, event: DeleteKeyPressed) -> None:
+        key = event.key
+        paths = {c.path for c in key.captures}
+        state = self.app.vault.ap_state(key.newest_capture.bssid)
+        others = [k for k in state.keys if k.id != key.id and paths.intersection(c.path for c in k.captures)]
+        prompt = f"Delete [bold]{escape(key_description(key))}[/]?"
+        if others:
+            prompt += f" Also removes {escape(', '.join(key_description(k) for k in others))}."
+
+        def _delete(confirmed: Optional[bool]) -> None:
+            if not confirmed:
+                return
+            try:
+                self.app.vault.delete_key(key)
+            except OSError as exc:
+                self.notify(f"Could not delete {key_description(key)}: {exc}", severity="error")
+                return
+            self.notify(f"Deleted {key_description(key)}")
+
+        self.app.push_screen(ConfirmModal(prompt), _delete)
+
     @on(AddKeyPressed)
     def _add_key_pressed(self, event: AddKeyPressed) -> None:
         self.action_add_credential()
@@ -275,6 +298,9 @@ class VaultDrawer(ModalScreen):
         try:
             if credential.kind == CaptureType.WPA_PSK:
                 verification = vault.verify_wpa_psk(ap.bssid, credential.value)
+                if verification is not True and vault.ap_state(ap.bssid).hashlines:
+                    self.notify("PSK doesn't crack any saved capture", severity="error")
+                    return
                 result = vault.save_wpa_psk(ap.ssid, ap.bssid, credential.value)
                 if result is not None:
                     self._propagate_psk(ap.bssid, ap.ssid, credential.value)
@@ -293,8 +319,6 @@ class VaultDrawer(ModalScreen):
             self.notify("Credential is already in Vault", severity="warning")
         elif verification is True:
             self.notify("Credential verified and added to Vault")
-        elif verification is False:
-            self.notify("PSK doesn't match the saved captures; added unverified", severity="warning")
         else:
             self.notify("Credential added to Vault")
 
