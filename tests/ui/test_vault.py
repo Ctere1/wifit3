@@ -274,6 +274,11 @@ async def test_add_credential_prefills_the_row_and_saves_a_psk_the_handshake_ref
             "Credential verified and added to Vault",
             "PSK also verified and saved for 1 related APs"]
 
+        verify.return_value = None
+        view._credential_added(ManualCredential(CaptureType.WPA_PSK, "HomeNet",
+                                                "aa:bb:cc:dd:ee:ff", "uncheckable"))
+        assert notify.call_args.args == ("Credential added to Vault",)
+
         view._credential_added(ManualCredential(CaptureType.WPS_PIN, "Other",
                                                 "02:00:00:00:00:20", "1234"))
         pin = app.vault.persisted("02:00:00:00:00:20")[0]

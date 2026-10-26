@@ -23,6 +23,8 @@ from wifit3.persist.ap_state import (
     Key,
     LiveVerification,
     PasswordStatus,
+    confirmed_at,
+    epoch_sort_key,
     load_ap_state,
     record_live_verification,
 )
@@ -62,9 +64,9 @@ def _hex_to_ascii(hex_key: Optional[str]) -> str:
 
 def key_text(key: Key) -> str:
     """The key as the user types it: a WEP key in ASCII when printable, else hex."""
-    if key.capture_type == CaptureType.WEP:
+    if key.type == CaptureType.WEP:
         return _hex_to_ascii(key.value) or key.value
-    if key.capture_type == CaptureType.WPS_PIN:
+    if key.type == CaptureType.WPS_PIN:
         return key.value or EMPTY_PIN_LABEL
     return key.value
 
@@ -125,7 +127,7 @@ def _live_verification_columns(verification: LiveVerification, state: ApState) -
 
 
 def _key_id(key: Key) -> tuple[CaptureType, str]:
-    return key.capture_type, key.value
+    return key.type, key.value
 
 
 @dataclass(frozen=True)
@@ -162,7 +164,7 @@ class _KeyRow(VerticalGroup):
         matched = tuple(h for h in self._state.hashlines if h.id in self.key.hashline_ids)
         rows += [(group[0].first_captured, _hashline_columns(group, self._state))
                  for group in hashline_groups(matched)]
-        return sorted(rows, key=lambda row: (row[0] is not None, row[0] or 0), reverse=True)
+        return sorted(rows, key=lambda row: epoch_sort_key(row[0]), reverse=True)
 
     def compose(self) -> ComposeResult:
         history = self._history()
@@ -184,13 +186,12 @@ class _KeyRow(VerticalGroup):
 
     def _summary_markup(self) -> str:
         key = self.key
-        badge, style = _KEY_BADGE[key.capture_type]
+        badge, style = _KEY_BADGE[key.type]
         markup = f"[bold {style}]{badge}[/] [black bold on lightgreen] {escape(key_text(key))} [/]"
         total = len(self._state.hashlines)
-        if key.capture_type == CaptureType.WPA_PSK and total:
+        if key.type == CaptureType.WPA_PSK and total:
             markup += f" [dim]({len(key.hashline_ids)}/{total} captures)[/]"
-            authorized = any(h.line.authorized for h in self._state.hashlines if h.id in key.hashline_ids)
-            if not authorized and not any(v.correct for v in key.live_verifications):
+            if confirmed_at(key, self._state.hashlines) is None:
                 markup += " [#ffaf00]unverified[/]"
         return markup
 
@@ -232,7 +233,7 @@ class _KeyRow(VerticalGroup):
         button.label = "Verifying…"
         try:
             res = await LiveKeyVerifier().verify_credential(
-                self.key.newest_source, self.app.array, target_type=self.key.capture_type)
+                self.key.newest_capture, self.app.array, target_type=self.key.type)
             if res.status in (VerifyStatus.SUCCESS, VerifyStatus.INCORRECT):
                 record_live_verification(self.key, correct=res.status == VerifyStatus.SUCCESS)
             severity = {VerifyStatus.SUCCESS: "information",
@@ -325,7 +326,7 @@ class _CapturePanel(VerticalGroup):
         key = state.status_key
         if key is None:
             return status
-        chip = f"[{_KEY_CHIP_STYLE[state.status]}] {_KEY_LABEL[key.capture_type]}: {escape(key_text(key))} [/]"
+        chip = f"[{_KEY_CHIP_STYLE[state.status]}] {_KEY_LABEL[key.type]}: {escape(key_text(key))} [/]"
         return f"{chip} {status}"
 
     def _compose_ssids(self) -> ComposeResult:

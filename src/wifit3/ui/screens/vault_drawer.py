@@ -244,11 +244,10 @@ class VaultDrawer(ModalScreen):
             return
         vault = self.app.vault
         ap = AccessPoint(bssid=credential.bssid, ssid=credential.ssid)
-        verified = unmatched = False
+        verification: Optional[bool] = None
         try:
             if credential.kind == CaptureType.WPA_PSK:
-                verified = vault.verify_wpa_psk(ap.bssid, credential.value) is True
-                unmatched = not verified and (vault.has_handshake(ap) or vault.has_pmkid(ap))
+                verification = vault.verify_wpa_psk(ap.bssid, credential.value)
                 result = vault.save_wpa_psk(ap.ssid, ap.bssid, credential.value)
                 if result is not None:
                     self._propagate_psk(ap.bssid, ap.ssid, credential.value)
@@ -265,9 +264,9 @@ class VaultDrawer(ModalScreen):
             self.notify("Credential could not be saved", severity="error")
         elif not result.was_new:
             self.notify("Credential is already in Vault", severity="warning")
-        elif verified:
+        elif verification is True:
             self.notify("Credential verified and added to Vault")
-        elif unmatched:
+        elif verification is False:
             self.notify("PSK doesn't match the saved captures; added unverified", severity="warning")
         else:
             self.notify("Credential added to Vault")

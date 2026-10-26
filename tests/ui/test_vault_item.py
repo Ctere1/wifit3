@@ -42,6 +42,16 @@ def test_hashline_groups_join_runs_from_one_minute_pair_and_client():
     assert [len(group) for group in hashline_groups(lines)] == [2, 1, 1]
 
 
+def test_key_row_tags_a_psk_nothing_confirmed_as_unverified_but_not_one_the_ap_gave_up():
+    state = ApState("aa:bb:cc:dd:ee:ff", (), (_hashline(1_700_000_000),), (), PasswordStatus.NOT_CRACKED, None, None)
+    cracked = _key(CaptureType.WPA_PSK, "hunter22")
+    wps = Key(CaptureType.WPA_PSK, "hunter22", (PersistedCapture(type=CaptureType.WPS_PBC, timestamp=1, path="x.txt",
+                                                                  bssid="aa:bb:cc:dd:ee:ff", value="hunter22"),),
+              frozenset(), ())
+    assert "unverified" in _KeyRow(cracked, state)._summary_markup()
+    assert "unverified" not in _KeyRow(wps, state)._summary_markup()
+
+
 def test_key_row_cancel_verification():
     state = ApState("aa:bb:cc:dd:ee:ff", (), (), (), PasswordStatus.NOT_CRACKED, None, None)
     row = _KeyRow(_key(CaptureType.WPA_PSK, "x"), state)

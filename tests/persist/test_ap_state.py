@@ -4,7 +4,9 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from wifit3.crack import wpa_psk
 from wifit3.crack.hc22000_format import hashline_id, parse_hc22000
+from wifit3.dot11.wpa import derive_pmk
 from wifit3.models import CaptureType, PersistedCapture
 from wifit3.persist.capture_history import load_capture_index
 from wifit3.persist.ap_state import (
@@ -17,8 +19,9 @@ from wifit3.persist.ap_state import (
     record_hashlines_captured,
     record_live_verification,
 )
-from wifit3.persist.meta import update_meta
+from wifit3.persist.meta import meta_path, read_meta, update_meta
 from wifit3.persist.pcap import write_pcap
+from tests.hashline_dates import write_hashline_dates
 
 # hashcat wiki example_hashes, mode 22000 (password "hashcat!"); message pair a2 = M2+M3.
 _BSSID = "64:66:b3:8e:c3:fc"
@@ -41,12 +44,16 @@ def _hashline(raw: str, *captured: int) -> DatedHashline:
     return DatedHashline(hashline_id(raw), raw, parse_hc22000(raw), captured)
 
 
-def _key(*hashlines: DatedHashline, value: str = "hashcat!", capture_type: CaptureType = CaptureType.WPA_PSK,
-         source_type: CaptureType = CaptureType.WPA_PSK, saved_at: int = 1,
+def _capture(capture_type: CaptureType, saved_at: int, value: str = "hashcat!", ssid: str = _SSID) -> PersistedCapture:
+    return PersistedCapture(type=capture_type, timestamp=saved_at, path=f"{saved_at}.txt", bssid=_BSSID,
+                            value=value, ssid=ssid)
+
+
+def _key(*hashlines: DatedHashline, value: str = "hashcat!", key_type: CaptureType = CaptureType.WPA_PSK,
+         capture_type: CaptureType = CaptureType.WPA_PSK, saved_at: int = 1,
          verifications: tuple[LiveVerification, ...] = ()) -> Key:
-    source = PersistedCapture(type=source_type, timestamp=saved_at, path="x.txt", bssid=_BSSID,
-                              value=value, ssid=_SSID)
-    return Key(capture_type, value, (source,), frozenset(h.id for h in hashlines), verifications)
+    return Key(key_type, value, (_capture(capture_type, saved_at, value),),
+               frozenset(h.id for h in hashlines), verifications)
 
 
 def test_no_key_is_not_cracked():
@@ -54,7 +61,7 @@ def test_no_key_is_not_cracked():
 
 
 def test_only_a_wps_pin_is_not_cracked():
-    pin = _key(value="12345670", capture_type=CaptureType.WPS_PIN, source_type=CaptureType.WPS_PIN)
+    pin = _key(value="12345670", key_type=CaptureType.WPS_PIN, capture_type=CaptureType.WPS_PIN)
     assert password_status([], [pin]) == (PasswordStatus.NOT_CRACKED, None)
 
 
@@ -79,6 +86,23 @@ def test_stale_names_the_key_that_matched_last_not_the_first_listed():
 def test_a_key_cracked_late_from_an_old_capture_is_still_stale():
     late = _key(old := _hashline(_EAPOL_LINE, 10), saved_at=30)
     assert password_status([_hashline(_OTHER_LINE, 20), old], [late]) == (PasswordStatus.STALE, late)
+
+
+def test_stale_with_no_key_ever_matching_names_no_key():
+    guess = _key(value="guess", saved_at=5)
+    assert password_status([_hashline(_OTHER_LINE, 20)], [guess]) == (PasswordStatus.STALE, None)
+
+
+def test_a_key_cracked_from_a_newer_m1m2_line_is_not_verified():
+    newer = _key(challenge := _hashline(_CHALLENGE_LINE, 25), value="newpass", saved_at=30)
+    status = password_status([challenge, _hashline(_OTHER_LINE, 20)], [newer])
+    assert status == (PasswordStatus.NOT_VERIFIED, newer)
+
+
+def test_a_key_the_ap_gave_up_before_the_unmatched_capture_is_stale_though_saved_again_after():
+    key = Key(CaptureType.WPA_PSK, "hashcat!", (_capture(CaptureType.WPA_PSK, 30), _capture(CaptureType.WPS_PBC, 10)),
+              frozenset(), ())
+    assert password_status([_hashline(_OTHER_LINE, 20)], [key]) == (PasswordStatus.STALE, key)
 
 
 def test_a_key_saved_after_the_unmatched_capture_is_not_verified():
@@ -112,13 +136,13 @@ def test_a_rejected_live_verification_is_not_judged():
 
 
 def test_a_key_recovered_from_the_ap_is_current_without_hashlines():
-    wep = _key(value="6162636465", capture_type=CaptureType.WEP, source_type=CaptureType.WEP)
+    wep = _key(value="6162636465", key_type=CaptureType.WEP, capture_type=CaptureType.WEP)
     assert password_status([], [wep]) == (PasswordStatus.CURRENT, wep)
 
 
 def test_a_rejected_wps_pin_does_not_touch_the_psk():
-    psk = _key(source_type=CaptureType.WPS_PIN, saved_at=10)
-    pin = _key(value="12345670", capture_type=CaptureType.WPS_PIN, source_type=CaptureType.WPS_PIN,
+    psk = _key(capture_type=CaptureType.WPS_PIN, saved_at=10)
+    pin = _key(value="12345670", key_type=CaptureType.WPS_PIN, capture_type=CaptureType.WPS_PIN,
                saved_at=10, verifications=(LiveVerification(20, False),))
     assert password_status([], [pin, psk]) == (PasswordStatus.CURRENT, psk)
 
@@ -141,10 +165,6 @@ def _write_psk(ssid: str, epoch: int, psk: str) -> None:
         f"SSID: {ssid}\nBSSID: {_BSSID}\nPSK: {psk}\n", encoding="utf-8")
 
 
-def _date_hashline(ssid: str, raw: str, epoch: int) -> None:
-    update_meta(ssid, _BSSID, hashlines={hashline_id(raw): {"captured": [epoch]}})
-
-
 def _state():
     return load_ap_state(_BSSID, load_capture_index()[_BSSID])
 
@@ -153,8 +173,8 @@ def test_load_matches_saved_psks_against_every_ssid_file(tmp_path):
     _write_aggregate("Old", _OLD_SSID_LINE)
     _write_aggregate(_SSID, _EAPOL_LINE)
     _write_psk(_SSID, 1700000000, "hashcat!")
-    _date_hashline("Old", _OLD_SSID_LINE, 1600000000)
-    _date_hashline(_SSID, _EAPOL_LINE, 1700000000)
+    write_hashline_dates("Old", _BSSID, {_OLD_SSID_LINE: 1600000000})
+    write_hashline_dates(_SSID, _BSSID, {_EAPOL_LINE: 1700000000})
 
     state = _state()
     assert state.status is PasswordStatus.CURRENT
@@ -166,9 +186,41 @@ def test_load_matches_saved_psks_against_every_ssid_file(tmp_path):
 
 def test_load_lists_undated_hashlines_last(tmp_path):
     _write_aggregate(_SSID, _OTHER_LINE, _EAPOL_LINE)
-    _date_hashline(_SSID, _EAPOL_LINE, 1700000000)
+    write_hashline_dates(_SSID, _BSSID, {_EAPOL_LINE: 1700000000})
     assert [(h.raw, h.first_captured) for h in _state().hashlines] == [
         (_EAPOL_LINE, 1700000000), (_OTHER_LINE, None)]
+
+
+def test_an_undated_authorized_match_beside_a_dated_m1m2_line_is_current(tmp_path):
+    unmatched_challenge = _OTHER_LINE[:-2] + "80"
+    _write_aggregate(_SSID, _EAPOL_LINE, unmatched_challenge)
+    _write_psk(_SSID, 1700000000, "hashcat!")
+    write_hashline_dates(_SSID, _BSSID, {unmatched_challenge: 1700000000})
+    state = _state()
+    assert [h.raw for h in state.hashlines] == [unmatched_challenge, _EAPOL_LINE]
+    assert (state.status, state.status_key.value) == (PasswordStatus.CURRENT, "hashcat!")
+
+
+def test_two_ssids_with_different_psks_each_match_their_own_lines(tmp_path):
+    sta = bytes.fromhex("225edc49b7aa")
+    old_pmkid = wpa_psk.pmkid(derive_pmk("oldpass1", b"Old"), bytes.fromhex(_BSSID.replace(":", "")), sta)
+    old_line = f"WPA*01*{old_pmkid.hex()}*{_BSSID.replace(':', '')}*{sta.hex()}*{b'Old'.hex()}***"
+    _write_aggregate("Old", old_line)
+    _write_aggregate(_SSID, _EAPOL_LINE)
+    _write_psk("Old", 1600000001, "oldpass1")
+    _write_psk(_SSID, 1700000001, "hashcat!")
+    write_hashline_dates("Old", _BSSID, {old_line: 1600000000})
+    write_hashline_dates(_SSID, _BSSID, {_EAPOL_LINE: 1700000000})
+    state = _state()
+    assert {k.value: k.hashline_ids for k in state.keys} == {
+        "hashcat!": {hashline_id(_EAPOL_LINE)}, "oldpass1": {hashline_id(old_line)}}
+    assert (state.status, state.status_key.value, state.uncracked) == (PasswordStatus.CURRENT, "hashcat!", ())
+
+
+def test_a_wps_pbc_capture_is_a_current_psk(tmp_path):
+    state = load_ap_state(_BSSID, [_capture(CaptureType.WPS_PBC, 1)])
+    assert [(k.type, k.value) for k in state.keys] == [(CaptureType.WPA_PSK, "hashcat!")]
+    assert (state.status, state.status_key) == (PasswordStatus.CURRENT, state.keys[0])
 
 
 def test_load_dates_a_hashline_from_the_pcap_frame_carrying_its_mic(tmp_path):
@@ -208,16 +260,21 @@ def test_a_wps_pin_capture_gives_a_current_psk_key_and_a_pin_key(tmp_path):
     capture = PersistedCapture(type=CaptureType.WPS_PIN, timestamp=1, path="x.txt", bssid=_BSSID,
                                value="hashcat!", pin="12345670", ssid=_SSID)
     state = load_ap_state(_BSSID, [capture])
-    assert sorted((k.capture_type, k.value) for k in state.keys) == [
+    assert sorted((k.type, k.value) for k in state.keys) == [
         (CaptureType.WPA_PSK, "hashcat!"), (CaptureType.WPS_PIN, "12345670")]
-    assert (state.status, state.status_key.capture_type) == (PasswordStatus.CURRENT, CaptureType.WPA_PSK)
+    assert (state.status, state.status_key.type) == (PasswordStatus.CURRENT, CaptureType.WPA_PSK)
 
 
-def test_a_psk_saved_in_two_files_keeps_both_sources(tmp_path):
-    wps = PersistedCapture(type=CaptureType.WPS_PBC, timestamp=1, path="a.txt", bssid=_BSSID,
-                           value="hashcat!", ssid=_SSID)
-    cracked = PersistedCapture(type=CaptureType.WPA_PSK, timestamp=2, path="b.txt", bssid=_BSSID,
-                               value="hashcat!", ssid=_SSID)
+def test_a_psk_saved_in_two_files_keeps_both_captures(tmp_path):
+    wps, cracked = _capture(CaptureType.WPS_PBC, 1), _capture(CaptureType.WPA_PSK, 2)
     [key] = load_ap_state(_BSSID, [wps, cracked]).keys
-    assert key.sources == (cracked, wps)
-    assert key.recovered_from_access_point_at == 1
+    assert key.captures == (cracked, wps)
+    assert key.ap_recovered_at == 1
+
+
+def test_a_live_verification_is_recorded_in_the_newest_captures_ssid(tmp_path):
+    key = Key(CaptureType.WPA_PSK, "hashcat!", (_capture(CaptureType.WPA_PSK, 2, ssid="New"),
+                                                _capture(CaptureType.WPA_PSK, 1, ssid="Old")), frozenset(), ())
+    record_live_verification(key, correct=True)
+    assert len(read_meta(meta_path("New", _BSSID))["live_verifications"]) == 1
+    assert "live_verifications" not in read_meta(meta_path("Old", _BSSID))

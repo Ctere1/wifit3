@@ -12,12 +12,13 @@ from pathlib import Path
 import pytest
 
 from wifit3.crack import wpa_psk
-from wifit3.crack.hc22000_format import Hc22000Line, hashline_id
+from wifit3.crack.hc22000_format import Hc22000Line
 from wifit3.dot11.wpa import derive_pmk
 from wifit3.models import AccessPoint, CaptureType, Handshake, HandshakeMessage, ToolName
 from wifit3.persist.config import Config
 from wifit3.persist.meta import meta_path, read_meta, update_meta
 from wifit3.persist.vault import Vault, crosses_auto_crack_threshold
+from tests.hashline_dates import write_hashline_dates
 
 
 _PMKID_AND_EAPOL_LINES = (f"WPA*01*{'00' * 16}*001122334403*aabbccddeeff*4e6574***\n"
@@ -527,8 +528,7 @@ def test_past_the_threshold_only_a_current_password_turning_stale_submits(
     if already_stale:
         v.save_pmkid(_ap_with_pmkid_for("newpsk", "11:22:33:44:55:02"), "11:22:33:44:55:02")
     lines = (tmp_path / "HomeNet_aa-bb-cc-dd-ee-ff.hc22000").read_text(encoding="utf-8").split()
-    update_meta("HomeNet", "aa:bb:cc:dd:ee:ff",
-                hashlines={hashline_id(raw): {"captured": [1700000000 + i]} for i, raw in enumerate(lines)})
+    write_hashline_dates("HomeNet", "aa:bb:cc:dd:ee:ff", {raw: 1700000000 + i for i, raw in enumerate(lines)})
     v.manager.submit_job.reset_mock()
 
     v.save_pmkid(_ap_with_pmkid_for("newpsk", "11:22:33:44:55:03"), "11:22:33:44:55:03")
