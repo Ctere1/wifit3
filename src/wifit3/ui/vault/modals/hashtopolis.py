@@ -10,6 +10,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select
 
 from wifit3.models import PersistedCapture
+from wifit3.persist.ap_state import DatedHashline
 from wifit3.persist.config import Config, ConfigError
 from wifit3.vault.tools.hashtopolis_api import (AccessGroup, HashtopolisApi, HashtopolisError,
                                                 ServerFile)
@@ -65,7 +66,7 @@ class HashtopolisConfigModal(ModalScreen[dict]):
     """
 
     def __init__(self, confirm_label: str = "Launch", capture: Optional[PersistedCapture] = None,
-                 probed_ssids: Sequence[str] = (), hashline_ids: Sequence[str] = ()) -> None:
+                 probed_ssids: Sequence[str] = (), hashlines: Sequence[DatedHashline] = ()) -> None:
         """``confirm_label`` "Save" configures the tool without the caller launching a job; the
         other arguments are unused, the server holds the wordlists."""
         super().__init__()

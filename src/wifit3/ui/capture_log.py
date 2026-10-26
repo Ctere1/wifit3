@@ -6,6 +6,8 @@ from typing import List, Optional
 
 from wifit3.ui.capture_events import CaptureEvent
 
+STALE_PASSWORD_COLOR = "#ffaf00"
+
 
 def _tick(ok: bool) -> str:
     return "[green]✓[/green]" if ok else "[red]✗[/red]"
@@ -48,4 +50,4 @@ def saved_psk_markup(matches_saved_psk: Optional[bool]) -> str:
         return ""
     if matches_saved_psk:
         return " [green]✓ saved PSK matches[/green]"
-    return " [orange1]✗ saved PSK doesn't match[/orange1]"
+    return f" [{STALE_PASSWORD_COLOR}]✗ saved PSK doesn't match[/]"

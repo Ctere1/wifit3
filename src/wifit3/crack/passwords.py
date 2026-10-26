@@ -71,6 +71,11 @@ def ssid_variants(ssid: str) -> list[str]:
     return [psk for psk in dict.fromkeys(candidates) if is_valid_psk(psk)]
 
 
+def all_ssid_variants(ssids: Iterable[str]) -> list[str]:
+    """``ssid_variants`` of every SSID, deduped."""
+    return list(dict.fromkeys(psk for ssid in dict.fromkeys(ssids) for psk in ssid_variants(ssid)))
+
+
 def ssid_passwords(ssids: Iterable[str]) -> list[str]:
     """Every SSID as-is, then its cases and _SSID_SUFFIXES; deduped, stopping at
     _MAX_SSID_PASSWORDS."""

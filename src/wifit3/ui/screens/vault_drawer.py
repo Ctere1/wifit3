@@ -63,23 +63,11 @@ class VaultDrawer(ModalScreen):
     VaultDrawer.open #vault-content {
         offset-y: 0%;
     }
-    VaultDrawer #vault-item Button.-textual-compact { min-width: 0; margin-right: 0; }
-    VaultDrawer #vault-item Button.toggle { width: 3; background: transparent; }
-    VaultDrawer.-tiny #vault-item Button.tool-btn { height: 1; border: none; min-width: 0; }
-    VaultDrawer.-tiny #vault-item .ssids, VaultDrawer.-narrow #vault-item .ssids { display: none; }
-    VaultDrawer.-tiny #vault-item .status, VaultDrawer.-narrow #vault-item .status,
-    VaultDrawer.-tiny #vault-item Rule.uncracked-rule, VaultDrawer.-narrow #vault-item Rule.uncracked-rule {
-        margin-top: 0;
+    VaultDrawer #vault-item .key-line Button, VaultDrawer #vault-item Button.add-key {
+        min-width: 0;
+        margin-right: 0;
     }
-    VaultDrawer.-wide #vault-item .row > * { margin-right: 2; }
-    VaultDrawer.-tall.-wide #vault-item _KeyRow .history,
-    VaultDrawer.-tall.-wide #vault-item _KeyRow .collapse { display: block; }
-    VaultDrawer.-tall.-wide #vault-item _KeyRow .expand,
-    VaultDrawer.-tall.-wide #vault-item _KeyRow.-collapsed .history,
-    VaultDrawer.-tall.-wide #vault-item _KeyRow.-collapsed .collapse { display: none; }
-    VaultDrawer.-tall.-wide #vault-item _KeyRow.-collapsed .expand { display: block; }
-    VaultDrawer.-tall.-wide #vault-item _CapturePanel { min-height: 100%; }
-    VaultDrawer.-tall.-wide #vault-item .uncracked { height: 1fr; min-height: 8; max-height: 100%; }
+    VaultDrawer.-tiny #vault-item Button.tool-btn { min-width: 0; }
     """
 
     def __init__(self, preselected_bssid: Optional[str] = None) -> None:
@@ -126,10 +114,6 @@ class VaultDrawer(ModalScreen):
 
     def action_dismiss_drawer(self) -> None:
         self._cancel_pending_selection()
-        try:
-            self.query_one("#vault-item", VaultItemView).cancel_verification()
-        except Exception:
-            pass
         if self.has_class("open"):
             self.remove_class("open")
             def _do_dismiss():
