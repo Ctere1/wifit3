@@ -16,6 +16,7 @@ from wifit3.crack.hc22000_format import Hc22000Line
 from wifit3.dot11.wpa import derive_pmk
 from wifit3.models import AccessPoint, CaptureType, Handshake, HandshakeMessage, ToolName
 from wifit3.persist.config import Config
+from wifit3.persist.ap_state import PasswordStatus
 from wifit3.persist.meta import meta_path, read_meta, update_meta
 from wifit3.persist.vault import Vault, crosses_auto_crack_threshold
 from tests.hashline_dates import write_hashline_dates
@@ -570,6 +571,18 @@ def test_an_unmatched_m1m2_capture_is_neither_a_match_nor_a_mismatch(tmp_path, m
     ap.wps_pbc_psk = "oldpsk"
 
     assert v.save_handshake(ap, _CLIENT).matches_saved_psk is None
+
+
+def test_an_m1m2_capture_a_saved_pbc_psk_does_not_crack_changes_nothing(tmp_path):
+    v = Vault()
+    v.save_wps_pbc(AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="HomeNet"), "pbcpsk")
+
+    assert v.save_handshake(_ap_with_hs(), _CLIENT).matches_saved_psk is None
+
+    state = v.ap_state("aa:bb:cc:dd:ee:ff")
+    assert [h.line.authorized for h in state.hashlines] == [False]
+    assert (state.status, state.status_key.value) == (PasswordStatus.CURRENT, "pbcpsk")
+    assert v.manager.jobs == {}
 
 
 @pytest.mark.parametrize(("already_stale", "submitted"), [(False, True), (True, False)])

@@ -312,6 +312,26 @@ async def test_a_wep_key_shows_and_copies_as_ascii_and_is_the_current_password(t
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
+@pytest.mark.parametrize("pin", [None, "12345670"])
+async def test_a_wps_recovered_psk_is_the_current_password_on_the_chip(tmp_path, pin):
+    app = WifiteApp()
+    ap = AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="HomeNet")
+    if pin is None:
+        app.vault.save_wps_pbc(ap, "hunter22")
+    else:
+        app.vault.save_wps_pin(ap, pin, "hunter22")
+    async with app.run_test(size=(80, 40)) as pilot:
+        view = await _open_vault(app, pilot)
+
+        status = str(view.query_one(".status", Static).content)
+        assert "PSK: hunter22" in status and "CURRENT PASSWORD" in status
+        keys = [row.key for row in view.query(_KeyRow).results(_KeyRow)]
+        assert sorted((k.type, k.value) for k in keys) == sorted(
+            [(CaptureType.WPA_PSK, "hunter22")] + ([(CaptureType.WPS_PIN, pin)] if pin else []))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
 async def test_a_long_wep_key_ellipsizes_without_pushing_copy_and_verify_off_the_pane(tmp_path):
     _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff_1000_wep_key.txt", _LONG_WEP_TXT)
     app = WifiteApp()

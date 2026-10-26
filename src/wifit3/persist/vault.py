@@ -330,13 +330,15 @@ class Vault:
 
     def _auto_crack(self, ap: "AccessPoint", capture: PersistedCapture, before: List[Hc22000Line],
                     after: List[Hc22000Line], was_current: bool) -> None:
-        """Crack the AP's uncracked hashlines when the save crossed the auto-crack threshold, or
-        turned a current password stale."""
+        """Crack the AP's uncracked hashlines when no PSK is held (see ``_saved_psk``) and the save
+        crossed the auto-crack threshold or turned a current password stale."""
         tool = self.manager.tools.get(Config.auto_crack) if Config.auto_crack else None
         if tool is None or not tool.can_crack(capture):
             return
         config = tool.auto_crack_config()
         if config is None:
+            return
+        if self._saved_psk(ap.bssid) is not None:
             return
         state = self.ap_state(ap.bssid)
         became_stale = was_current and state.status is PasswordStatus.STALE
