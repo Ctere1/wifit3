@@ -20,6 +20,9 @@ from wifit3.persist.meta import meta_path, read_meta, update_meta
 from wifit3.persist.vault import Vault, crosses_auto_crack_threshold
 
 
+_PMKID_AND_EAPOL_LINES = (f"WPA*01*{'00' * 16}*001122334403*aabbccddeeff*4e6574***\n"
+                          f"WPA*02*{'00' * 16}*001122334403*aabbccddeeff*4e6574*{'a' * 64}*{'00' * 99}*02\n")
+
 # ---- handshake fixtures (mirror tests/persist/test_save.py) -----------------
 
 def _eapol_payload(mic: bytes = b"\xFF" * 16, key_data_len: int = 0) -> bytes:
@@ -308,7 +311,7 @@ def test_every_save_writes_the_meta(tmp_path):
 def test_delete_capture_drops_all_entries_sharing_a_path(tmp_path):
     # An aggregate .hc22000 backs both an HS and a PMKID entry: deleting drops both.
     agg = tmp_path / "Net_00-11-22-33-44-03.hc22000"
-    agg.write_text("WPA*01*x\nWPA*02*y\n", encoding="utf-8")
+    agg.write_text(_PMKID_AND_EAPOL_LINES, encoding="utf-8")
     v = Vault()
     caps = v.persisted("00:11:22:33:44:03")
     assert {c.type for c in caps} == {CaptureType.HS, CaptureType.PMKID}
@@ -333,7 +336,7 @@ def test_zip_captures_none_when_empty(tmp_path):
 
 def test_zip_captures_dedupes_shared_path(tmp_path):
     agg = tmp_path / "Net_00-11-22-33-44-03.hc22000"
-    agg.write_text("WPA*01*x\nWPA*02*y\n", encoding="utf-8")
+    agg.write_text(_PMKID_AND_EAPOL_LINES, encoding="utf-8")
     v = Vault()
     out = v.zip_captures(v.persisted("00:11:22:33:44:03"))
     with zipfile.ZipFile(out) as zf:
