@@ -10,14 +10,13 @@ from wifit3.dot11.wpa import derive_pmk
 from wifit3.models import CaptureType, PersistedCapture
 from wifit3.persist.capture_history import load_capture_index
 from wifit3.persist.ap_state import (
-    ApState,
     DatedHashline,
     Key,
     LiveVerification,
     PasswordStatus,
     confirmed_at,
     is_confirmed,
-    key_status,
+    key_statuses,
     load_ap_state,
     password_status,
     record_hashlines_captured,
@@ -167,33 +166,41 @@ def test_an_m1m2_match_does_not_confirm():
     assert not is_confirmed(key, [challenge]) and confirmed_at(key, [challenge]) is None
 
 
-def _ap_state(hashlines: list[DatedHashline], keys: list[Key]) -> ApState:
-    status, status_key = password_status(hashlines, keys)
-    return ApState(_BSSID, (), tuple(hashlines), tuple(keys), status, status_key, None, (), ())
+def _key_statuses(hashlines: list[DatedHashline], keys: list[Key]) -> dict[tuple[CaptureType, str], PasswordStatus]:
+    return key_statuses(keys, hashlines, *password_status(hashlines, keys))
 
 
 def test_a_key_newer_evidence_refutes_is_stale_beside_the_current_one():
     old, new = _hashline(_OTHER_LINE, 10), _hashline(_EAPOL_LINE, 20)
     current, replaced = _key(new), _key(old, value="old-password")
-    state = _ap_state([new, old], [current, replaced])
-    assert (key_status(current, state), key_status(replaced, state)) == (
-        PasswordStatus.CURRENT, PasswordStatus.STALE)
+    assert _key_statuses([new, old], [current, replaced]) == {
+        current.id: PasswordStatus.CURRENT, replaced.id: PasswordStatus.STALE}
 
 
-def test_two_keys_confirmed_by_the_newest_evidence_are_both_current():
-    newest = _hashline(_EAPOL_LINE, 20)
-    passphrase, raw_pmk = _key(newest), _key(newest, value="ab" * 32)
-    state = _ap_state([newest], [passphrase, raw_pmk])
-    assert {key_status(passphrase, state), key_status(raw_pmk, state)} == {PasswordStatus.CURRENT}
+def test_with_only_undated_evidence_the_status_key_alone_is_current():
+    first, second = _hashline(_EAPOL_LINE), _hashline(_OTHER_LINE)
+    one, other = _key(first), _key(second, value="other-password")
+    status, status_key = password_status([first, second], [one, other])
+    statuses = key_statuses([one, other], [first, second], status, status_key)
+    assert statuses[status_key.id] is PasswordStatus.CURRENT
+    assert sorted(s.name for s in statuses.values()) == ["CURRENT", "STALE"]
 
 
 def test_a_key_nothing_confirms_is_not_verified_and_a_pin_from_the_ap_is_current():
     newest = _hashline(_EAPOL_LINE, 20)
     current, guess = _key(newest), _key(value="guess")
     pin = _key(value="12345670", key_type=CaptureType.WPS_PIN, capture_type=CaptureType.WPS_PIN)
-    state = _ap_state([newest], [current, guess, pin])
-    assert (key_status(guess, state), key_status(pin, state)) == (
-        PasswordStatus.NOT_VERIFIED, PasswordStatus.CURRENT)
+    assert _key_statuses([newest], [current, guess, pin]) == {
+        current.id: PasswordStatus.CURRENT, guess.id: PasswordStatus.NOT_VERIFIED, pin.id: PasswordStatus.CURRENT}
+
+
+def test_a_loaded_state_carries_each_keys_status(tmp_path):
+    _write_aggregate(_SSID, _EAPOL_LINE)
+    _write_psk(_SSID, 100, "hashcat!")
+    _write_psk(_SSID, 200, "guess")
+    state = _state()
+    assert {k.value: state.key_statuses[k.id] for k in state.keys} == {
+        "hashcat!": PasswordStatus.CURRENT, "guess": PasswordStatus.NOT_VERIFIED}
 
 
 def _write_aggregate(ssid: str, *lines: str) -> Path:

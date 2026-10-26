@@ -53,6 +53,10 @@ class Key:
     live_verifications: tuple[LiveVerification, ...]
 
     @property
+    def id(self) -> tuple[CaptureType, str]:
+        return self.type, self.value
+
+    @property
     def newest_capture(self) -> PersistedCapture:
         return self.captures[0]
 
@@ -81,6 +85,7 @@ class ApState:
     keys: tuple[Key, ...]                   # most recently confirmed first
     status: PasswordStatus
     status_key: Optional[Key]
+    key_statuses: dict[tuple[CaptureType, str], PasswordStatus]    # by Key.id; see ``key_statuses``
     hashline_capture: Optional[PersistedCapture]    # the newest SSID's .hc22000; jobs are filed under it
     uncracked: tuple[DatedHashline, ...]            # the hashlines no key matches, newest first
     uncracked_exhaustion: tuple[Exhaustion, ...]    # wordlists that ran out on the uncracked lines
@@ -228,21 +233,20 @@ def password_status(hashlines: Iterable[DatedHashline],
     return PasswordStatus.STALE, next((key for _, key in evidence if key is not None), None)
 
 
-def key_status(key: Key, state: ApState) -> PasswordStatus:
-    """The AP's status for its status key. Any other key: NOT_VERIFIED when nothing confirms it,
-    STALE when evidence newer than its last confirmation refutes it, else CURRENT."""
-    if key == state.status_key:
-        return state.status
-    if not is_confirmed(key, state.hashlines):
-        return PasswordStatus.NOT_VERIFIED
-    if not key.is_password:
-        return PasswordStatus.CURRENT
-    hashlines = list(state.hashlines)
-    newest_at = next((at for at, _ in _evidence(hashlines, [k for k in state.keys if k.is_password])
-                      if at is not None), None)
-    if newest_at is None or epoch_sort_key(confirmed_at(key, hashlines)) >= epoch_sort_key(newest_at):
-        return PasswordStatus.CURRENT
-    return PasswordStatus.STALE
+def key_statuses(keys: Iterable[Key], hashlines: Iterable[DatedHashline], status: PasswordStatus,
+                 status_key: Optional[Key]) -> dict[tuple[CaptureType, str], PasswordStatus]:
+    """Each key's status: the AP's for its status key. Any other key is NOT_VERIFIED when nothing
+    confirms it; a confirmed PIN is CURRENT, a confirmed password key STALE (newer evidence won)."""
+    hashlines = list(hashlines)
+    statuses: dict[tuple[CaptureType, str], PasswordStatus] = {}
+    for key in keys:
+        if key == status_key:
+            statuses[key.id] = status
+        elif not is_confirmed(key, hashlines):
+            statuses[key.id] = PasswordStatus.NOT_VERIFIED
+        else:
+            statuses[key.id] = PasswordStatus.STALE if key.is_password else PasswordStatus.CURRENT
+    return statuses
 
 
 def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
@@ -277,6 +281,7 @@ def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
     uncracked = tuple(h for h in hashlines if h.id not in cracked)
     exhaustion = read_exhaustion(metas, [h.id for h in uncracked]) if uncracked else {}
     return ApState(bssid, ssids, tuple(hashlines), tuple(keys), status, status_key,
+                   key_statuses(keys, hashlines, status, status_key),
                    hc22000[0] if hc22000 else None, uncracked, tuple(exhaustion.values()))
 
 
