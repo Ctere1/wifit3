@@ -13,7 +13,8 @@ from wifit3.crack.wpa_psk import psk_matches
 from wifit3.models import AP_RECOVERED_CAPTURE_TYPES, PSK_CAPTURE_TYPES, CaptureType, PersistedCapture
 from wifit3.persist.common import safe_ssid
 from wifit3.persist.exhaustion import ExhaustedWordlist, read_exhausted_wordlists
-from wifit3.persist.meta import meta_path, read_bssid_metas, read_meta, update_meta
+from wifit3.persist.meta import (bssid_meta_paths, meta_path, read_bssid_metas, read_meta, update_meta,
+                                 update_meta_file)
 from wifit3.persist.pcap import read_pcap
 
 _HASHLINES_KEY = "hashlines"
@@ -352,3 +353,24 @@ def record_live_verification(key: Key, correct: bool) -> None:
     stored = stored if isinstance(stored, list) else []
     stored.append({"kind": key.type.value, "key": key.value, "at": int(time.time()), "correct": correct})
     update_meta(capture.ssid, capture.bssid, **{_LIVE_VERIFICATIONS_KEY: stored})
+
+
+def forget_key(key: Key) -> None:
+    """Drop the key's live checks, and the Add key marks of its captures, from every SSID's .meta."""
+    capture_names = {Path(c.path).name for c in key.captures}
+    for path in bssid_meta_paths(key.newest_capture.bssid):
+        meta = read_meta(path)
+        fields: dict[str, Optional[list]] = {}
+        verifications = meta.get(_LIVE_VERIFICATIONS_KEY)
+        if isinstance(verifications, list):
+            kept = [r for r in verifications if not (isinstance(r, dict) and r.get("key") == key.value
+                                                     and _capture_type(r.get("kind")) == key.type)]
+            if len(kept) != len(verifications):
+                fields[_LIVE_VERIFICATIONS_KEY] = kept or None
+        manual = meta.get(_MANUAL_CAPTURES_KEY)
+        if isinstance(manual, list):
+            kept_names = [name for name in manual if name not in capture_names]
+            if len(kept_names) != len(manual):
+                fields[_MANUAL_CAPTURES_KEY] = kept_names or None
+        if fields:
+            update_meta_file(path, **fields)

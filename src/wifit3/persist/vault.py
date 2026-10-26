@@ -419,26 +419,50 @@ class Vault:
         paths.add(captures_dir / wps_run_state_name(bssid))
         self._delete_files(bssid, paths)
 
-    def delete_key(self, key: Key) -> None:
-        """Delete every capture file holding ``key``; other keys in those files go with it."""
-        self._delete_files(key.newest_capture.bssid, {Path(c.path) for c in key.captures})
+    def delete_key(self, bssid: str, key_id: tuple[CaptureType, str]) -> None:
+        """Delete every capture file holding the AP's key ``key_id`` (and any key held only in those
+        files), with their live checks and Add key marks."""
+        state = self.ap_state(bssid)
+        key = next((k for k in state.keys if k.id == key_id), None)
+        if key is None:
+            return
+        paths = {Path(c.path) for c in key.captures}
+        removed = [k for k in state.keys if {Path(c.path) for c in k.captures} <= paths]
+        try:
+            self._delete_files(bssid, paths)
+        finally:
+            gone = [k for k in removed if not any(Path(c.path).exists() for c in k.captures)]
+            for gone_key in gone:
+                ap_state.forget_key(gone_key)
+            if gone:
+                self.notify_changed(bssid)
 
     def _delete_files(self, bssid: str, paths: set[Path]) -> None:
-        """Delete ``paths``, drop their captures from the index and notify every BSSID that lost one."""
-        for path in paths:
-            path.unlink(missing_ok=True)
-        changed = {bssid}
-        for indexed_bssid in list(self._index):
-            remaining = [c for c in self._index[indexed_bssid] if Path(c.path) not in paths]
-            if len(remaining) == len(self._index[indexed_bssid]):
-                continue
-            changed.add(indexed_bssid)
-            if remaining:
-                self._index[indexed_bssid] = remaining
-            else:
-                del self._index[indexed_bssid]
-        for changed_bssid in changed:
-            self.notify_changed(changed_bssid)
+        """Delete ``paths``, drop the deleted ones from the index and notify every BSSID that lost one;
+        re-raises the first failed delete."""
+        errors: list[OSError] = []
+        try:
+            for path in paths:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    errors.append(exc)
+        finally:
+            deleted = {path for path in paths if not path.exists()}
+            changed = {bssid}
+            for indexed_bssid in list(self._index):
+                remaining = [c for c in self._index[indexed_bssid] if Path(c.path) not in deleted]
+                if len(remaining) == len(self._index[indexed_bssid]):
+                    continue
+                changed.add(indexed_bssid)
+                if remaining:
+                    self._index[indexed_bssid] = remaining
+                else:
+                    del self._index[indexed_bssid]
+            for changed_bssid in changed:
+                self.notify_changed(changed_bssid)
+        if errors:
+            raise errors[0]
 
     def zip_captures(self, captures: List[PersistedCapture],
                      save_as: Optional[Path] = None) -> Optional[Path]:

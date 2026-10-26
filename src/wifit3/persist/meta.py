@@ -14,9 +14,14 @@ def meta_path(ssid: Optional[str], bssid: str) -> Path:
     return Path(Config.captures_dir) / f"{safe_ssid(ssid)}_{bssid_to_dashed(bssid)}.meta"
 
 
+def bssid_meta_paths(bssid: str) -> list[Path]:
+    """Every SSID's .meta for this BSSID."""
+    return sorted(Path(Config.captures_dir).glob(f"*_{bssid_to_dashed(bssid)}.meta"))
+
+
 def read_bssid_metas(bssid: str) -> list[dict[str, Any]]:
     """Every SSID's .meta for this BSSID, read (see ``read_meta``)."""
-    return [read_meta(path) for path in sorted(Path(Config.captures_dir).glob(f"*_{bssid_to_dashed(bssid)}.meta"))]
+    return [read_meta(path) for path in bssid_meta_paths(bssid)]
 
 
 def read_meta(path: Path) -> dict[str, Any]:
@@ -35,6 +40,16 @@ def update_meta(ssid: Optional[str], bssid: str, **fields: Any) -> Path:
     data["bssid"] = bssid_to_colon(bssid)
     if ssid and ssid != "<hidden>":
         data["ssid"] = ssid
+    _write_meta(path, data, fields)
+    return path
+
+
+def update_meta_file(path: Path, **fields: Any) -> None:
+    """Merge ``fields`` into the .meta at ``path`` (a None value removes that key)."""
+    _write_meta(path, read_meta(path), fields)
+
+
+def _write_meta(path: Path, data: dict[str, Any], fields: dict[str, Any]) -> None:
     for key, value in fields.items():
         if value is None:
             data.pop(key, None)
@@ -45,4 +60,3 @@ def update_meta(ssid: Optional[str], bssid: str, **fields: Any) -> Path:
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
                          encoding="utf-8")
     temporary.replace(path)
-    return path

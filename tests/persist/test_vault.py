@@ -333,18 +333,39 @@ def test_delete_ap_removes_every_ssids_files_and_cache_entries(tmp_path):
     assert len(v.persisted("00:11:22:33:44:02")) == 1
 
 
-def test_delete_key_removes_every_file_holding_it_and_the_keys_beside_it(tmp_path):
+def test_delete_key_removes_every_file_holding_it_and_the_keys_held_only_there(tmp_path):
     v = Vault()
     ap = AccessPoint(bssid="00:11:22:33:44:01", ssid="A")
     typed = v.save_wpa_psk("A", ap.bssid, "hunter22")
     wps = v.save_wps_pin(ap, "12345670", "hunter22")
     kept = v.save_wep_key(ap, b"abcde")
-    [psk] = [k for k in v.ap_state(ap.bssid).keys if k.type == CaptureType.WPA_PSK]
 
-    v.delete_key(psk)
+    v.delete_key(ap.bssid, (CaptureType.WPA_PSK, "hunter22"))
 
     assert not Path(typed.path).exists() and not Path(wps.path).exists() and Path(kept.path).exists()
     assert [k.type for k in v.ap_state(ap.bssid).keys] == [CaptureType.WEP]
+
+
+def test_delete_key_keeps_the_captures_and_meta_and_forgets_its_live_checks_and_add_key_mark(tmp_path):
+    bssid = "02:00:00:00:00:01"
+    _write_pmkid_line(tmp_path, "HomeNet", bssid, derive_pmk("correct horse", b"HomeNet"))
+    pcap = tmp_path / "HomeNet_02-00-00-00-00-01_1000_handshake.pcap"
+    pcap.write_bytes(b"")
+    v = Vault()
+    ap = AccessPoint(bssid=bssid, ssid="HomeNet")
+    v.save_wpa_psk("HomeNet", bssid, "correct horse")
+    v.save_wep_key(ap, b"abcde", manual=True)
+    [psk] = [k for k in v.ap_state(bssid).keys if k.type == CaptureType.WPA_PSK]
+    v.record_live_verification(psk, correct=True)
+    hashlines = v.ap_state(bssid).hashlines
+    meta = tmp_path / "HomeNet_02-00-00-00-00-01.meta"
+
+    v.delete_key(bssid, psk.id)
+    v.delete_key(bssid, (CaptureType.WEP, "6162636465"))
+
+    assert (tmp_path / "HomeNet_02-00-00-00-00-01.hc22000").exists() and pcap.exists() and meta.exists()
+    assert v.ap_state(bssid).hashlines == hashlines and v.ap_state(bssid).keys == ()
+    assert "live_verifications" not in read_meta(meta) and "manual_captures" not in read_meta(meta)
 
 
 def test_every_save_writes_the_meta(tmp_path):
