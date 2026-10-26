@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
 from wifit3.crack import wpa_psk
-from wifit3.crack.hc22000_format import Hc22000Line, read_hc22000
+from wifit3.crack.hc22000_format import Hc22000Line
 from wifit3.crack.passwords import DEFAULT_PASSWORDS_PATH, read_passwords, ssid_passwords
 from wifit3.dot11 import wpa
 from wifit3.models import PersistedCapture, ToolCapability, ToolResult, ToolStatus
@@ -13,6 +13,7 @@ from wifit3.models.jobs import JobAction, JobState, ToolName
 from wifit3.persist.config import Config
 from wifit3.vault.exhaustion import (SSID_VARIANTS_IDENTITY, capture_hashline_ids,
                                      wordlist_identity)
+from wifit3.vault.tools.base import require_hashlines
 from wifit3.vault.tools.cracker import (CrackerTool, WordlistQueue, capture_ssid_variants,
                                         expand_wordlists)
 
@@ -67,7 +68,7 @@ class _WordlistRun:
 
 def _lines_by_essid(capture_path: str) -> dict[bytes, list[Hc22000Line]]:
     by_essid: dict[bytes, list[Hc22000Line]] = {}
-    for _, line in read_hc22000(capture_path):
+    for _, line in require_hashlines(capture_path):
         by_essid.setdefault(bytes.fromhex(line.essid), []).append(line)
     return by_essid
 
@@ -111,6 +112,7 @@ class CpuCrackTool(CrackerTool[CpuCrackQueue]):
         if job.config.get("default_passwords"):
             wordlists.insert(0, str(DEFAULT_PASSWORDS_PATH.resolve()))
         wordlists = list(dict.fromkeys(wordlists))
+        require_hashlines(job.hashlines_source)
         queue = CpuCrackQueue(wordlists=wordlists, ssid=capture.ssid or "", bssid=capture.bssid,
                               hashline_ids=capture_hashline_ids(job.hashlines_source),
                               identities=[wordlist_identity(path) for path in wordlists])
@@ -125,8 +127,6 @@ class CpuCrackTool(CrackerTool[CpuCrackQueue]):
 
     def _start_wordlist(self, job: JobState, queue: CpuCrackQueue) -> None:
         lines_by_essid = _lines_by_essid(job.hashlines_source)
-        if not lines_by_essid:
-            raise ValueError(f"No hashlines in {job.hashlines_source}")
         run = _WordlistRun(
             wordlist=Path(queue.current) if queue.current else None,
             ssid_passwords=(_ssid_passwords(job, _ap_ssid_variants(job))

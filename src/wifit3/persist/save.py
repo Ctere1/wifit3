@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from wifit3.crack.hc22000_format import Hc22000Line, eapol_hashlines, parse_hc22000, pmkid_hashline, read_hc22000
+from wifit3.crack.hc22000_format import eapol_hashlines, parse_hc22000, pmkid_hashline, read_hc22000
 from wifit3.models import AccessPoint
 from wifit3.persist.common import (
     LEGACY_CAPTURE_RE,
@@ -98,10 +98,6 @@ class HcFiles:
         self.bssid = bssid
         self.agg_path = captures_dir / f"{safe_ssid(self.ssid)}_{bssid_to_dashed(bssid)}.hc22000"
 
-    def lines(self) -> list[tuple[str, Hc22000Line]]:
-        """Every valid line of the AP's aggregate .hc22000 file, raw and parsed (empty if none)."""
-        return read_hc22000(self.agg_path)
-
     def find_existing_anonce(self, anonce: str) -> Path | None:
         """Find if ANonce already exists in either the aggregate file or any split file."""
         if self.agg_path.exists() and anonce in _read_anonces(self.agg_path):
@@ -165,9 +161,9 @@ class HcFiles:
                         continue
                     e = parse_hc22000(ln)
                     if e:
-                        if e.kind in {"01", "03"} and e.pmkid_or_mic:
+                        if e.is_pmkid and e.pmkid_or_mic:
                             seen_pmkids.add(e.pmkid_or_mic)
-                        elif e.kind in {"02", "04"} and e.anonce:
+                        elif not e.is_pmkid and e.anonce:
                             seen_anonces.add(e.anonce)
                     merged_lines.append(ln)
             except OSError:
@@ -186,11 +182,11 @@ class HcFiles:
                     continue
                 e = parse_hc22000(ln)
                 if e:
-                    if e.kind in {"01", "03"} and e.pmkid_or_mic:
+                    if e.is_pmkid and e.pmkid_or_mic:
                         if e.pmkid_or_mic in seen_pmkids:
                             continue
                         seen_pmkids.add(e.pmkid_or_mic)
-                    elif e.kind in {"02", "04"} and e.anonce:
+                    elif not e.is_pmkid and e.anonce:
                         if e.anonce in seen_anonces:
                             continue
                         seen_anonces.add(e.anonce)

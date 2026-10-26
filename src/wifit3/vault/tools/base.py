@@ -1,8 +1,18 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
+from wifit3.crack.hc22000_format import Hc22000Line, read_hc22000
 from wifit3.models import PersistedCapture, ToolCapability, ToolResult
 from wifit3.models.jobs import JobAction, JobState
+
+
+def require_hashlines(path: str) -> list[tuple[str, Hc22000Line]]:
+    """The file's hashlines; ValueError when it is missing or holds none."""
+    lines = read_hc22000(path)
+    if not lines:
+        raise ValueError(f"No hashlines in {path}")
+    return lines
+
 
 class VaultTool(ABC):
     name: str

@@ -17,6 +17,7 @@ from wifit3.persist.config import Config
 from wifit3.vault.exhaustion import (SSID_VARIANTS_IDENTITY, capture_hashline_ids,
                                      wordlist_identity)
 from wifit3.vault.tools import hashcat_keypress
+from wifit3.vault.tools.base import require_hashlines
 from wifit3.vault.tools.cracker import (CrackerTool, WordlistQueue, capture_ssid_variants,
                                         expand_wordlists)
 
@@ -121,6 +122,7 @@ class HashcatTool(CrackerTool[HashcatQueue]):
             essid_passwords + ssid_passwords(job.config.get("extra_passwords", []))))
         if not (ssid_based_passwords or wordlists):
             raise ValueError("No passwords to try: choose a wordlist or a password source")
+        require_hashlines(job.hashlines_source)
         queue = HashcatQueue(wordlists=wordlists, ssid=capture.ssid or "", bssid=capture.bssid,
                              hashline_ids=capture_hashline_ids(job.hashlines_source),
                              identities=[wordlist_identity(path) for path in wordlists])

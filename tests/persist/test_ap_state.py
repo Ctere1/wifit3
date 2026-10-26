@@ -36,7 +36,7 @@ _OLD_SSID_LINE = _OTHER_LINE.replace("54502d4c494e4b5f484153484341545f54455354",
 
 
 def _hashline(raw: str, captured: int) -> DatedHashline:
-    return DatedHashline(hashline_id(raw), raw, parse_hc22000(raw), _SSID, (captured,))
+    return DatedHashline(hashline_id(raw), raw, parse_hc22000(raw), (captured,))
 
 
 def _key(*hashlines: DatedHashline, capture_type=CaptureType.WPA_PSK, timestamp=1,

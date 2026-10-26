@@ -1,6 +1,6 @@
 """Hashcat ``-m 22000`` hashline FORMAT (WPA-PBKDF2-PMKID+EAPOL).
 
-The disk writer is ``persist.save`` (``HcFiles``).
+The disk writer is ``persist.save`` (``HcFiles``); ``read_hc22000`` reads a file back.
 
 The PMKID (``WPA*01`` / FT ``WPA*03``) line is built here; the EAPOL (``WPA*02`` / FT
 ``WPA*04``) lines and the crackability decision both live in ``crack.handshake``, the

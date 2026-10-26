@@ -4,11 +4,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from wifit3.crack.hc22000_format import read_hc22000
+from wifit3.crack.hc22000_format import Hc22000Line, read_hc22000
 from wifit3.models import PersistedCapture, ToolCapability, ToolResult, ToolStatus
 from wifit3.models.jobs import JobAction, JobState, ToolName
 from wifit3.persist.config import Config
-from wifit3.vault.tools.base import VaultTool
+from wifit3.vault.tools.base import VaultTool, require_hashlines
 from wifit3.vault.tools.hashtopolis_api import (HashtopolisApi, HashtopolisUnreachable,
                                                 ServerFile, user_api_endpoint)
 
@@ -32,8 +32,8 @@ class _ServerRun:
     thread: threading.Thread = field(init=False)
 
 
-def uploadable_hashlines(capture_path: str) -> list[str]:
-    return list(dict.fromkeys(raw for raw, line in read_hc22000(capture_path) if line.kind in _UPLOADED_KINDS))
+def uploadable_hashlines(lines: list[tuple[str, Hc22000Line]]) -> list[str]:
+    return list(dict.fromkeys(raw for raw, line in lines if line.kind in _UPLOADED_KINDS))
 
 
 class HashtopolisTool(VaultTool):
@@ -47,7 +47,7 @@ class HashtopolisTool(VaultTool):
         self._runs: Dict[str, _ServerRun] = {}
 
     def can_crack(self, capture: PersistedCapture) -> bool:
-        return capture.path.endswith(".hc22000") and bool(uploadable_hashlines(capture.path))
+        return capture.path.endswith(".hc22000") and bool(uploadable_hashlines(read_hc22000(capture.path)))
 
     def auto_crack_config(self) -> Optional[dict[str, Any]]:
         settings = Config.hashtopolis
@@ -60,9 +60,9 @@ class HashtopolisTool(VaultTool):
     def launch(self, job: JobState, capture: PersistedCapture) -> None:
         if not (Config.hashtopolis.url and Config.hashtopolis.access_key):
             raise ValueError("Hashtopolis server URL and access key are not set")
-        hashlines = uploadable_hashlines(job.hashlines_source)
+        hashlines = uploadable_hashlines(require_hashlines(job.hashlines_source))
         if not hashlines:
-            raise ValueError(f"No WPA*01/WPA*02 hashlines in {capture.path}")
+            raise ValueError(f"No WPA*01/WPA*02 hashlines in {job.hashlines_source}")
         job.tool_state["server"] = _configured_server()
         run = self._new_run(job)
         name = f"wifit3 {capture.ssid or Path(capture.path).stem}"

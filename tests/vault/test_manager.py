@@ -496,7 +496,7 @@ def test_a_queue_of_two_wordlists_runs_both_then_reports_not_found(manager, tmp_
     from wifit3.vault.tools.hashcat import HashcatTool
 
     capture = tmp_path / "ap.hc22000"
-    capture.write_text("WPA*01*deadbeef\n")
+    capture.write_text(f"WPA*01*{'aa' * 16}*aabbccddeeff*001122334455*41535553***\n")
     first, second = tmp_path / "a.txt", tmp_path / "b.txt"
     first.write_text("one\n")
     second.write_text("two\n")

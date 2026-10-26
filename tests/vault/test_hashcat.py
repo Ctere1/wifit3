@@ -18,6 +18,9 @@ from wifit3.models.access_point import CaptureType
 from wifit3.models.jobs import JobAction, JobState, ToolStatus
 
 
+_PMKID_LINE = f"WPA*01*{'aa' * 16}*aabbccddeeff*001122334455*41535553***"
+
+
 def _job(**fields) -> JobState:
     """A RUNNING hashcat job carrying only the fields a test cares about."""
     return JobState(job_id="hashcat-test", tool_name="hashcat",
@@ -32,7 +35,7 @@ def _cap(tmp_path):
 
 def _queued_job(tmp_path, wordlists, args=None):
     """A job ready for launch: a real capture file and a hashcat_exe that exists."""
-    (tmp_path / "a.hc22000").write_text("WPA*01*deadbeef\n")
+    (tmp_path / "a.hc22000").write_text(f"{_PMKID_LINE}\n")
     config = {"hashcat_exe": sys.executable, "wordlists": [str(w) for w in wordlists]}
     if args is not None:
         config["hashcat_args"] = args
@@ -356,7 +359,7 @@ def test_auto_crack_config_needs_a_path_and_a_wordlist_or_password_source():
 
 
 def _pidfile_job(tmp_path, exe: Path, wordlist: Path) -> JobState:
-    (tmp_path / "a.hc22000").write_text("WPA*01*deadbeef\n")
+    (tmp_path / "a.hc22000").write_text(f"{_PMKID_LINE}\n")
     exe.write_text("")
     wordlist.write_text("one\n")
     return _job(capture_path=str(tmp_path / "a.hc22000"),
@@ -610,6 +613,19 @@ def test_launch_truncates_the_log_so_one_job_owns_one_log(tmp_path, mocker):
     HashcatTool().launch(job, _cap(tmp_path))
 
     assert "previous job" not in Path(job.log_path).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("content", [None, "", "not a hashline\n"])
+def test_launch_fails_on_a_missing_or_empty_hashlines_file(tmp_path, content):
+    hashlines = tmp_path / "a.hc22000"
+    if content is not None:
+        hashlines.write_text(content)
+    wordlist = tmp_path / "a.txt"
+    wordlist.write_text("one\n")
+    job = _job(capture_path=str(hashlines),
+               config={"hashcat_exe": sys.executable, "wordlists": [str(wordlist)]})
+    with pytest.raises(ValueError, match="No hashlines in"):
+        HashcatTool().launch(job, _cap(tmp_path))
 
 
 def test_launch_requires_wordlists(tmp_path):

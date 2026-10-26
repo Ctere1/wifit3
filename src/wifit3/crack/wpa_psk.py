@@ -28,7 +28,7 @@ _FT_MESSAGE_PAIRS_WITH_SNONCE_FIELD = frozenset({3, 4})
 _MESSAGE_PAIR_AP_LESS = 0x10
 _MESSAGE_PAIR_LE_ROUTER = 0x20
 _MESSAGE_PAIR_BE_ROUTER = 0x40
-_RAW_PMK_RE = re.compile(r"[0-9a-fA-F]{64}")
+RAW_PMK_RE = re.compile(r"[0-9a-fA-F]{64}")      # a PMK given in place of a passphrase
 
 
 def mic_for(psk: str, ssid: bytes, aa: bytes, spa: bytes, anonce: bytes, snonce: bytes,
@@ -133,11 +133,11 @@ def pmk_matches(pmk: bytes, line: Hc22000Line) -> bool:
     return False
 
 
-@functools.lru_cache(maxsize=1024)
-def _pmk(psk: str, essid: bytes) -> bytes:
-    return bytes.fromhex(psk) if _RAW_PMK_RE.fullmatch(psk) else derive_pmk(psk, essid)
+_derive_pmk_cached = functools.lru_cache(maxsize=1024)(derive_pmk)
 
 
 def psk_matches(psk: str, line: Hc22000Line) -> bool:
     """True if the passphrase (or 64-hex raw PMK) cracks the hashline."""
-    return pmk_matches(_pmk(psk, bytes.fromhex(line.essid)), line)
+    if RAW_PMK_RE.fullmatch(psk):
+        return pmk_matches(bytes.fromhex(psk), line)
+    return pmk_matches(_derive_pmk_cached(psk, bytes.fromhex(line.essid)), line)

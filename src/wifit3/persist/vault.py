@@ -14,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional
 
-from wifit3.crack.hc22000_format import Hc22000Line, hashline_id
+from wifit3.crack.hc22000_format import Hc22000Line, hashline_id, read_hc22000
 from wifit3.crack.wpa_psk import psk_matches
 from wifit3.models import PSK_CAPTURE_TYPES, WPS_CAPTURE_TYPES, CaptureType, PersistedCapture
 from wifit3.persist import save
@@ -278,7 +278,8 @@ class Vault:
                         write: Callable[[], Optional[SaveResult]]) -> Optional[SaveResult]:
         """Run ``write``; date its new hashlines in the .meta, check them against the saved PSKs,
         then auto-crack them when no saved PSK matches."""
-        before = self._hc_lines(ap)
+        agg_path = save.HcFiles(Path(Config.captures_dir), ap.ssid, ap.bssid).agg_path
+        before = read_hc22000(agg_path)
         was_current = load_ap_state(ap.bssid, self.persisted(ap.bssid)).status is PasswordStatus.CURRENT
         result = write()
         if result:
@@ -286,7 +287,7 @@ class Vault:
         if not (result and result.was_new):
             return result
         before_ids = {hashline_id(raw) for raw, _ in before}
-        new_lines = [(raw, line) for raw, line in self._hc_lines(ap) if hashline_id(raw) not in before_ids]
+        new_lines = [(raw, line) for raw, line in read_hc22000(agg_path) if hashline_id(raw) not in before_ids]
         if new_lines:
             record_hashlines_captured(ap.ssid, ap.bssid, [raw for raw, _ in new_lines])
             result = replace(result, matches_saved_key=self._matches_saved_key(ap, new_lines))
@@ -296,9 +297,6 @@ class Vault:
         if not result.matches_saved_key:
             self._auto_crack(ap, capture, [line for _, line in before], was_current)
         return result
-
-    def _hc_lines(self, ap: "AccessPoint") -> List[tuple[str, Hc22000Line]]:
-        return save.HcFiles(Path(Config.captures_dir), ap.ssid, ap.bssid).lines()
 
     def _matches_saved_key(self, ap: "AccessPoint", lines: List[tuple[str, Hc22000Line]]) -> Optional[bool]:
         psks = {p.value for p in self.persisted(ap.bssid) if p.type in PSK_CAPTURE_TYPES and p.value}
@@ -317,7 +315,8 @@ class Vault:
         config = tool.auto_crack_config()
         if config is None:
             return
-        after = [line for _, line in self._hc_lines(ap)]
+        agg_path = save.HcFiles(Path(Config.captures_dir), ap.ssid, ap.bssid).agg_path
+        after = [line for _, line in read_hc22000(agg_path)]
         state = load_ap_state(ap.bssid, self.persisted(ap.bssid))
         became_stale = was_current and state.status is PasswordStatus.STALE
         if not (crosses_auto_crack_threshold(before, after) or became_stale):

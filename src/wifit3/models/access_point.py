@@ -36,7 +36,8 @@ class CaptureType(StrEnum):
 
 WPS_CAPTURE_TYPES = frozenset({CaptureType.WPS_PIN, CaptureType.WPS_PBC})
 PSK_CAPTURE_TYPES = frozenset({CaptureType.WPA_PSK, *WPS_CAPTURE_TYPES})    # value is a WPA PSK
-AP_RECOVERED_CAPTURE_TYPES = frozenset({CaptureType.WEP, *WPS_CAPTURE_TYPES})    # key given up by the AP
+# A WEP key cracked from the AP's IVs, or WPS credentials the AP sent.
+AP_RECOVERED_CAPTURE_TYPES = frozenset({CaptureType.WEP, *WPS_CAPTURE_TYPES})
 
 
 @dataclass

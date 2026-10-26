@@ -41,22 +41,9 @@ class _PasswordSourceCounts:
 
 
 def _count_password_sources(capture: Optional[PersistedCapture]) -> _PasswordSourceCounts:
-    ap_ssid_passwords = None
-    if capture is not None:
-        try:
-            ap_ssid_passwords = len(capture_ssid_variants(capture.path))
-        except OSError:
-            ap_ssid_passwords = 0
     return _PasswordSourceCounts(
         default_passwords=sum(1 for _ in read_passwords(DEFAULT_PASSWORDS_PATH)),
-        ap_ssid_passwords=ap_ssid_passwords)
-
-
-def _read_exhaustion(capture: PersistedCapture) -> dict[str, Exhaustion]:
-    try:
-        return capture_exhaustion(capture)
-    except OSError:
-        return {}
+        ap_ssid_passwords=len(capture_ssid_variants(capture.path)) if capture is not None else None)
 
 
 def _file_identity(path: str | Path) -> Optional[str]:
@@ -234,7 +221,7 @@ class WordlistConfigModal(ModalScreen[dict]):
         self.query_one("#ap-ssid-passwords", Checkbox).label = (
             f"This AP's SSID variants [dim]({ap_ssid})[/dim]")
         if self._capture is not None:
-            self._exhaustion = await asyncio.to_thread(_read_exhaustion, self._capture)
+            self._exhaustion = await asyncio.to_thread(capture_exhaustion, self._capture)
             self._mark_exhausted()
 
     def _mark_exhausted(self) -> None:

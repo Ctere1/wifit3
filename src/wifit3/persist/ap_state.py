@@ -30,7 +30,6 @@ class DatedHashline:
     id: str
     raw: str
     line: Hc22000Line
-    ssid: str
     captured: tuple[int, ...]       # epoch seconds; empty when no record or pcap dates it
 
     @property
@@ -205,7 +204,7 @@ def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
             dates.setdefault(hid, set()).update(found)
 
     hashlines = {
-        hid: DatedHashline(hid, raw, line, line.ssid, tuple(sorted(dates.get(hid, ()))))
+        hid: DatedHashline(hid, raw, line, tuple(sorted(dates.get(hid, ()))))
         for hid, (raw, line) in lines.items()}
     verifications = _stored_verifications(metas)
     keys = []
@@ -229,7 +228,7 @@ def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
 def _ssid_histories(hashlines: list[DatedHashline], keys: list[Key]) -> tuple[SsidHistory, ...]:
     seen: dict[str, list[int]] = {}
     for h in hashlines:
-        seen.setdefault(h.ssid, []).extend(h.captured)
+        seen.setdefault(h.line.ssid, []).extend(h.captured)
     for key in keys:
         if key.capture.ssid and key.capture.ssid not in seen:
             seen[key.capture.ssid] = [key.capture.timestamp]

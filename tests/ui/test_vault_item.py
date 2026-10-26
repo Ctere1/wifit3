@@ -12,7 +12,7 @@ _LINE = "WPA*02*" + "0" * 32 + "*aabbccddeeff*{sta}*486f6d65*" + "a" * 64 + "*" 
 def _hashline(captured: int, sta: str = "112233445566", pair: str = "02") -> DatedHashline:
     raw = _LINE.format(sta=sta, pair=pair) + str(captured)[-2:].rjust(2, "0")
     line = parse_hc22000(_LINE.format(sta=sta, pair=pair))
-    return DatedHashline(raw, raw, line, "Home", (captured,))
+    return DatedHashline(raw, raw, line, (captured,))
 
 
 def _key(capture_type: CaptureType, value: str) -> Key:
