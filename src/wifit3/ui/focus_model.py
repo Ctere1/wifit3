@@ -20,6 +20,7 @@ from wifit3.dot11.rsn import SAE_AKM_SUITES
 from wifit3.models import CaptureType, IdKey, IdSource
 from wifit3.models.access_point import eap_only, no_passphrase
 from wifit3.ui.encryption_format import psk_capture_supported
+from wifit3.persist.ap_state import ApState, PasswordStatus
 from wifit3.persist.config import Config
 from ..campaigns.pin import WpsCampaign
 from ..campaigns.deauth import DeauthCampaign
@@ -268,6 +269,13 @@ def status_under_card() -> str:
     return ""
 
 
+def _psk_chip(psk: str, state: ApState) -> str:
+    key = state.status_key
+    if state.status is PasswordStatus.NOT_VERIFIED and key is not None and key.value == psk:
+        return f"[black bold on yellow] PSK: {escape(psk)} [/black bold on yellow] [bold yellow]NOT VERIFIED[/bold yellow]"
+    return f"[black bold on green] ✓ PSK: {escape(psk)} [/black bold on green]"
+
+
 def status_headlines(ap: AccessPoint, array: WlanArray, vault: Vault) -> list[str]:
     """The Campaign headline: up to 3 markup lines of current activity (reads the active campaign)."""
     active = Campaign.active
@@ -306,7 +314,7 @@ def status_headlines(ap: AccessPoint, array: WlanArray, vault: Vault) -> list[st
     if psk:
         tail = ("[dim]● Not yet supported: no crack path for this AKM[/dim]"
                 if unsupported else "[dim]● Listening for handshake + PMKID[/dim]")
-        return [f"[black bold on green] ✓ PSK: {escape(psk)} [/black bold on green]", tail]
+        return [_psk_chip(psk, vault.ap_state(ap.bssid)), tail]
 
     if Config.is_silenced(ap.bssid):
         return ["[dim]● Silenced[/dim]",

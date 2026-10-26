@@ -466,7 +466,13 @@ _CLIENT = "11:22:33:44:55:66"
 
 
 def _uncracked(capture) -> list[str]:
-    return Path(capture.path).read_text(encoding="utf-8").split()
+    return sorted(Path(capture.path).read_text(encoding="utf-8").split())
+
+
+def _submitted(call) -> tuple:
+    """A submit_job call with its hashlines sorted: their order follows capture dates."""
+    args, kwargs = call
+    return args, {**kwargs, "hashlines": sorted(kwargs["hashlines"])}
 
 
 def _auto_crack_call(capture, extra_passwords: list[str] | None = None) -> tuple:
@@ -482,7 +488,7 @@ def test_save_submits_cpu_crack_once_per_threshold(tmp_path, mocker):
     ap = _ap_with_hs(pmkid=b"\x11" * 16)
 
     v.save_handshake(ap, _CLIENT)
-    assert v.manager.submit_job.call_args_list == [_auto_crack_call(v.persisted(ap.bssid)[0])]
+    assert [_submitted(c) for c in v.manager.submit_job.call_args_list] == [_auto_crack_call(v.persisted(ap.bssid)[0])]
 
     ap.handshakes[_CLIENT].messages[0] = _ef(1, nonce=b"\xA1" + b"\x00" * 31,
                                              payload_mic=b"\x00" * 16)
@@ -491,7 +497,7 @@ def test_save_submits_cpu_crack_once_per_threshold(tmp_path, mocker):
 
     v.save_pmkid(ap, _CLIENT)
     assert v.manager.submit_job.call_count == 2
-    assert v.manager.submit_job.call_args == _auto_crack_call(v.persisted(ap.bssid)[0])
+    assert _submitted(v.manager.submit_job.call_args) == _auto_crack_call(v.persisted(ap.bssid)[0])
 
 
 def test_auto_crack_snapshots_probed_ssids_sorted(tmp_path, mocker):
@@ -504,7 +510,7 @@ def test_auto_crack_snapshots_probed_ssids_sorted(tmp_path, mocker):
     probed_ssids.add("Later_SSID")
 
     capture = v.persisted(_ap_with_hs().bssid)[0]
-    assert v.manager.submit_job.call_args == _auto_crack_call(capture, ["Alpha_SSID", "Zeta_SSID"])
+    assert _submitted(v.manager.submit_job.call_args) == _auto_crack_call(capture, ["Alpha_SSID", "Zeta_SSID"])
 
 
 @pytest.mark.parametrize("ticked", [True, False])

@@ -564,3 +564,19 @@ async def test_a_tall_wide_drawer_starts_key_histories_expanded_and_shows_the_ss
         drawer.query_one(_KeyRow).query_one(".collapse" if expanded else ".expand", Button).press()
         await pilot.pause()
         assert history.display is not expanded
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_a_burst_of_vault_changes_reloads_the_drawer_once(mocker):
+    app = WifiteApp()
+    async with app.run_test(size=(100, 40)) as pilot:
+        drawer = await _open_vault(app)
+        await pilot.pause()
+        vault_changed = mocker.patch.object(drawer, "vault_changed")
+
+        for bssid in ("aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02", "aa:bb:cc:dd:ee:01"):
+            app.vault.notify_changed(bssid)
+        await pilot.pause()
+
+        vault_changed.assert_called_once_with({"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"})

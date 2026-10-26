@@ -176,6 +176,15 @@ class VaultDrawer(ModalScreen):
         else:
             widget.load("", None)
 
+    def vault_changed(self, bssids: set[Optional[str]]) -> None:
+        """Reload the table, re-reading nicknames after a full refresh (None); its TableReloaded
+        reloads the item view, which repaints only when its AP's state changed."""
+        table = self.query_one("#vault-table", VaultTable)
+        if None in bssids:
+            table.reload_nicknames()
+        else:
+            table.reload_table()
+
     @on(VaultTable.TableReloaded)
     def _table_reloaded(self, event: VaultTable.TableReloaded) -> None:
         self._cancel_pending_selection()

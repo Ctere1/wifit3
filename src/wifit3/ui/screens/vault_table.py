@@ -87,7 +87,7 @@ class VaultTable(Widget):
         super().__init__(id=id)
         self._aps: Dict[str, Tuple[Optional[str], List[PersistedCapture]]] = {}
         self._nicknames: Dict[str, str] = {}
-        self._nickname_revision = -1
+        self._nicknames_stale = True
         self._current_tab = "tab-all"
         self._search_query = ""
         self._is_reloading = False
@@ -117,13 +117,13 @@ class VaultTable(Widget):
         self._is_reloading = True
         try:
             self._aps = self._group_aps()
-            if self._nickname_revision != self.app.vault.revision:
+            if self._nicknames_stale:
                 self._nicknames = {}
                 for bssid, (ssid, _) in self._aps.items():
                     nickname = read_meta(meta_path(ssid, bssid)).get("nickname")
                     if isinstance(nickname, str) and nickname:
                         self._nicknames[bssid] = nickname
-                self._nickname_revision = self.app.vault.revision
+                self._nicknames_stale = False
             table = self.query_one("#vault-aps", DataTable)
             selected_bssid = self._current_row_key(table)
             table.clear()
@@ -233,7 +233,7 @@ class VaultTable(Widget):
 
     def reload_nicknames(self) -> None:
         """Re-read every nickname from its .meta, then reload the rows."""
-        self._nickname_revision = -1
+        self._nicknames_stale = True
         self.reload_table()
 
     def _current_row_key(self, table: DataTable) -> Optional[str]:
