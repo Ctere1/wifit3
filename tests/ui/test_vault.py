@@ -78,7 +78,7 @@ async def test_toast_on_job_completion(tmp_path):
     from wifit3.models.jobs import JobState, ToolStatus
 
     def make(status, msg):
-        return JobState(job_id="j1", tool_name="hashcat", capture_path="x",
+        return JobState(job_id="j1", tool_name="hashcat", capture_path="x", hashlines_path="x",
                         status=status, progress_msg=msg, display_name="hashcat (ASUS)")
 
     app = WifiteApp()
@@ -98,7 +98,7 @@ async def test_toast_on_job_completion(tmp_path):
             assert kwargs["title"] == "hashcat (ASUS)"
 
         # A job already terminal when first seen is not announced.
-        app.active_jobs = [JobState(job_id="j2", tool_name="hashcat", capture_path="y",
+        app.active_jobs = [JobState(job_id="j2", tool_name="hashcat", capture_path="y", hashlines_path="y",
                                     status=ToolStatus.SUCCESS, progress_msg="Cracked! Key: k",
                                     display_name="hashcat (X)")]
         with patch.object(app, "notify") as notify2:
@@ -114,7 +114,7 @@ async def test_an_automatic_job_that_finds_no_key_is_not_toasted(tmp_path, statu
 
     app = WifiteApp()
     async with app.run_test():
-        job = JobState(job_id="j1", tool_name="cpu_crack", capture_path="x",
+        job = JobState(job_id="j1", tool_name="cpu_crack", capture_path="x", hashlines_path="x",
                        status=ToolStatus.RUNNING, progress_msg="Running", auto_crack=True)
         app.active_jobs = [job]
         with patch.object(app, "notify") as notify:
@@ -131,7 +131,7 @@ async def test_an_automatic_job_success_toasts_and_posts_job_cracked_to_the_scre
 
     app = WifiteApp()
     async with app.run_test():
-        job = JobState(job_id="j1", tool_name="cpu_crack", capture_path="x",
+        job = JobState(job_id="j1", tool_name="cpu_crack", capture_path="x", hashlines_path="x",
                        status=ToolStatus.RUNNING, progress_msg="Running", auto_crack=True)
         app.active_jobs = [job]
         with patch.object(app, "notify") as notify, \

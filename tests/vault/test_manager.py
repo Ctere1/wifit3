@@ -241,6 +241,64 @@ def test_crack_success_saves_the_key_under_the_ssid_of_the_line_it_cracks(manage
     manager.vault.save_wpa_psk.assert_called_once_with("Old Cafe", "00:11:22:33:44:55", "oldpass1")
 
 
+def _crack(manager, cap: PersistedCapture, hashlines: list[str], key: str) -> None:
+    manager.vault.all_captures.return_value = [cap]
+    manager.submit_job("dummy", cap, {}, hashlines)
+    manager.poll_jobs()
+    with patch.object(manager.tools["dummy"], "poll_status") as mock_poll:
+        mock_poll.return_value = ToolResult(status=ToolStatus.SUCCESS, value="Cracked!", key=key)
+        manager.poll_jobs()
+
+
+def test_a_key_that_cracks_lines_of_two_ssids_is_saved_under_both(manager):
+    from wifit3.models.access_point import CaptureType
+    cap = PersistedCapture(type=CaptureType.PMKID, timestamp=0, path="Cafe_WiFi_00-11-22-33-44-55.hc22000",
+                           bssid="00:11:22:33:44:55", ssid="Cafe_WiFi")
+
+    _crack(manager, cap, [_pmkid_line("samepass", "Cafe WiFi"), _pmkid_line("samepass", "Old Cafe")],
+           "samepass")
+
+    assert [c.args for c in manager.vault.save_wpa_psk.call_args_list] == [
+        ("Cafe WiFi", "00:11:22:33:44:55", "samepass"), ("Old Cafe", "00:11:22:33:44:55", "samepass")]
+    assert [c.args for c in manager.vault.propagate_verified_psk.call_args_list] == [
+        ("00:11:22:33:44:55", "Cafe WiFi", "samepass"), ("00:11:22:33:44:55", "Old Cafe", "samepass")]
+
+
+def test_a_key_no_line_verifies_is_saved_under_the_first_lines_ssid_not_the_filename_one(manager):
+    """hashcat's nonce-error-correction cracks lines a plain PMKID/MIC check rejects."""
+    from wifit3.models.access_point import CaptureType
+    cap = PersistedCapture(type=CaptureType.PMKID, timestamp=0, path="Cafe_WiFi_00-11-22-33-44-55.hc22000",
+                           bssid="00:11:22:33:44:55", ssid="Cafe_WiFi")
+
+    _crack(manager, cap, [_pmkid_line("newpass1", "Cafe WiFi")], "not-the-psk")
+
+    manager.vault.save_wpa_psk.assert_called_once_with("Cafe WiFi", "00:11:22:33:44:55", "not-the-psk")
+
+
+def test_reconcile_recovers_the_key_of_a_hashcat_job_from_an_older_jobs_json(tmp_path):
+    """Its hashcat was started on the capture, with the potfile beside it."""
+    from wifit3.models.access_point import CaptureType
+    capture = tmp_path / "ASUS_00-11-22-33-44-55.hc22000"
+    capture.write_text(f"{_pmkid_line('hunter22', 'ASUS')}\n", encoding="utf-8")
+    capture.with_suffix(".potfile").write_text("hash*41535553:hunter22\n", encoding="utf-8")
+    log = tmp_path / "ASUS_00-11-22-33-44-55.hashcat.log"
+    log.write_text("", encoding="utf-8")
+    (tmp_path / "jobs.json").write_text(json.dumps({"j1": {
+        "job_id": "j1", "tool_name": "hashcat", "capture_path": str(capture), "status": "RUNNING",
+        "progress_msg": "Running", "pid": 999999, "log_path": str(log),
+        "config": {"hashcat_exe": sys.executable}, "tool_state": {"wordlists": ["a.txt"]},
+    }}), encoding="utf-8")
+    vault = MagicMock()
+    vault.all_captures.return_value = [PersistedCapture(
+        type=CaptureType.PMKID, timestamp=0, path=str(capture), bssid="00:11:22:33:44:55", ssid="ASUS")]
+    manager = JobManager(vault)
+
+    manager.reconcile_on_startup()
+
+    assert manager.jobs["j1"].status == ToolStatus.SUCCESS
+    vault.save_wpa_psk.assert_called_once_with("ASUS", "00:11:22:33:44:55", "hunter22")
+
+
 def test_reconcile_resolves_dead_running_job(manager):
     from wifit3.models.access_point import CaptureType
     cap = PersistedCapture(type=CaptureType.HS, timestamp=0, path="test.pcap", bssid="00:11:22:33:44:55")
@@ -394,7 +452,7 @@ def test_a_finished_job_loaded_from_disk_can_still_be_cleared(tmp_path, mocker):
 
 def test_clearing_the_last_job_deletes_jobs_json_and_loads_as_no_jobs(tmp_path, mocker):
     manager = JobManager(MagicMock())
-    manager.jobs["j1"] = JobState(job_id="j1", tool_name="cpu_crack", capture_path="a.hc22000",
+    manager.jobs["j1"] = JobState(job_id="j1", tool_name="cpu_crack", capture_path="a.hc22000", hashlines_path="a.hc22000",
                                   status=ToolStatus.FAILURE, progress_msg="")
     manager._save()
     assert (tmp_path / "jobs.json").exists()
@@ -418,7 +476,7 @@ def test_poll_copies_the_tools_progress_onto_the_job(manager):
 
 def test_jobs_json_keeps_the_progress_fields(tmp_path, mocker):
     manager = JobManager(MagicMock())
-    manager.jobs["j1"] = JobState(job_id="j1", tool_name="cpu_crack", capture_path="a.hc22000",
+    manager.jobs["j1"] = JobState(job_id="j1", tool_name="cpu_crack", capture_path="a.hc22000", hashlines_path="a.hc22000",
                                   status=ToolStatus.SUCCESS, progress_msg="Cracked! Key: k",
                                   percent=100.0, key="k")
     manager._save()
@@ -480,19 +538,29 @@ def test_clearing_a_job_from_an_older_jobs_json_never_deletes_its_capture(tmp_pa
     assert capture.exists() and (tmp_path / "a.potfile").exists()
 
 
-def test_a_submit_in_the_same_second_as_another_job_gets_its_own_id_and_hashlines_file(manager):
+def test_jobs_submitted_back_to_back_each_get_their_own_id_and_hashlines_file(manager):
     from wifit3.models.access_point import CaptureType
     cap = PersistedCapture(type=CaptureType.HS, timestamp=0, path="a.hc22000", bssid="00:11:22:33:44:55")
-    first = manager.submit_job("dummy", cap, {}, ["WPA*02*a"])
-    now = int(time.time())
-    for second in (now, now + 1):       # whichever second the next submit lands in is taken
-        manager.jobs[f"dummy_a_{second}"] = manager.jobs[first]
+    lines = ["WPA*02*a", "WPA*02*b", "WPA*02*c"]
 
-    second_id = manager.submit_job("dummy", cap, {}, ["WPA*02*b"])
+    job_ids = [manager.submit_job("dummy", cap, {}, [line]) for line in lines]
 
-    assert second_id.endswith("_2")
-    assert pathlib.Path(manager.jobs[first].hashlines_path).read_text(encoding="utf-8") == "WPA*02*a\n"
-    assert pathlib.Path(manager.jobs[second_id].hashlines_path).read_text(encoding="utf-8") == "WPA*02*b\n"
+    assert len(set(job_ids)) == len(lines)
+    assert [pathlib.Path(manager.jobs[job_id].hashlines_path).read_text(encoding="utf-8")
+            for job_id in job_ids] == [f"{line}\n" for line in lines]
+
+
+def test_clearing_a_job_whose_file_cannot_be_removed_still_drops_the_job(tmp_path):
+    from wifit3.models.access_point import CaptureType
+    cap = PersistedCapture(type=CaptureType.HS, timestamp=0, path="a.hc22000", bssid="00:11:22:33:44:55")
+    manager = JobManager(MagicMock())
+    job_id = manager.submit_job("cpu_crack", cap, {}, ["WPA*02*a"])
+    (tmp_path / "jobs" / f"{job_id}.log").mkdir()       # unlink raises OSError on a directory
+
+    manager.clear_job(job_id)
+
+    assert job_id not in JobManager(MagicMock()).jobs
+    assert not (tmp_path / "jobs" / f"{job_id}.hc22000").exists()
 
 
 def test_a_job_saved_before_the_progress_fields_existed_still_loads(tmp_path, mocker):

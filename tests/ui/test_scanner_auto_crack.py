@@ -22,7 +22,7 @@ async def test_scanner_logs_the_key_of_a_job_cracked_message():
         scanner = await _scanner(app, pilot)
         lines: list = []
         scanner._write_log = lines.append
-        job = JobState(job_id="j1", tool_name="cpu_crack", capture_path="x",
+        job = JobState(job_id="j1", tool_name="cpu_crack", capture_path="x", hashlines_path="x",
                        status=ToolStatus.SUCCESS, progress_msg="Cracked", auto_crack=True,
                        display_name="CPU Crack (HomeNet)", key="password1")
 

@@ -1,9 +1,20 @@
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Optional
 
 from wifit3.crack.hc22000_format import Hc22000Line, read_hc22000
 from wifit3.models import PersistedCapture, ToolCapability, ToolResult
 from wifit3.models.jobs import JobAction, JobState
+from wifit3.persist.config import Config
+
+
+def jobs_dir() -> Path:
+    """Each job's own files, named ``<job_id>.<suffix>``."""
+    return Path(Config.captures_dir) / "jobs"
+
+
+def job_file(job_id: str, suffix: str) -> Path:
+    return jobs_dir() / f"{job_id}{suffix}"
 
 
 def require_hashlines(path: str) -> list[tuple[str, Hc22000Line]]:

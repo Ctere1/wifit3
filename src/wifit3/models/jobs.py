@@ -36,6 +36,7 @@ class JobState:
     job_id: str                 # tool name, capture file stem, submit time; also names the job's files
     tool_name: str
     capture_path: str           # the AP's capture the job was submitted for
+    hashlines_path: str         # the .hc22000 the tool cracks
     status: ToolStatus
     progress_msg: str           # e.g., "12% (ETA: 1h)" or error reason
     display_name: str = "Unknown Job"           # Human-readable name (e.g. "Hashcat (ASUS)")
@@ -43,7 +44,6 @@ class JobState:
     detail: str = ""                            # what the work is on, e.g. "rockyou.txt (2/3)"
     key: Optional[str] = None                   # recovered PSK; None for tools that recover none
     auto_crack: bool = False                    # submitted by auto-crack on capture, not by the user
-    hashlines_path: str = ""                    # the .hc22000 the tool cracks; capture_path if unset
     # Tool-specific tracking data (only one of these usually populated)
     pid: Optional[int] = None
     log_path: Optional[str] = None
@@ -51,9 +51,6 @@ class JobState:
     config: dict[str, Any] = field(default_factory=dict)        # launch request from the tool's modal
     tool_state: dict[str, Any] = field(default_factory=dict)    # tool-owned; no caller reads inside it
     actions: JobAction = JobAction.NONE                         # derived each poll, not persisted
-
-    def __post_init__(self) -> None:
-        self.hashlines_path = self.hashlines_path or self.capture_path
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -68,6 +65,7 @@ class JobState:
         kwargs = {k: v for k, v in data.items() if k in known}
         if "automatic" in data:
             kwargs.setdefault("auto_crack", data["automatic"])
+        kwargs.setdefault("hashlines_path", data["capture_path"])     # older jobs cracked the capture
         kwargs["status"] = ToolStatus(data["status"])
         for name in ("config", "tool_state"):
             if kwargs.get(name) is None:

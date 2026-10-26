@@ -17,7 +17,7 @@ from wifit3.persist.config import Config
 from wifit3.persist.exhaustion import (SSID_VARIANTS_IDENTITY, capture_hashline_ids,
                                      wordlist_identity)
 from wifit3.vault.tools import hashcat_keypress
-from wifit3.vault.tools.base import require_hashlines
+from wifit3.vault.tools.base import job_file, require_hashlines
 from wifit3.vault.tools.cracker import CrackerTool, WordlistQueue, capture_ssid_variants
 
 
@@ -68,6 +68,7 @@ class HashcatQueue(WordlistQueue):
     stdin_path: str = ""            # hashcat's stdin; see hashcat_keypress.send
     quit_sent_at: float = 0.0       # time.time() of the 'q' keypress
     ssid_passwords_path: str = ""   # temp wordlist of SSID passwords, deleted when the job ends
+    potfile_path: str = ""          # empty in jobs launched before it was recorded
 
     @property
     def chosen_wordlists(self) -> list[str]:
@@ -132,15 +133,14 @@ class HashcatTool(CrackerTool[HashcatQueue]):
             queue.identities.insert(ssid_passwords_index,
                                     SSID_VARIANTS_IDENTITY if essid_passwords else "")
         try:
-            potfile = self._potfile(job)
-            if os.path.exists(potfile):
-                try:
-                    logger.info(f"Removing old potfile {potfile}")
-                    os.remove(potfile)
-                except OSError:
-                    logger.warning(f"Could not remove old potfile {potfile}", exc_info=True)
-
-            job.log_path = str(Path(job.hashlines_path).with_suffix(".log").resolve())
+            potfile = job_file(job.job_id, ".potfile").resolve()
+            potfile.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                potfile.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(f"Could not remove old potfile {potfile}", exc_info=True)
+            queue.potfile_path = str(potfile)
+            job.log_path = str(job_file(job.job_id, ".log").resolve())
             Path(job.log_path).write_bytes(b"")  # one log per job, every wordlist appended to it
             self._start_wordlist(job, queue)
         except Exception:
@@ -171,7 +171,7 @@ class HashcatTool(CrackerTool[HashcatQueue]):
         cmd = [
             hashcat_exe,
             "-m", "22000",
-            "--potfile-path", self._potfile(job),
+            "--potfile-path", self._potfile(job, queue),
             "--status",
             "--status-json",
             "--status-timer", "1",
@@ -224,7 +224,7 @@ class HashcatTool(CrackerTool[HashcatQueue]):
         # The potfile is the source of truth for a recovered key. Check it FIRST, regardless of
         # liveness: hashcat sometimes hangs after printing its result, and blocking the poll until
         # the process exits froze the whole UI. If the key is there, end the process and succeed.
-        key = self._key_from_potfile(self._potfile(job))
+        key = self._key_from_potfile(self._potfile(job, queue))
         if key is not None:
             self._terminate(job.pid)
             self._remove_ssid_passwords(queue)
@@ -279,14 +279,14 @@ class HashcatTool(CrackerTool[HashcatQueue]):
         return actions
 
     @staticmethod
-    def _potfile(job: JobState) -> str:
-        """Beside the job's hashlines file, so concurrent jobs never share one."""
-        return str(Path(job.hashlines_path).resolve().with_suffix(".potfile"))
+    def _potfile(job: JobState, queue: HashcatQueue) -> str:
+        """The one recorded at launch; jobs launched before it was recorded used the capture's."""
+        return queue.potfile_path or str(Path(job.capture_path).resolve().with_suffix(".potfile"))
 
-    def _key_from_potfile(self, potfile):
+    def _key_from_potfile(self, potfile: str) -> Optional[str]:
         """The recovered passphrase from the job's potfile, or None. A line is
         ``<hash>[*<essid>]:<password>``, so the passphrase is everything after the first colon."""
-        if not potfile or not os.path.exists(potfile):
+        if not os.path.exists(potfile):
             return None
         try:
             lines = Path(potfile).read_text(encoding="utf-8", errors="replace").splitlines()

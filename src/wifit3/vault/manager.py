@@ -7,7 +7,7 @@ from typing import Callable, Dict, List, Optional
 
 from wifit3.models import PersistedCapture
 from wifit3.models.jobs import JobAction, JobState, ToolCapability, ToolStatus, ToolResult
-from wifit3.vault.tools.base import VaultTool
+from wifit3.vault.tools.base import VaultTool, job_file, jobs_dir
 from wifit3.vault.tools.cpu_crack import CpuCrackTool
 from wifit3.vault.tools.hashcat import HashcatTool
 from wifit3.vault.tools.hashtopolis import HashtopolisTool
@@ -44,10 +44,6 @@ class JobManager:
 
     def get_jobs_file(self) -> Path:
         return Path(Config.captures_dir) / "jobs.json"
-
-    def get_jobs_dir(self) -> Path:
-        """Each job's own files, named ``<job_id>.<suffix>``."""
-        return Path(Config.captures_dir) / "jobs"
 
     def _load(self) -> None:
         jobs_file = self.get_jobs_file()
@@ -123,12 +119,12 @@ class JobManager:
                    hashlines: List[str], auto_crack: bool = False) -> str:
         """Queue a job cracking ``hashlines`` of the AP's ``capture``; it launches on the next poll
         with a free slot."""
-        job_id = self._new_job_id(tool_name, capture)
-        hashlines_path = self.get_jobs_dir() / f"{job_id}.hc22000"
-        hashlines_path.parent.mkdir(parents=True, exist_ok=True)
-        hashlines_path.write_text("".join(f"{line}\n" for line in hashlines), encoding="utf-8")
-
         display_name = f"{self.tools[tool_name].label} ({capture.ssid or Path(capture.path).stem})"
+        job_id = self._new_job_id(tool_name, capture)
+        hashlines_path = job_file(job_id, ".hc22000")
+        hashlines_path.parent.mkdir(parents=True, exist_ok=True)
+        hashlines_path.write_text("".join(f"{line}\n" for line in hashlines), encoding="utf-8",
+                                  newline="\n")
 
         job = JobState(
             job_id=job_id,
@@ -241,23 +237,30 @@ class JobManager:
         return next((c for c in self.vault.all_captures() if c.path == path), None)
 
     def _persist_cracked_key(self, job: JobState, res: ToolResult, capture_for=None) -> None:
-        """A SUCCESS result carrying a recovered key is written beside its capture as a
-        vault artifact, then folded into the in-memory index."""
+        """Save a SUCCESS result's key under each SSID whose line it cracks, and pass it on to
+        related APs."""
         if res.status != ToolStatus.SUCCESS or res.key is None:
             return
         cap = capture_for(job.capture_path) if capture_for is not None else self._capture(job.capture_path)
         if not cap:
             return
-        ssid = next((line.ssid for _, line in read_hc22000(job.hashlines_path)
-                     if wpa_psk.psk_matches(res.key, line)), cap.ssid)
         try:
-            self.vault.save_wpa_psk(ssid, cap.bssid, res.key)
-            matched = self.vault.propagate_verified_psk(cap.bssid, ssid, res.key)
-            if matched:
-                logger.info(f"Recovered key also verified for {len(matched)} related APs: "
-                            f"{', '.join(matched)}")
+            for ssid in self._cracked_ssids(job, res.key, cap):
+                self.vault.save_wpa_psk(ssid, cap.bssid, res.key)
+                matched = self.vault.propagate_verified_psk(cap.bssid, ssid, res.key)
+                if matched:
+                    logger.info(f"Recovered key also verified for {len(matched)} related APs: "
+                                f"{', '.join(matched)}")
         except OSError:
             logger.exception(f"Failed to save the recovered key for {job.capture_path}")
+
+    @staticmethod
+    def _cracked_ssids(job: JobState, key: str, cap: PersistedCapture) -> list[Optional[str]]:
+        """SSIDs of the job's lines the key cracks; else the first line's SSID, then the capture's
+        (hashcat's nonce-error-correction cracks lines ``psk_matches`` rejects)."""
+        lines = [line for _, line in read_hc22000(job.hashlines_path)]
+        cracked = list(dict.fromkeys(line.ssid for line in lines if wpa_psk.psk_matches(key, line)))
+        return cracked or [next((line.ssid for line in lines if line.ssid), cap.ssid)]
 
     def stop_job(self, job_id: str) -> bool:
         """Stop a running job; it reports STOPPED once its process is gone."""
@@ -288,11 +291,14 @@ class JobManager:
         """Drop a finished job and its files in the jobs dir, and persist."""
         if self.jobs.pop(job_id, None) is None:
             return
-        jobs_dir = self.get_jobs_dir()
-        if jobs_dir.is_dir():
-            for path in jobs_dir.iterdir():
+        directory = jobs_dir()
+        if directory.is_dir():
+            for path in directory.iterdir():
                 if path.name.startswith(f"{job_id}."):
-                    path.unlink(missing_ok=True)
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning(f"Could not remove {path}", exc_info=True)
         self._save()
 
     def kill_all_running(self) -> None:

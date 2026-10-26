@@ -80,7 +80,7 @@ def _capture(tmp_path, *lines: str) -> PersistedCapture:
 
 
 def _job(capture: PersistedCapture) -> JobState:
-    return JobState(job_id="job", tool_name="hashtopolis", capture_path=capture.path,
+    return JobState(job_id="job", tool_name="hashtopolis", capture_path=capture.path, hashlines_path=capture.path,
                     status=ToolStatus.RUNNING, progress_msg="",
                     config={"wordlist_id": 1, "wordlist_name": "rockyou.txt",
                             "access_group_id": 1})

@@ -56,7 +56,7 @@ def _launch(tool: CpuCrackTool, tmp_path: Path, hashlines: list[str],
     config: dict = {"wordlists": paths, "ap_ssid_passwords": ap_ssid_passwords}
     if extra_passwords is not None:
         config["extra_passwords"] = extra_passwords
-    job = JobState(job_id=job_id, tool_name="cpu_crack", capture_path=capture_path,
+    job = JobState(job_id=job_id, tool_name="cpu_crack", capture_path=capture_path, hashlines_path=capture_path,
                    status=ToolStatus.RUNNING, progress_msg="", config=config)
     tool.launch(job, PersistedCapture(type=CaptureType.PMKID, timestamp=0, path=capture_path,
                                       bssid="fc:69:0c:15:82:64"))
@@ -291,7 +291,7 @@ def test_auto_crack_config_is_none_without_a_wordlist_or_password_source():
 
 def _launch_with(tool: CpuCrackTool, tmp_path: Path, hashlines: list[str], **config) -> JobState:
     capture_path = _write(tmp_path / "sources.hc22000", hashlines)
-    job = JobState(job_id="sources", tool_name="cpu_crack", capture_path=capture_path,
+    job = JobState(job_id="sources", tool_name="cpu_crack", capture_path=capture_path, hashlines_path=capture_path,
                    status=ToolStatus.RUNNING, progress_msg="", config={"wordlists": [], **config})
     tool.launch(job, PersistedCapture(type=CaptureType.PMKID, timestamp=0, path=capture_path,
                                       bssid="fc:69:0c:15:82:64"))
