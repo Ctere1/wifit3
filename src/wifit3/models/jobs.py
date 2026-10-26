@@ -35,7 +35,7 @@ class JobState:
     """Schema for jobs.json persistence."""
     job_id: str                 # Unique ID (tool_name + capture_path + timestamp)
     tool_name: str
-    capture_path: str
+    capture_path: str           # names the potfile and log; the hashlines when hashlines_path is unset
     status: ToolStatus
     progress_msg: str           # e.g., "12% (ETA: 1h)" or error reason
     display_name: str = "Unknown Job"           # Human-readable name (e.g. "Hashcat (ASUS)")
@@ -43,6 +43,7 @@ class JobState:
     detail: str = ""                            # what the work is on, e.g. "rockyou.txt (2/3)"
     key: Optional[str] = None                   # recovered PSK; None for tools that recover none
     auto_crack: bool = False                    # submitted by auto-crack on capture, not by the user
+    hashlines_path: Optional[str] = None        # the chosen hashlines, when not all of the capture's
     # Tool-specific tracking data (only one of these usually populated)
     pid: Optional[int] = None
     log_path: Optional[str] = None
@@ -50,6 +51,11 @@ class JobState:
     config: dict[str, Any] = field(default_factory=dict)        # launch request from the tool's modal
     tool_state: dict[str, Any] = field(default_factory=dict)    # tool-owned; no caller reads inside it
     actions: JobAction = JobAction.NONE                         # derived each poll, not persisted
+
+    @property
+    def hashlines_source(self) -> str:
+        """The .hc22000 file the tool cracks."""
+        return self.hashlines_path or self.capture_path
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

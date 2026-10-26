@@ -1,5 +1,6 @@
 import logging
 import json
+import tempfile
 import time
 from collections import Counter
 from pathlib import Path
@@ -16,6 +17,8 @@ from wifit3.persist.config import Config
 
 
 logger = logging.getLogger(__name__)
+
+_HASHLINES_DIR = Path(tempfile.gettempdir()) / "wifit3"
 
 
 def _set_actions(job: JobState, offered: JobAction) -> None:
@@ -114,9 +117,15 @@ class JobManager:
             self._save()
 
     def submit_job(self, tool_name: str, capture: PersistedCapture, config: dict,
-                   auto_crack: bool = False) -> str:
-        """Submit a job. It will be marked QUEUED and launched on the next poll if slots are free."""
+                   auto_crack: bool = False, hashlines: Optional[List[str]] = None) -> str:
+        """Submit a job, cracking ``hashlines`` when given, else the whole capture. It will be marked
+        QUEUED and launched on the next poll if slots are free."""
         job_id = f"{tool_name}_{Path(capture.path).name}_{int(time.time())}"
+        hashlines_path = None
+        if hashlines is not None:
+            hashlines_path = _HASHLINES_DIR / f"{job_id}.hc22000"
+            hashlines_path.parent.mkdir(parents=True, exist_ok=True)
+            hashlines_path.write_text("".join(f"{line}\n" for line in hashlines), encoding="utf-8")
         
         display_name = f"{self.tools[tool_name].label} ({capture.ssid or Path(capture.path).stem})"
         
@@ -129,6 +138,7 @@ class JobManager:
             progress_msg="Waiting in queue...",
             config=config,
             auto_crack=auto_crack,
+            hashlines_path=str(hashlines_path) if hashlines_path else None,
         )
         self.jobs[job_id] = job
         logger.info(f"Submitted job {job}")
@@ -217,7 +227,7 @@ class JobManager:
                next((c for c in self.vault.all_captures() if c.path == job.capture_path), None))
         if not cap:
             return
-        ssid = self._essid_from_capture(job.capture_path) or cap.ssid
+        ssid = self._essid_from_capture(job.hashlines_source) or cap.ssid
         try:
             self.vault.save_wpa_psk(ssid, cap.bssid, res.key)
             matched = self.vault.propagate_verified_psk(cap.bssid, ssid, res.key)
@@ -269,9 +279,13 @@ class JobManager:
         return True
 
     def clear_job(self, job_id: str) -> None:
-        """Drop a finished job from the list and persist."""
-        if self.jobs.pop(job_id, None) is not None:
-            self._save()
+        """Drop a finished job from the list, and its hashlines file, and persist."""
+        job = self.jobs.pop(job_id, None)
+        if job is None:
+            return
+        if job.hashlines_path:
+            Path(job.hashlines_path).unlink(missing_ok=True)
+        self._save()
 
     def kill_all_running(self) -> None:
         """Shutdown: leave ADOPTABLE tools running (re-attached next launch), kill other KILLABLE

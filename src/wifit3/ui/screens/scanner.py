@@ -28,6 +28,7 @@ from wifit3.ui.vault.global_tracker import GlobalJobTracker
 from ..capture_events import (
     CAPTURE_TOAST_TITLES, DECLOAK_METHOD_LABELS, CaptureEvent, CaptureEventDetector, CaptureKind,
 )
+from ..capture_log import saved_psk_check
 from ..encryption_format import EncryptionSummary, wep_key_ascii
 from wifit3.wlan.channels import band_ranges
 
@@ -462,7 +463,8 @@ class ScannerView(Screen):
         if save_result is not None:
             verb = "saved" if save_result.was_new else "already saved as"
             self._write_log(Text.from_markup(treelog.leaf(
-                f"[dim]({verb} {escape(save_result.path.name)})[/dim]"), emoji=False))
+                f"[dim]({verb} {escape(save_result.path.name)})[/dim]"
+                f"{saved_psk_check(save_result.matches_saved_key)}"), emoji=False))
         title = CAPTURE_TOAST_TITLES.get(ev.kind)
         if title:
             name = ev.ssid or ev.bssid

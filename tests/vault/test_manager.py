@@ -426,6 +426,23 @@ def test_submit_job_marks_an_auto_crack_job_and_jobs_json_keeps_it(tmp_path, moc
     assert loaded[manual_id].auto_crack is False
 
 
+def test_submit_job_writes_the_chosen_hashlines_and_clear_removes_them(tmp_path, mocker):
+    mocker.patch("wifit3.persist.config.Config.captures_dir", str(tmp_path))
+    mocker.patch("wifit3.vault.manager._HASHLINES_DIR", tmp_path / "chosen")
+    from wifit3.models.access_point import CaptureType
+    cap = PersistedCapture(type=CaptureType.HS, timestamp=0, path="a.hc22000", bssid="00:11:22:33:44:55")
+    manager = JobManager(MagicMock())
+    job_id = manager.submit_job("cpu_crack", cap, {}, hashlines=["WPA*02*a", "WPA*01*b"])
+    whole_id = manager.submit_job("hashcat", cap, {})
+
+    job = JobManager(MagicMock()).jobs[job_id]
+    assert pathlib.Path(job.hashlines_source).read_text(encoding="utf-8") == "WPA*02*a\nWPA*01*b\n"
+    assert job.capture_path == "a.hc22000"
+    assert manager.jobs[whole_id].hashlines_source == "a.hc22000"
+    manager.clear_job(job_id)
+    assert not pathlib.Path(job.hashlines_source).exists()
+
+
 def test_a_job_saved_before_the_progress_fields_existed_still_loads(tmp_path, mocker):
     mocker.patch("wifit3.vault.manager.JobManager._save")
     mocker.patch("wifit3.persist.config.Config.captures_dir", str(tmp_path))

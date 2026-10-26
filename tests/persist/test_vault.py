@@ -16,7 +16,7 @@ from wifit3.crack.hc22000_format import Hc22000Line
 from wifit3.dot11.wpa import derive_pmk
 from wifit3.models import AccessPoint, CaptureType, Handshake, HandshakeMessage, ToolName
 from wifit3.persist.config import Config
-from wifit3.persist.meta import update_meta
+from wifit3.persist.meta import meta_path, read_meta, update_meta
 from wifit3.persist.vault import Vault, crosses_auto_crack_threshold
 
 
@@ -413,11 +413,15 @@ def test_threshold_prior_authorized_line_never_crosses():
 _CLIENT = "11:22:33:44:55:66"
 
 
+def _uncracked(capture) -> list[str]:
+    return Path(capture.path).read_text(encoding="utf-8").split()
+
+
 def _auto_crack_call(capture, extra_passwords: list[str] | None = None) -> tuple:
     return (("cpu_crack", capture, {"wordlists": [], "default_passwords": True,
                                     "ap_ssid_passwords": True, "probed_ssid_passwords": True,
                                     "extra_passwords": extra_passwords or []}),
-            {"auto_crack": True})
+            {"auto_crack": True, "hashlines": _uncracked(capture)})
 
 
 def test_save_submits_cpu_crack_once_per_threshold(tmp_path, mocker):
@@ -470,15 +474,39 @@ def test_save_does_not_submit_when_auto_crack_is_off(tmp_path, mocker, monkeypat
     v.manager.submit_job.assert_not_called()
 
 
-def test_save_does_not_submit_when_the_psk_is_known(tmp_path, mocker):
+def test_save_does_not_submit_when_a_known_psk_matches_the_capture(tmp_path, mocker):
     v = Vault()
     mocker.patch.object(v.manager, "submit_job")
+    mocker.patch("wifit3.persist.vault.psk_matches", return_value=True)
     ap = _ap_with_hs()
     ap.wps_pbc_psk = "knownpsk"
 
-    v.save_handshake(ap, _CLIENT)
+    result = v.save_handshake(ap, _CLIENT)
 
+    assert result.matches_saved_key is True
     v.manager.submit_job.assert_not_called()
+
+
+def test_save_submits_when_no_known_psk_matches_the_capture(tmp_path, mocker):
+    v = Vault()
+    mocker.patch.object(v.manager, "submit_job")
+    mocker.patch("wifit3.persist.vault.psk_matches", return_value=False)
+    ap = _ap_with_hs()
+    ap.wps_pbc_psk = "oldpsk"
+
+    result = v.save_handshake(ap, _CLIENT)
+
+    assert result.matches_saved_key is False
+    v.manager.submit_job.assert_called_once()
+
+
+def test_save_dates_its_new_hashlines_in_the_meta(tmp_path, mocker):
+    v = Vault()
+    mocker.patch.object(v.manager, "submit_job")
+    v.save_handshake(_ap_with_hs(), _CLIENT)
+
+    stored = read_meta(meta_path("HomeNet", "aa:bb:cc:dd:ee:ff"))["hashlines"]
+    assert len(stored) == 1 and len(next(iter(stored.values()))["captured"]) == 1
 
 
 def test_save_submits_to_the_chosen_tool_with_its_saved_settings(tmp_path, mocker, monkeypatch):
@@ -497,7 +525,7 @@ def test_save_submits_to_the_chosen_tool_with_its_saved_settings(tmp_path, mocke
                               "hashcat_args": "-w 3", "default_passwords": True,
                               "ap_ssid_passwords": True, "probed_ssid_passwords": True,
                               "extra_passwords": []}),
-        {"auto_crack": True})
+        {"auto_crack": True, "hashlines": _uncracked(capture)})
 
 
 def test_save_does_not_submit_to_an_unconfigured_tool(tmp_path, mocker, monkeypatch):

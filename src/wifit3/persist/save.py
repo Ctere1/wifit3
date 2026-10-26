@@ -29,6 +29,7 @@ class SaveResult:
     """Outcome of a save_*; was_new is False when a dedupe hit returned an existing path."""
     path: Path
     was_new: bool
+    matches_saved_key: Optional[bool] = None    # new hashlines vs saved PSKs; None: nothing to check
 
 
 def _fresh_path(captures_dir: Path, ssid: str | None, bssid: str, suffix: str) -> Path:

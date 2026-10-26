@@ -2,7 +2,7 @@
 EAPOL aggregator paints, plus the short-STA formatter shared with the Focus banners."""
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from wifit3.ui.capture_events import CaptureEvent
 
@@ -39,3 +39,13 @@ def _eapol_fields(ev: CaptureEvent) -> List[str]:
     if ev.msg_num == 4:        # conditional keystone: needs an echoed (non-zero) SNonce
         return [f"SNonce{_tick(has_nonce)}", f"MIC{_tick(has_mic)}", eapol_field]
     return []                  # unclassified (group rekey etc.): label only
+
+
+def saved_psk_check(matches_saved_key: Optional[bool]) -> str:
+    """`` saved PSK matches`` (green) or `` saved PSK doesn't match`` (orange) for a new
+    capture; empty when there was no saved PSK to check."""
+    if matches_saved_key is None:
+        return ""
+    if matches_saved_key:
+        return " [green]✓ saved PSK matches[/green]"
+    return " [orange1]✗ saved PSK doesn't match[/orange1]"

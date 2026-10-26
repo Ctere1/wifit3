@@ -10,6 +10,7 @@ import sys
 import time
 import unicodedata
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional
 
@@ -21,8 +22,10 @@ from wifit3.persist import save
 from wifit3.persist.capture_history import load_capture_index, summarize
 from wifit3.persist.common import LEGACY_CAPTURE_RE, bssid_to_dashed, safe_ssid
 from wifit3.persist.config import Config
+from wifit3.persist.crack_state import load_crack_state, psk_matches, record_hashlines_captured
 from wifit3.persist.meta import meta_path, update_meta
 from wifit3.persist.save import SaveResult
+from wifit3.vault.exhaustion import hashline_id
 from wifit3.vault.manager import JobManager
 from wifit3.wlan.sink import WlanSink
 
@@ -291,45 +294,64 @@ class Vault:
     # ----- writes (persist to disk, then fold into the cache) -----
 
     def save_handshake(self, ap: "AccessPoint", client_mac: str) -> Optional[SaveResult]:
-        before = self._hc_lines(ap)
-        result = save.save_handshake(ap, client_mac)
-        if result:
-            update_meta(ap.ssid, ap.bssid)
-        if result and result.was_new:
-            capture = PersistedCapture(
-                type=CaptureType.HS, timestamp=int(time.time()), path=str(result.path),
-                bssid=ap.bssid, ssid=ap.ssid)
-            self._insert_capture(capture)
-            self._auto_crack(ap, capture, before)
-        return result
+        return self._save_hashlines(ap, CaptureType.HS, lambda: save.save_handshake(ap, client_mac))
 
     def save_pmkid(self, ap: "AccessPoint", client_mac: str) -> Optional[SaveResult]:
-        before = self._hc_lines(ap)
-        result = save.save_pmkid(ap, client_mac)
+        return self._save_hashlines(ap, CaptureType.PMKID, lambda: save.save_pmkid(ap, client_mac))
+
+    def _save_hashlines(self, ap: "AccessPoint", kind: CaptureType,
+                        write: Callable[[], Optional[SaveResult]]) -> Optional[SaveResult]:
+        """Run ``write``; date its new hashlines in the .meta, check them against the saved PSKs,
+        then auto-crack them when no saved PSK matches."""
+        before = self._hc_raw_lines(ap)
+        result = write()
         if result:
             update_meta(ap.ssid, ap.bssid)
-        if result and result.was_new:
-            capture = PersistedCapture(
-                type=CaptureType.PMKID, timestamp=int(time.time()), path=str(result.path),
-                bssid=ap.bssid, ssid=ap.ssid)
-            self._insert_capture(capture)
-            self._auto_crack(ap, capture, before)
+        if not (result and result.was_new):
+            return result
+        before_ids = {hashline_id(raw) for raw in before}
+        new_lines = [raw for raw in self._hc_raw_lines(ap) if hashline_id(raw) not in before_ids]
+        if new_lines:
+            record_hashlines_captured(ap.ssid, ap.bssid, new_lines)
+            result = replace(result, matches_saved_key=self._matches_saved_key(ap, new_lines))
+        capture = PersistedCapture(type=kind, timestamp=int(time.time()), path=str(result.path),
+                                   bssid=ap.bssid, ssid=ap.ssid)
+        self._insert_capture(capture)
+        if not result.matches_saved_key:
+            self._auto_crack(ap, capture, [parse_hc22000(raw) for raw in before])
         return result
 
-    def _hc_lines(self, ap: "AccessPoint") -> List[Hc22000Line]:
-        return save.HcFiles(Path(Config.captures_dir), ap.ssid, ap.bssid).lines()
+    def _hc_raw_lines(self, ap: "AccessPoint") -> List[str]:
+        hc = save.HcFiles(Path(Config.captures_dir), ap.ssid, ap.bssid)
+        try:
+            text = hc.agg_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+        return [raw.strip() for raw in text.splitlines() if parse_hc22000(raw)]
+
+    def _matches_saved_key(self, ap: "AccessPoint", raw_lines: List[str]) -> Optional[bool]:
+        psks = {p.value for p in self.persisted(ap.bssid) if p.type in self._PSK_TYPES and p.value}
+        psks |= {psk for psk in (ap.wps_pbc_psk, ap.wps_pin_psk) if psk}
+        if not psks:
+            return None
+        lines = [parse_hc22000(raw) for raw in raw_lines]
+        return any(psk_matches(psk, line) for psk in psks for line in lines)
 
     def _auto_crack(self, ap: "AccessPoint", capture: PersistedCapture,
                     before: List[Hc22000Line]) -> None:
         tool = self.manager.tools.get(Config.auto_crack) if Config.auto_crack else None
-        if tool is None or self.has_psk(ap) or not tool.can_crack(capture):
+        if tool is None or not tool.can_crack(capture):
             return
         config = tool.auto_crack_config()
         if config is None:
             return
-        if crosses_auto_crack_threshold(before, self._hc_lines(ap)):
+        after = [parse_hc22000(raw) for raw in self._hc_raw_lines(ap)]
+        if not crosses_auto_crack_threshold(before, after):
+            return
+        uncracked = [h.raw for h in load_crack_state(ap.bssid, self.persisted(ap.bssid)).uncracked]
+        if uncracked:
             self.manager.submit_job(tool.name, capture, self.add_probed_ssids(config),
-                                    auto_crack=True)
+                                    auto_crack=True, hashlines=uncracked)
 
     def save_wep_key(self, ap: "AccessPoint", key: bytes) -> Optional[SaveResult]:
         result = save.save_wep_key(ap, key)

@@ -2,31 +2,53 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import subprocess
-import os
-
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional
+import time
+from itertools import groupby
+from typing import Optional
 
 from rich.markup import escape
-from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalGroup
+from textual.containers import Horizontal, Vertical, VerticalGroup, VerticalScroll
 from textual.content import Content
-from textual.events import Event
+from textual.events import Resize
+from textual.message import Message
 from textual.reactive import reactive
-from textual.screen import ModalScreen
-from textual.widgets import Button, Label, Select
+from textual.widgets import Button, Checkbox, Collapsible, Label, Rule, Static
 
 from wifit3.campaigns.pin import EMPTY_PIN_LABEL
-from wifit3.models import CaptureType, PersistedCapture
+from wifit3.models import PersistedCapture
+from wifit3.persist.crack_state import (
+    CrackState,
+    Hashline,
+    Key,
+    KeyKind,
+    PasswordStatus,
+    load_crack_state,
+    record_live_verification,
+)
 from wifit3.ui.vault.tools_ui import UI_TOOLS
+from wifit3.vault.exhaustion import exhausted_wordlist_names
 
 
 logger = logging.getLogger(__name__)
+
+_STATUS_STYLE = {
+    PasswordStatus.CURRENT: "$text-success",
+    PasswordStatus.NOT_VERIFIED: "$text-warning",
+    PasswordStatus.STALE: "#ffaf00",
+    PasswordStatus.NOT_CRACKED: "$text-error",
+}
+_KEY_CHIP_STYLE = {
+    PasswordStatus.CURRENT: "black bold on lightgreen",
+    PasswordStatus.NOT_VERIFIED: "black bold on $warning",
+    PasswordStatus.STALE: "black bold on #ffaf00",
+}
+_KEY_LABEL = {KeyKind.PSK: "PSK", KeyKind.WPS: "PIN", KeyKind.WEP: "Key"}
+_KEY_BADGE_STYLE = {KeyKind.PSK: "$text-success", KeyKind.WPS: "$text-accent", KeyKind.WEP: "$text-secondary"}
+_AUTHORIZED_TOOLTIP = "authorized: PMKID or M3/M4, the AP accepted this password"
+_CHALLENGE_TOOLTIP = "challenge: no M3/M4, could be a wrong password"
+_COMPACT_TOOL_BUTTONS_BELOW = 60
 
 
 def _hex_to_ascii(hex_key: Optional[str]) -> str:
@@ -39,320 +61,298 @@ def _hex_to_ascii(hex_key: Optional[str]) -> str:
     return raw.decode("ascii") if all(32 <= b < 127 for b in raw) else ""
 
 
-def relative_time(timestamp: int) -> str:
-    diff = int(datetime.now().timestamp() - timestamp)
-    if diff < 60: return    f"{diff} second{'' if diff == 1 else 's'} ago"
-    if diff < 3600: return  f"{diff // 60} minute{'' if diff // 60 == 1 else 's'} ago"
-    if diff < 86400: return f"{diff // 3600} hour{'' if diff // 3600 == 1 else 's'} ago"
-    return                  f"{diff // 86400} day{'' if diff // 86400 == 1 else 's'} ago"
+def key_text(key: Key) -> str:
+    """The key as the user types it: a WEP key in ASCII when printable, else hex."""
+    if key.kind == KeyKind.WEP:
+        return _hex_to_ascii(key.value) or key.value
+    if key.kind == KeyKind.WPS:
+        return key.value or EMPTY_PIN_LABEL
+    return key.value
 
 
-class ConfirmModal(ModalScreen[bool]):
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+def when(epoch: int) -> str:
+    """``today 19:37``, ``Oct 22 19:37``, ``Oct 22 2025``; ``no date`` for 0."""
+    if not epoch:
+        return "no date"
+    moment, now = time.localtime(epoch), time.localtime()
+    if moment.tm_year != now.tm_year:
+        return time.strftime("%b %d %Y", moment)
+    if moment.tm_yday == now.tm_yday:
+        return time.strftime("today %H:%M", moment)
+    return time.strftime("%b %d %H:%M", moment)
+
+
+def hashline_groups(hashlines: tuple[Hashline, ...]) -> list[list[Hashline]]:
+    """Runs of hashlines from the same minute, message pair, client and SSID."""
+    def same(h: Hashline) -> tuple:
+        return h.first_captured // 60, h.pair_label, h.client, h.ssid, h.authorized
+    return [list(group) for _, group in groupby(hashlines, same)]
+
+
+def _hashline_row(group: list[Hashline], state: CrackState) -> Content:
+    first = group[0]
+    client = f" …{first.client}" if len({h.client for h in state.hashlines}) > 1 else ""
+    verdict = "[$text-success]authorized[/]" if first.authorized else "[$text-warning]challenge[/]"
+    times = f" [dim]×{len(group)}[/]" if len(group) > 1 else ""
+    ssid = f" {escape(first.ssid)}" if len(state.ssids) > 1 else ""
+    return Content.from_markup(
+        f"[dim]{when(first.first_captured)}[/] {first.pair_label:5}{client} {verdict}{times}{ssid}")
+
+
+class _KeyRow(VerticalGroup):
     DEFAULT_CSS = """
-    ConfirmModal { align: center middle; }
-    ConfirmModal #dialog { width: 54; height: auto; border: thick $primary; background: $surface; padding: 1 2; }
-    ConfirmModal #prompt { margin-bottom: 1; }
-    ConfirmModal Horizontal { align: right middle; height: auto; }
-    ConfirmModal Button { margin-left: 1; }
-    """
-    def __init__(self, prompt: str) -> None:
-        super().__init__()
-        self._prompt = prompt
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="dialog"):
-            yield Label(Text.from_markup(self._prompt, emoji=False), id="prompt")
-            with Horizontal():
-                yield Button(Text("No"), "default", id="no")
-                yield Button(Text("Yes"), "error", id="yes")
-
-    @on(Button.Pressed, "#yes")
-    def _yes(self, event: Event) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#no")
-    def _no(self, event: Event) -> None:
-        self.dismiss(False)
-
-    def action_cancel(self) -> None:
-        self.dismiss(False)
-
-
-class _CapturePanel(VerticalGroup):
-    DEFAULT_CSS = """
-    _CapturePanel {
-        background: $surface;
-        max-width: 81;
-        border: round $primary; padding: 0 1;
-        margin-top: 1;
-    }
-
-    _CapturePanel .info-group { width: auto; height: auto; }
-    _CapturePanel .key-group { width: auto; height: auto; padding-left: 1; }
-    _CapturePanel .date { height: 1; padding-left: 1; margin-bottom: 1; }
-    _CapturePanel .key-row { width: auto; height: 1; align: left middle; }
-    _CapturePanel .key-scroll {
-        width: 100%; min-width: 0; height: auto;
-        overflow-x: auto; overflow-y: hidden;
-    }
-    _CapturePanel .key-display { width: auto; height: 1; margin-right: 3; }
-    _CapturePanel .copy-btn { min-width: 0; margin-right: 3; }
-    _CapturePanel .verify-btn { min-width: 14; }
-    _CapturePanel .tools { height: auto; margin-bottom: 1; }
-    _CapturePanel .actions { height: auto; align: left middle; }
-    _CapturePanel .spacer { width: 1fr; }
+    _KeyRow { height: auto; }
+    _KeyRow .key-line { height: 1; }
+    _KeyRow .no-toggle { width: 3; }
+    _KeyRow .key-text { width: 1fr; text-wrap: nowrap; text-overflow: ellipsis; }
+    _KeyRow Button { margin-left: 1; }
+    _KeyRow .history { height: auto; padding-left: 2; }
+    _KeyRow .history-rows { height: auto; max-height: 8; scrollbar-size-vertical: 1; }
+    _KeyRow .history-rows Static { text-wrap: nowrap; text-overflow: ellipsis; }
     """
 
-    def __init__(self, title: str, captures: List[PersistedCapture],
-                 cracked_key: Optional[str] = None) -> None:
+    def __init__(self, key: Key, state: CrackState) -> None:
         super().__init__()
-        self._title = title
-        self._cracked_key = cracked_key
-        self._by_path: Dict[str, PersistedCapture] = {}
-        self._hashline_counts: dict[str, tuple[int, int]] = {}
-        for cap in sorted(captures, key=lambda c: c.timestamp, reverse=True):
-            self._by_path.setdefault(cap.path, cap)
-            handshakes, pmkids = self._hashline_counts.get(cap.path, (0, 0))
-            if cap.type == CaptureType.HS:
-                handshakes += cap.record_count
-            elif cap.type == CaptureType.PMKID:
-                pmkids += cap.record_count
-            self._hashline_counts[cap.path] = handshakes, pmkids
-        self._files = list(self._by_path.values())
+        self.key = key
+        self._state = state
         self._verify_task: Optional[asyncio.Task] = None
-        self._selected_capture = self._files[0]
 
-    def cancel_verification(self) -> None:
-        """Cancel any running verification task on this panel."""
-        if self._verify_task is not None and not self._verify_task.done():
-            self._verify_task.cancel()
-            self._verify_task = None
+    def _history(self) -> list[tuple[int, Content, Optional[str]]]:
+        rows: list[tuple[int, Content, Optional[str]]] = [
+            (v.at, Content.from_markup(
+                f"[dim]{when(v.at)}[/] " + ("[$text-success]✓ verified live[/]" if v.correct
+                                            else "[#ffaf00]✗ rejected live[/]")), None)
+            for v in self.key.live_verifications]
+        matched = tuple(h for h in self._state.hashlines if h.id in self.key.hashline_ids)
+        for group in hashline_groups(matched):
+            tooltip = _AUTHORIZED_TOOLTIP if group[0].authorized else _CHALLENGE_TOOLTIP
+            rows.append((group[0].first_captured, _hashline_row(group, self._state), tooltip))
+        return sorted(rows, key=lambda row: row[0], reverse=True)
 
     def compose(self) -> ComposeResult:
-        n = len(self._files)
-        s = "" if n == 1 else "s"
-        if self._title == "WPS PSKs":
-            self.border_title = f"WPS ({n} PSK{s})"
-        elif self._title == "WPA PSKs":
-            self.border_title = f"WPA ({n} PSK{s})"
-        elif self._title == "WPS PINs":
-            self.border_title = f"WPS ({n} PIN{s})"
-        elif self._title == "WEP KEYs":
-            self.border_title = f"WEP ({n} Key{s})"
-        elif self._title == "HASHCAT":
-            self.border_title = f"HASHCAT ({n} .hc22000 file{s})"
-        elif self._title == "HANDSHAKE":
-            self.border_title = f"HANDSHAKE ({n} .pcap file{s})"
-        else:
-            self.border_title = f"{self._title} ({n})"
+        history = self._history()
+        with Horizontal(classes="key-line"):
+            if history:
+                yield Button("▶", compact=True, classes="toggle", tooltip="Show captures and verifications")
+            else:
+                yield Label("", classes="no-toggle")
+            yield Label(Content.from_markup(self._summary_markup()), classes="key-text")
+            yield Button("Copy", compact=True, classes="copy-btn")
+            yield Button("Verify", compact=True, variant="primary", classes="verify-btn",
+                         tooltip="Connect to the live AP and verify this key")
+        if history:
+            with Vertical(classes="history") as body:
+                body.display = False
+                with VerticalScroll(classes="history-rows"):
+                    for _, row, tooltip in history:
+                        static = Static(row)
+                        static.tooltip = tooltip
+                        yield static
 
-        newest = self._files[0]
-        yield Select(
-            [(Path(c.path).name, c.path) for c in self._files],
-            value=newest.path,
-            allow_blank=False,
-            classes="file",
-        )
+    def _summary_markup(self) -> str:
+        key = self.key
+        markup = (f"[bold {_KEY_BADGE_STYLE[key.kind]}]{key.kind.value}[/] "
+                  f"[black bold on lightgreen] {escape(key_text(key))} [/]")
+        total = len(self._state.hashlines)
+        if key.kind == KeyKind.PSK and total:
+            markup += f" [dim]({len(key.hashline_ids)}/{total} captures)[/]"
+            authorized = any(h.authorized for h in self._state.hashlines if h.id in key.hashline_ids)
+            if not authorized and not any(v.correct for v in key.live_verifications):
+                markup += " [#ffaf00]unverified[/]"
+        return markup
 
-        # Display Key or Summary
-        with HorizontalScroll(classes="key-scroll"):
-            with VerticalGroup(classes="info-group"):
-                with VerticalGroup(classes="key-group"):
-                    pass # populated on file_changed
-                yield Label(self._date_markup(newest), classes="date")
-
-        yield HorizontalScroll(classes="tools")
-        with Horizontal(classes="actions"):
-            yield Button("Open Directory", classes="open-dir")
-            yield Label("", classes="spacer")
-            yield Button("Delete", "error", classes="delete")
-
-    def on_mount(self) -> None:
-        self._update_display(self._files[0])
-
-    def _date_markup(self, cap: PersistedCapture) -> str:
-        dt = datetime.fromtimestamp(cap.timestamp).strftime("%Y-%m-%d %H:%M")
-        return f"[dim]Modified:[/] {dt} [dim]({relative_time(cap.timestamp)})[/dim]"
-
-    def _update_display(self, cap: PersistedCapture) -> None:
-        self._selected_capture = cap
-        self.query_one(".date", Label).update(self._date_markup(cap))
-
-        kg = self.query_one(".key-group")
-        kg.remove_children()
-
-        tools = self.query_one(".tools")
-        tools.remove_children()
-        crackers = [t for t in self.app.vault.manager.tools.values() if t.can_crack(cap)]
-        tools.mount_all(Button(t.label, "primary", classes=f"tool-btn launch-tool-{t.name}")
-                        for t in crackers)
-        tools.display = bool(crackers)
-
-        def _row(label: str, val: str, btn_id: str, target_type: Optional[CaptureType] = None):
-            verify_btn = Button("Verify", id=f"verify-{btn_id}", variant="primary", classes="verify-btn",
-                                compact=True, tooltip="Connect to live AP and verify credentials")
-            setattr(verify_btn, "target_type", target_type)
-            key_text = Label(
-                f"[bold dim]{label}:[/bold dim] [black bold on lightgreen] {escape(val)} [/]",
-                classes="key-display",
-            )
-            return Horizontal(
-                key_text,
-                Button("Copy", id=btn_id, classes="copy-btn", compact=True),
-                verify_btn,
-                classes="key-row",
-            )
-
-        if self._title in ("WPS PSKs", "WPA PSKs"):
-            kg.mount(_row("PSK", cap.value or "", "copy-psk", target_type=CaptureType.WPA_PSK))
-        elif self._title == "WPS PINs":
-            kg.mount(_row("WPS PIN", cap.pin or EMPTY_PIN_LABEL, "copy-pin", target_type=CaptureType.WPS_PIN))
-        elif self._title == "WEP KEYs":
-            kg.mount(_row("WEP Hex Key", cap.value or "", "copy-hex", target_type=CaptureType.WEP))
-            ascii_val = _hex_to_ascii(cap.value)
-            if ascii_val:
-                kg.mount(_row("ASCII Key", ascii_val, "copy-ascii", target_type=CaptureType.WEP))
-        elif self._title == "HASHCAT":
-            hs, pmkid = self._hashline_counts.get(cap.path, (0, 0))
-            parts = []
-            if hs: parts.append(f"{hs} handshake{'s' if hs != 1 else ''}")
-            if pmkid: parts.append(f"{pmkid} PMKID{'s' if pmkid != 1 else ''}")
-            summary = "[italic]" + (", ".join(parts) or "hashcat 22000 file") + "[/italic]"
-            if self._cracked_key:
-                summary += (f"   [black bold on lightgreen] CRACKED [/] Key: "
-                            f"[black bold on cyan] {escape(self._cracked_key)} [/]")
-            kg.mount(Label(summary, classes="key-display"))
-        elif self._title == "HANDSHAKE":
-            kg.mount(Label("[italic]raw .pcap capture[/italic]", classes="key-display"))
-
-    @on(Select.Changed)
-    def _file_changed(self, event: Select.Changed) -> None:
-        self.cancel_verification()
-        cap = self._by_path.get(event.value)
-        if cap:
-            self._update_display(cap)
+    @on(Button.Pressed, ".toggle")
+    def _toggle(self, event: Button.Pressed) -> None:
+        event.stop()
+        body = self.query_one(".history")
+        body.display = not body.display
+        event.button.label = "▼" if body.display else "▶"
 
     @on(Button.Pressed, ".copy-btn")
     def _copy(self, event: Button.Pressed) -> None:
         event.stop()
-        cap = self._by_path.get(self.query_one(Select).value)
-        if not cap: return
-
-        btn_id = event.button.id
-        text = ""
-        if btn_id == "copy-psk": text = cap.value or ""
-        elif btn_id == "copy-pin": text = cap.pin or ""
-        elif btn_id == "copy-hex": text = cap.value or ""
-        elif btn_id == "copy-ascii": text = _hex_to_ascii(cap.value)
-
-        if not text:
-            self.notify("Nothing to copy for this entry", severity="warning")
-            return
-        self.app.copy_to_clipboard(text)
+        self.app.copy_to_clipboard(key_text(self.key))
         self.notify("Copied to clipboard")
+
+    def cancel_verification(self) -> None:
+        if self._verify_task is not None and not self._verify_task.done():
+            self._verify_task.cancel()
+            self._verify_task = None
 
     @on(Button.Pressed, ".verify-btn")
     def _verify(self, event: Button.Pressed) -> None:
         event.stop()
-        cap = self._by_path.get(self.query_one(Select).value)
-        if not cap:
-            return
-        btn = event.button
         self.cancel_verification()
-        target_type = getattr(btn, "target_type", None)
-        self._verify_task = asyncio.create_task(self._run_verify(cap, btn, target_type))
+        self._verify_task = asyncio.create_task(self._run_verify(event.button))
 
-    async def _run_verify(self, cap: PersistedCapture, btn: Button, target_type: Optional[CaptureType]) -> None:
+    async def _run_verify(self, button: Button) -> None:
         from wifit3.campaigns.live_check import LiveKeyVerifier, VerifyStatus
 
-        btn.disabled = True
-        btn.label = "Verifying…"
-        verifier = LiveKeyVerifier()
+        button.disabled = True
+        button.label = "Verifying…"
         try:
-            res = await verifier.verify_credential(cap, self.app.array, target_type=target_type)
-            if res.status == VerifyStatus.SUCCESS:
-                self.notify(res.body, title=res.title, severity="information")
-            elif res.status == VerifyStatus.INCORRECT:
-                self.notify(res.body, title=res.title, severity="warning")
-            else:
-                self.notify(res.body, title=res.title, severity="error")
+            res = await LiveKeyVerifier().verify_credential(
+                self.key.capture, self.app.array, target_type=self.key.verify_type)
+            if res.status in (VerifyStatus.SUCCESS, VerifyStatus.INCORRECT):
+                record_live_verification(self.key, correct=res.status == VerifyStatus.SUCCESS)
+            severity = {VerifyStatus.SUCCESS: "information",
+                        VerifyStatus.INCORRECT: "warning"}.get(res.status, "error")
+            self.notify(res.body, title=res.title, severity=severity)
+            if res.status in (VerifyStatus.SUCCESS, VerifyStatus.INCORRECT):
+                self.app.vault.refresh()
         except asyncio.CancelledError:
             pass
         except Exception as exc:
             logger.exception("Error during live verification")
             self.notify(f"Verification error: {exc}", title="Verify", severity="error")
         finally:
-            btn.label = "Verify"
-            btn.disabled = False
+            button.label = "Verify"
+            button.disabled = False
 
-    @on(Button.Pressed, ".delete")
-    def _delete(self, event: Button.Pressed) -> None:
-        event.stop()
-        cap = self._by_path.get(self.query_one(Select).value)
-        if not cap:
+
+class AddKeyPressed(Message):
+    """The user asked to add a key to the AP in view."""
+
+
+class _CapturePanel(VerticalGroup):
+    DEFAULT_CSS = """
+    _CapturePanel { height: auto; max-width: 81; }
+    _CapturePanel Rule.-horizontal { margin: 0; color: $panel-lighten-2; }
+    _CapturePanel .status { width: 100%; text-align: center; }
+    _CapturePanel .section-line { height: 1; }
+    _CapturePanel .section { text-style: bold; color: $text-muted; width: auto; margin-right: 2; }
+    _CapturePanel .ssid { width: 1fr; text-wrap: nowrap; text-overflow: ellipsis; }
+    _CapturePanel .dates { width: auto; color: $text-muted; margin-left: 1; }
+    _CapturePanel Collapsible { padding: 0; border: none; background: transparent; }
+    _CapturePanel Collapsible > Contents { padding: 0 0 0 2; }
+    _CapturePanel .none-yet { color: $text-muted; padding-left: 2; }
+    _CapturePanel .tools { height: auto; }
+    _CapturePanel .tools Button { margin-right: 1; }
+    _CapturePanel .selected-count, _CapturePanel .exhausted { color: $text-muted; }
+    _CapturePanel .uncracked { height: auto; max-height: 8; scrollbar-size-vertical: 1; }
+    _CapturePanel Checkbox { width: 100%; }
+    """
+
+    def __init__(self, state: CrackState) -> None:
+        super().__init__()
+        self._state = state
+        self._groups = hashline_groups(state.uncracked)
+
+    def compose(self) -> ComposeResult:
+        state = self._state
+        yield Static(Content.from_markup(self._status_markup()), classes="status")
+        yield Rule()
+        yield from self._compose_ssids()
+        yield Rule()
+        with Horizontal(classes="section-line"):
+            yield Label("KEYS", classes="section")
+            yield Button("Add key", compact=True, classes="add-key", tooltip="Add a PSK, WPS PIN or WEP key")
+        for key in state.keys:
+            yield _KeyRow(key, state)
+        if not state.keys:
+            yield Label("none yet", classes="none-yet")
+        if state.uncracked:
+            yield Rule()
+            yield from self._compose_uncracked()
+
+    def _status_markup(self) -> str:
+        state = self._state
+        status = (f"[bold {_STATUS_STYLE[state.status]}]{state.status.value}[/]")
+        key = state.status_key
+        if key is None:
+            return status
+        chip = f"[{_KEY_CHIP_STYLE[state.status]}] {_KEY_LABEL[key.kind]}: {escape(key_text(key))} [/]"
+        return f"{chip} {status}"
+
+    def _compose_ssids(self) -> ComposeResult:
+        ssids = self._state.ssids
+        if len(ssids) <= 1:
+            with Horizontal(classes="section-line"):
+                yield Label("SSID", classes="section")
+                yield Label(escape(ssids[0].ssid) if ssids else "‹hidden›", classes="ssid")
             return
+        with Collapsible(title=f"SSIDs ({len(ssids)}): {ssids[0].ssid}", collapsed=True):
+            for i, span in enumerate(ssids):
+                with Horizontal(classes="section-line"):
+                    yield Label(escape(span.ssid), classes="ssid")
+                    if i:
+                        yield Label(f"{when(span.first_seen)} → {when(span.last_seen)}", classes="dates")
 
-        def after(confirmed: bool | None) -> None:
-            if not confirmed:
-                return
-            try:
-                logger.info(f"Deleting {cap}")
-                self.app.vault.delete_capture(cap)
-            except OSError as exc:
-                logger.error(f"Could not remove {Path(cap.path).name}: {exc}")
-                self.notify(f"Could not remove {Path(cap.path).name}: {exc}", severity="error")
-                return
-            self.notify(f"Removed {Path(cap.path).name}")
+    def _compose_uncracked(self) -> ComposeResult:
+        state = self._state
+        uncracked = state.uncracked
+        with Horizontal(classes="section-line"):
+            yield Label("UNCRACKED", classes="section")
+            yield Label(f"[dim]({len(uncracked)}/{len(state.hashlines)} captures)[/]")
+        capture = state.hashline_capture
+        crackers = [t for t in self.app.vault.manager.tools.values() if capture and t.can_crack(capture)]
+        with Horizontal(classes="tools"):
+            for tool in crackers:
+                yield Button(tool.label, "primary", classes=f"tool-btn launch-tool-{tool.name}")
+        yield Label(self._selected_markup(len(uncracked)), classes="selected-count")
+        exhausted = exhausted_wordlist_names(state.bssid, [h.id for h in uncracked])
+        if exhausted:
+            names = [name if count == len(uncracked) else f"{name} ({count}/{len(uncracked)})"
+                     for name, count in exhausted.items()]
+            yield Static(f"exhausted: {escape(', '.join(names))}", classes="exhausted")
+        with VerticalScroll(classes="uncracked"):
+            for i, group in enumerate(self._groups):
+                tooltip = _AUTHORIZED_TOOLTIP if group[0].authorized else _CHALLENGE_TOOLTIP
+                yield Checkbox(_hashline_row(group, state), True, compact=True, id=f"hashlines-{i}",
+                               tooltip=tooltip)
 
-        self.app.push_screen(ConfirmModal(f"Delete [bold]{escape(Path(cap.path).name)}[/]?"), after)
+    @staticmethod
+    def _selected_markup(count: int) -> str:
+        return f"{count} capture{'' if count == 1 else 's'} selected to crack"
+
+    def _selected_hashlines(self) -> list[str]:
+        return [h.raw for i, group in enumerate(self._groups)
+                if self.query_one(f"#hashlines-{i}", Checkbox).value for h in group]
+
+    def on_resize(self, event: Resize) -> None:
+        for button in self.query(".tool-btn").results(Button):
+            button.compact = event.size.width < _COMPACT_TOOL_BUTTONS_BELOW
+
+    @on(Checkbox.Changed)
+    def _selection_changed(self, event: Checkbox.Changed) -> None:
+        count = len(self._selected_hashlines())
+        self.query_one(".selected-count", Label).update(self._selected_markup(count))
+        for button in self.query(".tool-btn").results(Button):
+            button.disabled = count == 0
+
+    def cancel_verification(self) -> None:
+        for row in self.query(_KeyRow):
+            row.cancel_verification()
+
+    @on(Button.Pressed, ".add-key")
+    def _add_key(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.post_message(AddKeyPressed())
 
     @on(Button.Pressed, ".tool-btn")
     def _launch_tool(self, event: Button.Pressed) -> None:
         event.stop()
-        selected_file = self.query_one(Select).value
-        cap = self._by_path.get(selected_file)
-        if not cap:
-            logger.warning(f"Unable to launch tool for {selected_file}: Not found in index")
+        capture = self._state.hashline_capture
+        tool_name = next((c.removeprefix("launch-tool-") for c in event.button.classes
+                          if c.startswith("launch-tool-")), None)
+        if capture is None or tool_name is None:
             return
-
-        tool_name = next((c.replace("launch-tool-", "") for c in event.button.classes if c.startswith("launch-tool-")), None)
-        if not tool_name:
-            return
-
         modal_cls = UI_TOOLS.get(tool_name)
         if not modal_cls:
             logger.error(f"Unable to launch tool: No entry in UI_TOOLS for {tool_name}")
             self.notify(f"No UI configured for tool: {tool_name}", severity="error")
             return
+        hashlines = self._selected_hashlines()
 
         def _on_config(config: dict | None) -> None:
             if not config:
                 return
             job_id = self.app.vault.manager.submit_job(
-                tool_name, cap, self.app.vault.add_probed_ssids(config))
+                tool_name, capture, self.app.vault.add_probed_ssids(config), hashlines=hashlines)
             self.notify(f"Queued job: {job_id}")
 
-        self.app.push_screen(modal_cls(capture=cap, probed_ssids=self.app.vault.probed_ssids()),
+        self.app.push_screen(modal_cls(capture=capture, probed_ssids=self.app.vault.probed_ssids()),
                              _on_config)
-
-    @on(Button.Pressed, ".open-dir")
-    def _open_dir(self, event: Button.Pressed) -> None:
-        event.stop()
-        selected_file = self.query_one(Select).value
-        cap = self._by_path.get(selected_file)
-        if not cap:
-            logger.warning(f"Unable to open directory, {selected_file} not found in index")
-            return
-        try:
-            path = os.path.normpath(Path(cap.path).resolve())
-            if os.name == 'nt':
-                subprocess.Popen(['explorer.exe', '/select,', path])
-            else:
-                subprocess.Popen(['xdg-open', str(Path(path).parent)])
-        except Exception as exc:
-            logger.error(f"Failed to open directory for {cap}", exc)
-            self.notify(f"Failed to open directory: {exc}", severity="error")
 
 
 class VaultItemView(Vertical):
@@ -376,11 +376,11 @@ class VaultItemView(Vertical):
     _state: reactive[tuple] = reactive(("", None, ()), recompose=True)
 
     def cancel_verification(self) -> None:
-        """Cancel any running verification tasks on active capture panels."""
+        """Cancel any running live verification."""
         for panel in self.query(_CapturePanel):
             panel.cancel_verification()
 
-    def load(self, bssid: str, ssid: Optional[str], captures: List[PersistedCapture]) -> None:
+    def load(self, bssid: str, ssid: Optional[str], captures: list[PersistedCapture]) -> None:
         self.cancel_verification()
         self._state = (bssid, ssid, tuple(captures))
 
@@ -395,16 +395,4 @@ class VaultItemView(Vertical):
         title = Content.from_markup(f"[$background bold on $primary] {escape(name)} [/]")
         title = title.append(Content.from_text(f" ({bssid}) "))
         self.border_title = title
-
-        groups = {
-            "HANDSHAKE": [c for c in captures if c.path.endswith(".pcap")],
-            "HASHCAT": [c for c in captures if c.path.endswith(".hc22000")],
-            "WPA PSKs": [c for c in captures if c.type == CaptureType.WPA_PSK and c.value],
-            "WPS PSKs": [c for c in captures if c.type in (CaptureType.WPS_PIN, CaptureType.WPS_PBC) and c.value],
-            "WPS PINs": [c for c in captures if c.type == CaptureType.WPS_PIN and c.pin is not None],
-            "WEP KEYs": [c for c in captures if c.type == CaptureType.WEP],
-        }
-        cracked_key = next((c.value for c in captures if c.type == CaptureType.WPA_PSK and c.value), None)
-        for title, group in groups.items():
-            if group:
-                yield _CapturePanel(title, group, cracked_key=cracked_key if title == "HASHCAT" else None)
+        yield _CapturePanel(load_crack_state(bssid, list(captures)))

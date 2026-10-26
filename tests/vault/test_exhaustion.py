@@ -3,8 +3,10 @@ import time
 
 from wifit3.models import CaptureType, PersistedCapture
 from wifit3.persist.meta import meta_path, read_meta, update_meta
+from wifit3.persist.config import Config
 from wifit3.vault.exhaustion import (Exhaustion, capture_exhaustion, capture_hashline_ids,
-                                     hashline_id, record_exhausted, wordlist_identity)
+                                     exhausted_wordlist_names, hashline_id, record_exhausted,
+                                     wordlist_identity)
 
 _BSSID = "02:00:00:00:00:01"
 _LINE_A = f"WPA*01*{'aa' * 16}*020000000001*020000000002*486f6d65***"
@@ -39,9 +41,9 @@ def test_exhaustion_counts_the_captures_current_hashlines_and_keeps_the_latest(t
     update_meta("Home Net", _BSSID, nickname="den",
                 exhausted={"9:100": {hashline_id(_LINE_A): 1_000, hashline_id(_LINE_B): future}})
     before = int(time.time())
-    record_exhausted("Home_Net", _BSSID, "9:100", [hashline_id(_LINE_A), hashline_id(_LINE_B)])
-    record_exhausted("Home_Net", _BSSID, "8:200", [hashline_id(_LINE_A), hashline_id("WPA*gone")])
-    record_exhausted("Home_Net", _BSSID, "ssid-variants:v1", [])
+    record_exhausted("Home_Net", _BSSID, "9:100", "a.txt", [hashline_id(_LINE_A), hashline_id(_LINE_B)])
+    record_exhausted("Home_Net", _BSSID, "8:200", "b.txt", [hashline_id(_LINE_A), hashline_id("WPA*gone")])
+    record_exhausted("Home_Net", _BSSID, "ssid-variants:v1", "SSID variants", [])
 
     found = capture_exhaustion(capture)
     assert found["9:100"] == Exhaustion(2, 2, future)
@@ -50,3 +52,16 @@ def test_exhaustion_counts_the_captures_current_hashlines_and_keeps_the_latest(t
     meta = read_meta(meta_path("Home_Net", _BSSID))
     assert (meta["ssid"], meta["nickname"]) == ("Home Net", "den")
     assert meta["exhausted"]["9:100"][hashline_id(_LINE_A)] >= before
+
+
+def test_exhausted_wordlist_names_merge_every_ssid_and_name_old_records(tmp_path, monkeypatch):
+    configured = tmp_path / "rockyou.txt"
+    configured.write_bytes(b"password\n")
+    monkeypatch.setattr(Config.hashcat, "wordlists", [str(configured)])
+    a, b = hashline_id(_LINE_A), hashline_id(_LINE_B)
+    record_exhausted("Old", _BSSID, "9:100", "a.txt", [a])
+    record_exhausted("New", _BSSID, "9:100", "a-copy.txt", [b])
+    update_meta("New", _BSSID, exhausted={"9:100": {b: 1}, wordlist_identity(configured): {b: 1}})
+
+    assert exhausted_wordlist_names(_BSSID, [a, b]) == {"a-copy.txt / a.txt": 2, "rockyou.txt": 1}
+    assert exhausted_wordlist_names(_BSSID, [hashline_id("WPA*other")]) == {}

@@ -61,7 +61,7 @@ from ... import focus_model as fm
 from ...capture_events import (
     CAPTURE_TOAST_TITLES, DECLOAK_METHOD_LABELS, CaptureEvent, CaptureEventDetector, CaptureKind,
 )
-from ...capture_log import short_sta
+from ...capture_log import saved_psk_check, short_sta
 from ...eapol_aggregate import EapolAggregator
 from ... import pmkid_log
 from ...encryption_format import wep_key_ascii
@@ -126,7 +126,8 @@ def _save_line(result) -> str:
     name = result.path.name
     m = _FILENAME_MIDDLE.search(name)
     short = f"{name[:m.start()]}_…_{name[m.end():]}" if m else name
-    return f"[dim]{verb}: {escape(str(Path(Config.captures_dir) / short))}[/dim]"
+    return (f"[dim]{verb}: {escape(str(Path(Config.captures_dir) / short))}[/dim]"
+            f"{saved_psk_check(result.matches_saved_key)}")
 
 
 def _wep_key_chip(key_hex) -> str:

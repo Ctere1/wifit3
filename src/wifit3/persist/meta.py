@@ -14,6 +14,11 @@ def meta_path(ssid: Optional[str], bssid: str) -> Path:
     return Path(Config.captures_dir) / f"{safe_ssid(ssid)}_{bssid_to_dashed(bssid)}.meta"
 
 
+def bssid_meta_paths(bssid: str) -> list[Path]:
+    """Every SSID's .meta for this BSSID."""
+    return sorted(Path(Config.captures_dir).glob(f"*_{bssid_to_dashed(bssid)}.meta"))
+
+
 def read_meta(path: Path) -> dict[str, Any]:
     """The file's JSON object, or an empty dict when missing or invalid."""
     try:

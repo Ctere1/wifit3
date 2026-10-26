@@ -115,14 +115,14 @@ class HashcatTool(CrackerTool[HashcatQueue]):
         if job.config.get("default_passwords"):
             wordlists.insert(0, str(DEFAULT_PASSWORDS_PATH.resolve()))
         wordlists = list(dict.fromkeys(wordlists))
-        essid_passwords = (capture_ssid_variants(job.capture_path)
+        essid_passwords = (capture_ssid_variants(job.hashlines_source)
                            if job.config.get("ap_ssid_passwords") else [])
         ssid_based_passwords = list(dict.fromkeys(
             essid_passwords + ssid_passwords(job.config.get("extra_passwords", []))))
         if not (ssid_based_passwords or wordlists):
             raise ValueError("No passwords to try: choose a wordlist or a password source")
         queue = HashcatQueue(wordlists=wordlists, ssid=capture.ssid or "", bssid=capture.bssid,
-                             hashline_ids=capture_hashline_ids(job.capture_path),
+                             hashline_ids=capture_hashline_ids(job.hashlines_source),
                              identities=[wordlist_identity(path) for path in wordlists])
         if ssid_based_passwords:
             ssid_passwords_index = 1 if job.config.get("default_passwords") else 0
@@ -175,7 +175,7 @@ class HashcatTool(CrackerTool[HashcatQueue]):
             "--status-json",
             "--status-timer", "1",
             *_split_args(job.config.get("hashcat_args") or ""),
-            str(Path(job.capture_path).resolve()),
+            str(Path(job.hashlines_source).resolve()),
             str(queue.current),
         ]
 

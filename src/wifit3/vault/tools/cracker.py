@@ -8,7 +8,7 @@ from wifit3.crack.hc22000_format import parse_hc22000
 from wifit3.crack.passwords import ssid_variants
 from wifit3.models import PersistedCapture, ToolResult, ToolStatus
 from wifit3.models.jobs import JobAction, JobState
-from wifit3.vault.exhaustion import record_exhausted
+from wifit3.vault.exhaustion import SSID_VARIANTS_IDENTITY, SSID_VARIANTS_NAME, record_exhausted
 from wifit3.vault.tools.base import VaultTool
 
 logger = logging.getLogger(__name__)
@@ -163,8 +163,9 @@ class CrackerTool(VaultTool, Generic[QueueT]):
     @staticmethod
     def _record_exhausted(queue: WordlistQueue) -> None:
         for identity in filter(None, queue.identities[queue.index:queue.index + 1]):
+            name = SSID_VARIANTS_NAME if identity == SSID_VARIANTS_IDENTITY else queue.current_name
             try:
-                record_exhausted(queue.ssid or None, queue.bssid, identity, queue.hashline_ids)
+                record_exhausted(queue.ssid or None, queue.bssid, identity, name, queue.hashline_ids)
             except OSError:
                 logger.warning(f"Could not record {identity} as exhausted", exc_info=True)
 

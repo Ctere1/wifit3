@@ -8,7 +8,7 @@ from textual import events, on, work
 from textual.binding import Binding
 
 from .vault_table import VaultTable
-from .vault_item import VaultItemView
+from .vault_item import AddKeyPressed, VaultItemView
 from wifit3.models import AccessPoint, CaptureType
 from wifit3.persist.meta import meta_path, read_meta, update_meta
 from wifit3.ui.vault.job_pane import JobTrackerPane
@@ -63,6 +63,8 @@ class VaultDrawer(ModalScreen):
     VaultDrawer.open #vault-content {
         offset-y: 0%;
     }
+    VaultDrawer #vault-item Button.-textual-compact { min-width: 0; margin-right: 0; }
+    VaultDrawer #vault-item Button.toggle { width: 3; background: transparent; }
     """
 
     def __init__(self, preselected_bssid: Optional[str] = None) -> None:
@@ -214,6 +216,10 @@ class VaultDrawer(ModalScreen):
 
         self.app.push_screen(NicknameModal(ssid, current), _save)
 
+    @on(AddKeyPressed)
+    def _add_key_pressed(self, event: AddKeyPressed) -> None:
+        self.action_add_credential()
+
     def action_add_credential(self) -> None:
         ssid, bssid = self._selected_network()
         self.app.push_screen(AddCredentialModal(ssid or "", bssid), self._credential_added)
@@ -227,8 +233,8 @@ class VaultDrawer(ModalScreen):
         try:
             if credential.kind == CaptureType.WPA_PSK:
                 verification = vault.verify_wpa_psk(ap.bssid, credential.value)
-                if verification is False:
-                    self.notify("PSK does not match the saved handshake", severity="error")
+                if verification is not True and (vault.has_handshake(ap) or vault.has_pmkid(ap)):
+                    self.notify("PSK does not match any saved capture", severity="error")
                     return
                 verified = verification is True
                 result = vault.save_wpa_psk(ap.ssid, ap.bssid, credential.value)
