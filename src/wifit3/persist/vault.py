@@ -22,7 +22,12 @@ from wifit3.persist import save
 from wifit3.persist.capture_history import load_capture_index, summarize
 from wifit3.persist.common import LEGACY_CAPTURE_RE, bssid_to_dashed, safe_ssid
 from wifit3.persist.config import Config
-from wifit3.persist.crack_state import load_crack_state, psk_matches, record_hashlines_captured
+from wifit3.persist.crack_state import (
+    PasswordStatus,
+    load_crack_state,
+    psk_matches,
+    record_hashlines_captured,
+)
 from wifit3.persist.meta import meta_path, update_meta
 from wifit3.persist.save import SaveResult
 from wifit3.vault.exhaustion import hashline_id
@@ -304,6 +309,7 @@ class Vault:
         """Run ``write``; date its new hashlines in the .meta, check them against the saved PSKs,
         then auto-crack them when no saved PSK matches."""
         before = self._hc_raw_lines(ap)
+        was_current = load_crack_state(ap.bssid, self.persisted(ap.bssid)).status is PasswordStatus.CURRENT
         result = write()
         if result:
             update_meta(ap.ssid, ap.bssid)
@@ -318,7 +324,7 @@ class Vault:
                                    bssid=ap.bssid, ssid=ap.ssid)
         self._insert_capture(capture)
         if not result.matches_saved_key:
-            self._auto_crack(ap, capture, [parse_hc22000(raw) for raw in before])
+            self._auto_crack(ap, capture, [parse_hc22000(raw) for raw in before], was_current)
         return result
 
     def _hc_raw_lines(self, ap: "AccessPoint") -> List[str]:
@@ -338,7 +344,9 @@ class Vault:
         return any(psk_matches(psk, line) for psk in psks for line in lines)
 
     def _auto_crack(self, ap: "AccessPoint", capture: PersistedCapture,
-                    before: List[Hc22000Line]) -> None:
+                    before: List[Hc22000Line], was_current: bool) -> None:
+        """Crack the uncracked hashlines when the save crossed the auto-crack threshold, or turned a
+        current password stale."""
         tool = self.manager.tools.get(Config.auto_crack) if Config.auto_crack else None
         if tool is None or not tool.can_crack(capture):
             return
@@ -346,9 +354,11 @@ class Vault:
         if config is None:
             return
         after = [parse_hc22000(raw) for raw in self._hc_raw_lines(ap)]
-        if not crosses_auto_crack_threshold(before, after):
+        state = load_crack_state(ap.bssid, self.persisted(ap.bssid))
+        became_stale = was_current and state.status is PasswordStatus.STALE
+        if not (crosses_auto_crack_threshold(before, after) or became_stale):
             return
-        uncracked = [h.raw for h in load_crack_state(ap.bssid, self.persisted(ap.bssid)).uncracked]
+        uncracked = [h.raw for h in state.uncracked]
         if uncracked:
             self.manager.submit_job(tool.name, capture, self.add_probed_ssids(config),
                                     auto_crack=True, hashlines=uncracked)
