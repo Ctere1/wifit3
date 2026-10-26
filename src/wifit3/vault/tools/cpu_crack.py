@@ -75,7 +75,7 @@ def _lines_by_essid(capture_path: str) -> dict[bytes, list[Hc22000Line]]:
 def _ap_ssid_variants(job: JobState) -> list[str]:
     if not job.config.get("ap_ssid_passwords", True):
         return []
-    return capture_ssid_variants(job.hashlines_source)
+    return capture_ssid_variants(job.hashlines_path)
 
 
 def _ssid_passwords(job: JobState, ap_ssid_variants: list[str]) -> list[str]:
@@ -111,9 +111,9 @@ class CpuCrackTool(CrackerTool[CpuCrackQueue]):
         if job.config.get("default_passwords"):
             wordlists.insert(0, str(DEFAULT_PASSWORDS_PATH.resolve()))
         wordlists = list(dict.fromkeys(wordlists))
-        require_hashlines(job.hashlines_source)
+        require_hashlines(job.hashlines_path)
         queue = CpuCrackQueue(wordlists=wordlists, ssid=capture.ssid or "", bssid=capture.bssid,
-                              hashline_ids=capture_hashline_ids(job.hashlines_source),
+                              hashline_ids=capture_hashline_ids(job.hashlines_path),
                               identities=[wordlist_identity(path) for path in wordlists])
         ap_ssid_variants = _ap_ssid_variants(job)
         if _ssid_passwords(job, ap_ssid_variants):
@@ -125,7 +125,7 @@ class CpuCrackTool(CrackerTool[CpuCrackQueue]):
         self._start_wordlist(job, queue)
 
     def _start_wordlist(self, job: JobState, queue: CpuCrackQueue) -> None:
-        lines_by_essid = _lines_by_essid(job.hashlines_source)
+        lines_by_essid = _lines_by_essid(job.hashlines_path)
         run = _WordlistRun(
             wordlist=Path(queue.current) if queue.current else None,
             ssid_passwords=(_ssid_passwords(job, _ap_ssid_variants(job))

@@ -607,12 +607,32 @@ def test_launch_truncates_the_log_so_one_job_owns_one_log(tmp_path, mocker):
     wordlist.write_text("one\n")
     _fake_spawn(mocker)
     job = _queued_job(tmp_path, [wordlist])
-    log = tmp_path / "a.hashcat.log"
+    log = tmp_path / "a.log"
     log.write_text("output from a previous job\n")
 
     HashcatTool().launch(job, _cap(tmp_path))
 
     assert "previous job" not in Path(job.log_path).read_text(encoding="utf-8")
+
+
+def test_two_jobs_on_one_capture_get_their_own_potfile_and_log(tmp_path, mocker):
+    wordlist = tmp_path / "a.txt"
+    wordlist.write_text("one\n")
+    spawn = _fake_spawn(mocker)
+    jobs_dir = tmp_path / "jobs"
+    jobs_dir.mkdir()
+    launched = []
+    for job_id in ("first", "second"):
+        hashlines = jobs_dir / f"{job_id}.hc22000"
+        hashlines.write_text(f"{_PMKID_LINE}\n")
+        job = _queued_job(tmp_path, [wordlist])
+        job.hashlines_path = str(hashlines)
+        HashcatTool().launch(job, _cap(tmp_path))
+        command = spawn.call_args.args[0]
+        launched.append((command[command.index("--potfile-path") + 1], job.log_path))
+
+    assert launched == [(str((jobs_dir / f"{job_id}.potfile").resolve()),
+                         str((jobs_dir / f"{job_id}.log").resolve())) for job_id in ("first", "second")]
 
 
 @pytest.mark.parametrize("content", [None, "", "not a hashline\n"])

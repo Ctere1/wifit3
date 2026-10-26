@@ -33,9 +33,9 @@ class ToolStatus(str, Enum):
 @dataclass
 class JobState:
     """Schema for jobs.json persistence."""
-    job_id: str                 # Unique ID (tool_name + capture_path + timestamp)
+    job_id: str                 # tool name, capture file stem, submit time; also names the job's files
     tool_name: str
-    capture_path: str           # the AP's .hc22000 the job was submitted for; names its potfile and log
+    capture_path: str           # the AP's capture the job was submitted for
     status: ToolStatus
     progress_msg: str           # e.g., "12% (ETA: 1h)" or error reason
     display_name: str = "Unknown Job"           # Human-readable name (e.g. "Hashcat (ASUS)")
@@ -43,7 +43,7 @@ class JobState:
     detail: str = ""                            # what the work is on, e.g. "rockyou.txt (2/3)"
     key: Optional[str] = None                   # recovered PSK; None for tools that recover none
     auto_crack: bool = False                    # submitted by auto-crack on capture, not by the user
-    hashlines_path: Optional[str] = None        # the hashlines to crack; None only in jobs from an older jobs.json
+    hashlines_path: str = ""                    # the .hc22000 the tool cracks; capture_path if unset
     # Tool-specific tracking data (only one of these usually populated)
     pid: Optional[int] = None
     log_path: Optional[str] = None
@@ -52,10 +52,8 @@ class JobState:
     tool_state: dict[str, Any] = field(default_factory=dict)    # tool-owned; no caller reads inside it
     actions: JobAction = JobAction.NONE                         # derived each poll, not persisted
 
-    @property
-    def hashlines_source(self) -> str:
-        """The .hc22000 file the tool cracks."""
-        return self.hashlines_path or self.capture_path
+    def __post_init__(self) -> None:
+        self.hashlines_path = self.hashlines_path or self.capture_path
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

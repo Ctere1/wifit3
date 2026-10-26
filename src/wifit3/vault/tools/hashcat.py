@@ -115,15 +115,15 @@ class HashcatTool(CrackerTool[HashcatQueue]):
         if job.config.get("default_passwords"):
             wordlists.insert(0, str(DEFAULT_PASSWORDS_PATH.resolve()))
         wordlists = list(dict.fromkeys(wordlists))
-        essid_passwords = (capture_ssid_variants(job.hashlines_source)
+        essid_passwords = (capture_ssid_variants(job.hashlines_path)
                            if job.config.get("ap_ssid_passwords") else [])
         ssid_based_passwords = list(dict.fromkeys(
             essid_passwords + ssid_passwords(job.config.get("extra_passwords", []))))
         if not (ssid_based_passwords or wordlists):
             raise ValueError("No passwords to try: choose a wordlist or a password source")
-        require_hashlines(job.hashlines_source)
+        require_hashlines(job.hashlines_path)
         queue = HashcatQueue(wordlists=wordlists, ssid=capture.ssid or "", bssid=capture.bssid,
-                             hashline_ids=capture_hashline_ids(job.hashlines_source),
+                             hashline_ids=capture_hashline_ids(job.hashlines_path),
                              identities=[wordlist_identity(path) for path in wordlists])
         if ssid_based_passwords:
             ssid_passwords_index = 1 if job.config.get("default_passwords") else 0
@@ -132,15 +132,15 @@ class HashcatTool(CrackerTool[HashcatQueue]):
             queue.identities.insert(ssid_passwords_index,
                                     SSID_VARIANTS_IDENTITY if essid_passwords else "")
         try:
-            potfile = self._potfile(job.capture_path)
-            if potfile and os.path.exists(potfile):
+            potfile = self._potfile(job)
+            if os.path.exists(potfile):
                 try:
                     logger.info(f"Removing old potfile {potfile}")
                     os.remove(potfile)
                 except OSError:
                     logger.warning(f"Could not remove old potfile {potfile}", exc_info=True)
 
-            job.log_path = str(Path(job.capture_path).with_suffix('.hashcat.log').resolve())
+            job.log_path = str(Path(job.hashlines_path).with_suffix(".log").resolve())
             Path(job.log_path).write_bytes(b"")  # one log per job, every wordlist appended to it
             self._start_wordlist(job, queue)
         except Exception:
@@ -171,12 +171,12 @@ class HashcatTool(CrackerTool[HashcatQueue]):
         cmd = [
             hashcat_exe,
             "-m", "22000",
-            "--potfile-path", str(self._potfile(job.capture_path)),
+            "--potfile-path", self._potfile(job),
             "--status",
             "--status-json",
             "--status-timer", "1",
             *_split_args(job.config.get("hashcat_args") or ""),
-            str(Path(job.hashlines_source).resolve()),
+            str(Path(job.hashlines_path).resolve()),
             str(queue.current),
         ]
 
@@ -224,7 +224,7 @@ class HashcatTool(CrackerTool[HashcatQueue]):
         # The potfile is the source of truth for a recovered key. Check it FIRST, regardless of
         # liveness: hashcat sometimes hangs after printing its result, and blocking the poll until
         # the process exits froze the whole UI. If the key is there, end the process and succeed.
-        key = self._key_from_potfile(self._potfile(job.capture_path))
+        key = self._key_from_potfile(self._potfile(job))
         if key is not None:
             self._terminate(job.pid)
             self._remove_ssid_passwords(queue)
@@ -279,11 +279,12 @@ class HashcatTool(CrackerTool[HashcatQueue]):
         return actions
 
     @staticmethod
-    def _potfile(capture_path: str) -> Optional[str]:
-        return str(Path(capture_path).resolve().with_suffix('.potfile')) if capture_path else None
+    def _potfile(job: JobState) -> str:
+        """Beside the job's hashlines file, so concurrent jobs never share one."""
+        return str(Path(job.hashlines_path).resolve().with_suffix(".potfile"))
 
     def _key_from_potfile(self, potfile):
-        """The recovered passphrase from a per-capture potfile, or None. A line is
+        """The recovered passphrase from the job's potfile, or None. A line is
         ``<hash>[*<essid>]:<password>``, so the passphrase is everything after the first colon."""
         if not potfile or not os.path.exists(potfile):
             return None

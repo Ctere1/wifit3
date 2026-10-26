@@ -1,6 +1,5 @@
 import logging
 import json
-import tempfile
 import time
 from collections import Counter
 from pathlib import Path
@@ -12,14 +11,12 @@ from wifit3.vault.tools.base import VaultTool
 from wifit3.vault.tools.cpu_crack import CpuCrackTool
 from wifit3.vault.tools.hashcat import HashcatTool
 from wifit3.vault.tools.hashtopolis import HashtopolisTool
+from wifit3.crack import wpa_psk
 from wifit3.crack.hc22000_format import read_hc22000
 from wifit3.persist.config import Config
 
 
 logger = logging.getLogger(__name__)
-
-_HASHLINES_DIR = Path(tempfile.gettempdir()) / "wifit3"
-
 
 def _set_actions(job: JobState, offered: JobAction) -> None:
     clearable = JobAction.NONE if job.status == ToolStatus.RUNNING else JobAction.CLEAR
@@ -47,6 +44,10 @@ class JobManager:
 
     def get_jobs_file(self) -> Path:
         return Path(Config.captures_dir) / "jobs.json"
+
+    def get_jobs_dir(self) -> Path:
+        """Each job's own files, named ``<job_id>.<suffix>``."""
+        return Path(Config.captures_dir) / "jobs"
 
     def _load(self) -> None:
         jobs_file = self.get_jobs_file()
@@ -119,18 +120,16 @@ class JobManager:
             self._save()
 
     def submit_job(self, tool_name: str, capture: PersistedCapture, config: dict,
-                   auto_crack: bool = False, hashlines: Optional[List[str]] = None) -> str:
-        """Submit a job, cracking ``hashlines`` when given, else the whole capture. It will be marked
-        QUEUED and launched on the next poll if slots are free."""
-        job_id = f"{tool_name}_{Path(capture.path).name}_{int(time.time())}"
-        hashlines_path = None
-        if hashlines is not None:
-            hashlines_path = _HASHLINES_DIR / f"{job_id}.hc22000"
-            hashlines_path.parent.mkdir(parents=True, exist_ok=True)
-            hashlines_path.write_text("".join(f"{line}\n" for line in hashlines), encoding="utf-8")
-        
+                   hashlines: List[str], auto_crack: bool = False) -> str:
+        """Queue a job cracking ``hashlines`` of the AP's ``capture``; it launches on the next poll
+        with a free slot."""
+        job_id = self._new_job_id(tool_name, capture)
+        hashlines_path = self.get_jobs_dir() / f"{job_id}.hc22000"
+        hashlines_path.parent.mkdir(parents=True, exist_ok=True)
+        hashlines_path.write_text("".join(f"{line}\n" for line in hashlines), encoding="utf-8")
+
         display_name = f"{self.tools[tool_name].label} ({capture.ssid or Path(capture.path).stem})"
-        
+
         job = JobState(
             job_id=job_id,
             tool_name=tool_name,
@@ -140,11 +139,20 @@ class JobManager:
             progress_msg="Waiting in queue...",
             config=config,
             auto_crack=auto_crack,
-            hashlines_path=str(hashlines_path) if hashlines_path else None,
+            hashlines_path=str(hashlines_path),
         )
         self.jobs[job_id] = job
         logger.info(f"Submitted job {job}")
         self._save()
+        return job_id
+
+    def _new_job_id(self, tool_name: str, capture: PersistedCapture) -> str:
+        """Unique among the jobs: a second submit in the same second gets a ``_2`` suffix."""
+        base = f"{tool_name}_{Path(capture.path).stem}_{int(time.time())}"
+        job_id, number = base, 1
+        while job_id in self.jobs:
+            number += 1
+            job_id = f"{base}_{number}"
         return job_id
 
     def poll_jobs(self) -> None:
@@ -240,7 +248,8 @@ class JobManager:
         cap = capture_for(job.capture_path) if capture_for is not None else self._capture(job.capture_path)
         if not cap:
             return
-        ssid = self._essid_from_capture(job.hashlines_source) or cap.ssid
+        ssid = next((line.ssid for _, line in read_hc22000(job.hashlines_path)
+                     if wpa_psk.psk_matches(res.key, line)), cap.ssid)
         try:
             self.vault.save_wpa_psk(ssid, cap.bssid, res.key)
             matched = self.vault.propagate_verified_psk(cap.bssid, ssid, res.key)
@@ -249,11 +258,6 @@ class JobManager:
                             f"{', '.join(matched)}")
         except OSError:
             logger.exception(f"Failed to save the recovered key for {job.capture_path}")
-
-    def _essid_from_capture(self, capture_path: str) -> Optional[str]:
-        """The AP's real SSID decoded from the capture's hashline (lossless), unlike the
-        sanitized name recovered from the filename."""
-        return next((line.ssid for _, line in read_hc22000(capture_path) if line.essid), None)
 
     def stop_job(self, job_id: str) -> bool:
         """Stop a running job; it reports STOPPED once its process is gone."""
@@ -281,12 +285,14 @@ class JobManager:
         return True
 
     def clear_job(self, job_id: str) -> None:
-        """Drop a finished job from the list, and its hashlines file, and persist."""
-        job = self.jobs.pop(job_id, None)
-        if job is None:
+        """Drop a finished job and its files in the jobs dir, and persist."""
+        if self.jobs.pop(job_id, None) is None:
             return
-        if job.hashlines_path:
-            Path(job.hashlines_path).unlink(missing_ok=True)
+        jobs_dir = self.get_jobs_dir()
+        if jobs_dir.is_dir():
+            for path in jobs_dir.iterdir():
+                if path.name.startswith(f"{job_id}."):
+                    path.unlink(missing_ok=True)
         self._save()
 
     def kill_all_running(self) -> None:

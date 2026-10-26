@@ -60,9 +60,9 @@ class HashtopolisTool(VaultTool):
     def launch(self, job: JobState, capture: PersistedCapture) -> None:
         if not (Config.hashtopolis.url and Config.hashtopolis.access_key):
             raise ValueError("Hashtopolis server URL and access key are not set")
-        hashlines = uploadable_hashlines(require_hashlines(job.hashlines_source))
+        hashlines = uploadable_hashlines(require_hashlines(job.hashlines_path))
         if not hashlines:
-            raise ValueError(f"No WPA*01/WPA*02 hashlines in {job.hashlines_source}")
+            raise ValueError(f"No WPA*01/WPA*02 hashlines in {job.hashlines_path}")
         job.tool_state["server"] = _configured_server()
         run = self._new_run(job)
         name = f"wifit3 {capture.ssid or Path(capture.path).stem}"
