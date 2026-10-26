@@ -101,6 +101,11 @@ def _captures_count_markup(count: int, total: int) -> str:
     return f"[dim]({count}/{total} captures)[/]"
 
 
+def _no_crackable_text(files: tuple[PersistedCapture, ...]) -> str:
+    count = len(files)
+    return f"{count} capture{'' if count == 1 else 's'}, none crackable ({date_text(files[0].timestamp)})"
+
+
 def _selected_count_text(count: int) -> str:
     return f"{count} capture{'' if count == 1 else 's'} selected to crack"
 
@@ -408,6 +413,8 @@ class _ApStatePanel(VerticalGroup):
                           expanded=key.id in self._expanded_key_ids, verifying=self._verifying)
         if not state.keys:
             yield Label("none yet", classes="none-yet")
+        if state.handshake_and_pmkid_files and not state.hashlines:
+            yield Label(_no_crackable_text(state.handshake_and_pmkid_files), classes="none-yet")
         self._uncracked_list = None
         if state.uncracked:
             yield Rule(classes="uncracked-rule")

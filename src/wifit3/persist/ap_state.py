@@ -92,6 +92,7 @@ class ApState:
     hashline_capture: Optional[PersistedCapture]    # the newest SSID's .hc22000; jobs are filed under it
     uncracked: tuple[DatedHashline, ...]            # the hashlines no key matches, newest first
     uncracked_exhaustion: tuple[Exhaustion, ...]    # wordlists that ran out on the uncracked lines
+    handshake_and_pmkid_files: tuple[PersistedCapture, ...]    # one per file, crackable or not, newest first
 
 
 def epoch_sort_key(epoch: Optional[int]) -> tuple[bool, int]:
@@ -280,9 +281,12 @@ def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
     cracked = {hid for key in keys for hid in key.hashline_ids}
     uncracked = tuple(h for h in hashlines if h.id not in cracked)
     exhaustion = read_exhaustion(metas, [h.id for h in uncracked]) if uncracked else {}
+    handshake_and_pmkid_files = {c.path: c for c in sorted(captures, key=lambda c: c.timestamp)
+                                 if c.type in (CaptureType.HS, CaptureType.PMKID)}
     return ApState(bssid, ssids, tuple(hashlines), tuple(keys), status, status_key,
                    key_statuses(keys, hashlines, status, status_key),
-                   hc22000[0] if hc22000 else None, uncracked, tuple(exhaustion.values()))
+                   hc22000[0] if hc22000 else None, uncracked, tuple(exhaustion.values()),
+                   tuple(reversed(handshake_and_pmkid_files.values())))
 
 
 def _ssid_histories(hashlines: list[DatedHashline], keys: list[Key]) -> tuple[SsidHistory, ...]:

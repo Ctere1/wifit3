@@ -16,7 +16,7 @@ from wifit3.persist.meta import meta_path, read_meta, update_meta
 from wifit3.persist.save import SaveResult
 from wifit3.ui.app import WifiteApp
 from wifit3.ui.screens.vault_drawer import VaultDrawer
-from wifit3.ui.screens.vault_item import VaultItemView, _ApStatePanel, _CrackerButton, _HashlineGroupCheckbox, _KeyRow
+from wifit3.ui.screens.vault_item import VaultItemView, date_text, _ApStatePanel, _CrackerButton, _HashlineGroupCheckbox, _KeyRow
 from wifit3.ui.vault.modals.add_credential import AddCredentialModal, ManualCredential
 from wifit3.ui.vault.modals.confirm import ConfirmModal
 from wifit3.ui.vault.modals.nickname import NicknameModal
@@ -274,6 +274,23 @@ async def test_d_asks_then_deletes_every_file_of_the_selected_ap(tmp_path, answe
         assert (drawer.query_one("#vault-aps", DataTable).row_count == 0) is deleted
         assert (list(tmp_path.glob("HomeNet_*")) == []) is deleted
         assert ("Deleted HomeNet" in app.notified) is deleted
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_an_ap_with_only_pcaps_says_how_many_captures_none_crackable(tmp_path):
+    (tmp_path / "HomeNet_aa-bb-cc-dd-ee-ff_1700000000_handshake.pcap").write_bytes(b"")
+    (tmp_path / "HomeNet_aa-bb-cc-dd-ee-ff_1700000500_pmkid.pcap").write_bytes(b"")
+    _write(tmp_path, "Cafe_02-00-00-00-00-01_1000_wep_key.txt", _WEP_TXT.replace("aa:bb:cc:dd:ee:ff", "02:00:00:00:00:01"))
+    app = WifiteApp()
+    async with app.run_test(size=(100, 40)) as pilot:
+        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
+        lines = [str(label.content) for label in drawer.query(".none-yet").results(Label)]
+        assert lines == ["none yet", f"2 captures, none crackable ({date_text(1700000500)})"]
+
+        await _open_vault(app, pilot, "02:00:00:00:00:01")
+        assert not any("none crackable" in str(label.content)
+                       for label in app.screen.query(".none-yet").results(Label))
 
 
 @pytest.mark.asyncio

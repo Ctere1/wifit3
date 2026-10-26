@@ -51,7 +51,7 @@ def test_key_row_takes_its_keys_status_and_tags_only_a_not_verified_psk_unverifi
                                                                       value="hunter22"),), frozenset(), ())
     guess = _key(CaptureType.WPA_PSK, "guess")
     state = ApState("aa:bb:cc:dd:ee:ff", (), hashlines, (current, guess), PasswordStatus.CURRENT, current,
-                    {current.id: PasswordStatus.CURRENT, guess.id: PasswordStatus.NOT_VERIFIED}, None, hashlines, ())
+                    {current.id: PasswordStatus.CURRENT, guess.id: PasswordStatus.NOT_VERIFIED}, None, hashlines, (), ())
     current_row, guess_row = _row(current, state), _row(guess, state)
 
     assert current_row.has_class("-current") and guess_row.has_class("-not-verified")
