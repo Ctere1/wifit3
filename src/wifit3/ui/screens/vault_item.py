@@ -26,8 +26,8 @@ from wifit3.persist.ap_state import (
     epoch_sort_key,
     is_confirmed,
 )
+from wifit3.persist.exhaustion import Exhaustion
 from wifit3.ui.vault.tools_ui import UI_TOOLS
-from wifit3.vault.exhaustion import exhausted_wordlist_names
 
 
 logger = logging.getLogger(__name__)
@@ -122,6 +122,13 @@ def _live_verification_columns(verification: LiveVerification, state: ApState) -
     verdict = (Label("✓ verified live", classes="verdict live verified") if verification.correct
                else Label("✗ rejected live", classes="verdict live rejected"))
     return _columns(state, verification.at, "", "", verdict)
+
+
+def _exhaustion_text(exhaustion: Exhaustion) -> str:
+    name = " / ".join(exhaustion.wordlist_names) or "unnamed wordlist"
+    if exhaustion.exhausted_hashlines == exhaustion.hashlines:
+        return name
+    return f"{name} ({exhaustion.exhausted_hashlines}/{exhaustion.hashlines})"
 
 
 def _key_id(key: Key) -> tuple[CaptureType, str]:
@@ -356,10 +363,8 @@ class _CapturePanel(VerticalGroup):
                 yield Button(tool.label, "primary", classes=f"tool-btn launch-tool-{tool.name}",
                              disabled=selected == 0)
         yield Label(self._selected_markup(selected), classes="selected-count")
-        exhausted = exhausted_wordlist_names(state.bssid, [h.id for h in uncracked])
-        if exhausted:
-            names = [name if count == len(uncracked) else f"{name} ({count}/{len(uncracked)})"
-                     for name, count in exhausted.items()]
+        if state.uncracked_exhaustion:
+            names = [_exhaustion_text(e) for e in state.uncracked_exhaustion]
             yield Static(f"exhausted: {escape(', '.join(names))}", classes="exhausted")
         with VerticalScroll(classes="uncracked"):
             for i, group in enumerate(self._groups):

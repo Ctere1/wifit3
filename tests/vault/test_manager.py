@@ -175,6 +175,25 @@ def test_poll_persists_a_tool_that_moved_the_job_on_without_changing_status(mana
     assert manager._save.called
 
 
+def test_poll_notifies_the_ap_only_when_the_job_moves_to_another_wordlist_or_ends(manager):
+    from wifit3.models.access_point import CaptureType
+    cap = PersistedCapture(type=CaptureType.HS, timestamp=0, path="test.pcap",
+                           bssid="00:11:22:33:44:55")
+    manager.vault.all_captures.return_value = [cap]
+    manager.submit_job("dummy", cap, {})
+    manager.poll_jobs()
+    results = iter([ToolResult(status=ToolStatus.RUNNING, value="1%", detail="a.txt (1/2)"),
+                    ToolResult(status=ToolStatus.RUNNING, value="2%", detail="a.txt (1/2)"),
+                    ToolResult(status=ToolStatus.RUNNING, value="Starting...", detail="b.txt (2/2)"),
+                    ToolResult(status=ToolStatus.FAILURE, value="2 wordlists", detail="b.txt (2/2)")])
+
+    with patch.object(manager.tools["dummy"], "poll_status", side_effect=lambda job, assume_dead=False: next(results)):
+        for _ in range(4):
+            manager.poll_jobs()
+
+    assert manager.vault.notify_changed.call_args_list == [((cap.bssid,),)] * 3
+
+
 def test_crack_success_persists_key(manager, tmp_path, monkeypatch):
     from wifit3.models.access_point import CaptureType
     from wifit3.persist.config import Config

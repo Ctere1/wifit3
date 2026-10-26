@@ -9,7 +9,7 @@ import pytest
 
 from wifit3.crack.passwords import DEFAULT_PASSWORDS_PATH, ssid_passwords, ssid_variants
 from wifit3.persist.config import Config
-from wifit3.vault.exhaustion import SSID_VARIANTS_IDENTITY, wordlist_identity
+from wifit3.persist.exhaustion import SSID_VARIANTS_IDENTITY, wordlist_identity
 from wifit3.vault.tools.hashcat import (
     HashcatTool, _TERMINATE_WAIT_SECONDS, _read_log_tail, _split_args,
 )

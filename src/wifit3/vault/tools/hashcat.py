@@ -14,7 +14,7 @@ from wifit3.crack.passwords import DEFAULT_PASSWORDS_PATH, ssid_passwords
 from wifit3.models import PersistedCapture, ToolCapability, ToolResult, ToolStatus
 from wifit3.models.jobs import JobAction, JobState, ToolName
 from wifit3.persist.config import Config
-from wifit3.vault.exhaustion import (SSID_VARIANTS_IDENTITY, capture_hashline_ids,
+from wifit3.persist.exhaustion import (SSID_VARIANTS_IDENTITY, capture_hashline_ids,
                                      wordlist_identity)
 from wifit3.vault.tools import hashcat_keypress
 from wifit3.vault.tools.base import require_hashlines

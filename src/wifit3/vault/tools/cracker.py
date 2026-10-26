@@ -8,7 +8,7 @@ from wifit3.crack.hc22000_format import read_hc22000
 from wifit3.crack.passwords import ssid_variants
 from wifit3.models import PersistedCapture, ToolResult, ToolStatus
 from wifit3.models.jobs import JobAction, JobState
-from wifit3.vault.exhaustion import SSID_VARIANTS_IDENTITY, SSID_VARIANTS_NAME, record_exhausted
+from wifit3.persist.exhaustion import SSID_VARIANTS_IDENTITY, SSID_VARIANTS_NAME, record_exhausted
 from wifit3.vault.tools.base import VaultTool
 
 logger = logging.getLogger(__name__)

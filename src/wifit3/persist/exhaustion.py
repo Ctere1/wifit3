@@ -2,11 +2,10 @@
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from wifit3.crack.hc22000_format import hashline_id, read_hc22000
 from wifit3.crack.passwords import DEFAULT_PASSWORDS_PATH, SSID_VARIANTS_VERSION
-from wifit3.models import PersistedCapture
 from wifit3.persist.config import Config
 from wifit3.persist.meta import bssid_meta_paths, meta_path, read_meta, update_meta
 
@@ -18,6 +17,8 @@ _WORDLISTS_KEY = "wordlists"
 
 @dataclass(frozen=True)
 class Exhaustion:
+    identity: str
+    wordlist_names: tuple[str, ...]     # as recorded, else the configured wordlist's; empty if unknown
     exhausted_hashlines: int
     hashlines: int
     latest: int             # epoch seconds of the newest record among the exhausted hashlines
@@ -47,8 +48,8 @@ def _wordlist_names(meta: dict) -> dict[str, list[str]]:
     stored = meta.get(_WORDLISTS_KEY)
     if not isinstance(stored, dict):
         return {}
-    return {identity: [n for n in record.get("names", []) if isinstance(n, str)]
-            for identity, record in stored.items() if isinstance(record, dict)}
+    return {identity: [n for n in names if isinstance(n, str)]
+            for identity, names in stored.items() if isinstance(names, list)}
 
 
 def record_exhausted(ssid: Optional[str], bssid: str, identity: str, wordlist_name: str,
@@ -68,44 +69,38 @@ def record_exhausted(ssid: Optional[str], bssid: str, identity: str, wordlist_na
         names[identity].append(wordlist_name)
     saved_ssid = meta.get("ssid")
     update_meta(saved_ssid if isinstance(saved_ssid, str) else ssid, bssid,
-                **{_EXHAUSTED_KEY: exhausted,
-                   _WORDLISTS_KEY: {i: {"names": n} for i, n in names.items()}})
+                **{_EXHAUSTED_KEY: exhausted, _WORDLISTS_KEY: names})
 
 
-def exhausted_wordlist_names(bssid: str, hashline_ids: list[str]) -> dict[str, int]:
-    """Per wordlist that ran out on any of these hashlines (any SSID of the BSSID), how many.
-    Records from before names were stored are named from the configured wordlists, if found."""
-    exhausted: dict[str, set[str]] = {}
+def _configured_wordlist_names() -> dict[str, str]:
+    """Names for records saved before names were: the configured wordlists still on disk."""
+    names = {SSID_VARIANTS_IDENTITY: SSID_VARIANTS_NAME}
+    for wordlist in [DEFAULT_PASSWORDS_PATH, *Config.hashcat.wordlists, *Config.cpu_crack.wordlists]:
+        try:
+            names.setdefault(wordlist_identity(wordlist), Path(wordlist).name)
+        except OSError:
+            continue
+    return names
+
+
+def read_exhaustion(bssid: str, hashline_ids: Iterable[str]) -> dict[str, Exhaustion]:
+    """Per wordlist identity that ran out on any of these hashlines, from every SSID's .meta."""
+    exhausted: dict[str, dict[str, int]] = {}
     names: dict[str, list[str]] = {}
     for path in bssid_meta_paths(bssid):
         meta = read_meta(path)
         for identity, recorded in _exhausted(meta).items():
-            exhausted.setdefault(identity, set()).update(recorded)
+            merged = exhausted.setdefault(identity, {})
+            for hashline, epoch in recorded.items():
+                merged[hashline] = max(merged.get(hashline, 0), epoch)
         for identity, stored in _wordlist_names(meta).items():
             names.setdefault(identity, []).extend(n for n in stored if n not in names[identity])
-    configured = {SSID_VARIANTS_IDENTITY: SSID_VARIANTS_NAME}
-    for wordlist in [DEFAULT_PASSWORDS_PATH, *Config.hashcat.wordlists, *Config.cpu_crack.wordlists]:
-        try:
-            configured.setdefault(wordlist_identity(wordlist), Path(wordlist).name)
-        except OSError:
-            continue
-    found: dict[str, int] = {}
-    wanted = set(hashline_ids)
-    for identity, recorded in exhausted.items():
-        count = len(recorded & wanted)
-        if count:
-            name = " / ".join(names.get(identity) or [configured.get(identity, "unnamed wordlist")])
-            found[name] = found.get(name, 0) + count
-    return found
-
-
-def capture_exhaustion(capture: PersistedCapture) -> dict[str, Exhaustion]:
-    """Per identity that ran out on any of the capture's current hashlines."""
-    hashline_ids = capture_hashline_ids(capture.path)
-    exhausted = _exhausted(read_meta(meta_path(capture.ssid, capture.bssid)))
+    configured = _configured_wordlist_names() if any(not names.get(i) for i in exhausted) else {}
+    wanted = list(dict.fromkeys(hashline_ids))
     found: dict[str, Exhaustion] = {}
     for identity, recorded in exhausted.items():
-        epochs = [recorded[hashline] for hashline in hashline_ids if hashline in recorded]
+        epochs = [recorded[hashline] for hashline in wanted if hashline in recorded]
         if epochs:
-            found[identity] = Exhaustion(len(epochs), len(hashline_ids), max(epochs))
+            wordlist_names = names.get(identity) or ([configured[identity]] if identity in configured else [])
+            found[identity] = Exhaustion(identity, tuple(wordlist_names), len(epochs), len(wanted), max(epochs))
     return found

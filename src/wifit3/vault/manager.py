@@ -197,6 +197,7 @@ class JobManager:
             elif job.status == ToolStatus.RUNNING:
                 try:
                     tracked = job.to_dict()
+                    wordlist_and_status = (job.detail, job.status)
                     res = tool.poll_status(job)
                     if res.status != job.status or res.value != job.progress_msg:
                         logger.info(f"Changed status for job ID {job_id}: {res}")
@@ -209,6 +210,8 @@ class JobManager:
                     elif job.to_dict() != tracked:
                         changed = True      # the tool moved the job on (its next wordlist)
                     _set_actions(job, res.actions)
+                    if (job.detail, job.status) != wordlist_and_status and (cap := capture_for(job.capture_path)):
+                        self.vault.notify_changed(cap.bssid)    # a wordlist that ran out is in the AP's .meta
                 except Exception as exc:
                     logger.exception(f"Error while polling status for job ID {job_id}")
                     job.status = ToolStatus.ERROR

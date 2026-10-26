@@ -11,7 +11,7 @@ from wifit3.dot11 import wpa
 from wifit3.models import PersistedCapture, ToolCapability, ToolResult, ToolStatus
 from wifit3.models.jobs import JobAction, JobState, ToolName
 from wifit3.persist.config import Config
-from wifit3.vault.exhaustion import (SSID_VARIANTS_IDENTITY, capture_hashline_ids,
+from wifit3.persist.exhaustion import (SSID_VARIANTS_IDENTITY, capture_hashline_ids,
                                      wordlist_identity)
 from wifit3.vault.tools.base import require_hashlines
 from wifit3.vault.tools.cracker import (CrackerTool, WordlistQueue, capture_ssid_variants,

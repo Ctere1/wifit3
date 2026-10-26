@@ -146,6 +146,21 @@ def test_each_write_notifies_its_ap_and_a_refresh_every_ap(tmp_path):
     assert changed == [ap.bssid, ap.bssid, ap.bssid, None]
 
 
+def test_ap_state_lists_the_wordlists_that_ran_out_on_its_uncracked_lines(tmp_path):
+    from wifit3.persist.exhaustion import record_exhausted
+    v = Vault()
+    ap = _ap_with_hs(pmkid=b"" * 16)
+    v.save_pmkid(ap, _CLIENT)
+    [uncracked] = v.ap_state(ap.bssid).uncracked
+    assert v.ap_state(ap.bssid).uncracked_exhaustion == ()
+
+    record_exhausted(ap.ssid, ap.bssid, "9:100", "a.txt", [uncracked.id])
+    v.notify_changed(ap.bssid)
+
+    [exhaustion] = v.ap_state(ap.bssid).uncracked_exhaustion
+    assert (exhaustion.wordlist_names, exhaustion.exhausted_hashlines, exhaustion.hashlines) == (("a.txt",), 1, 1)
+
+
 def test_save_wep_caches_key_and_dedupes(tmp_path):
     v = Vault()
     ap = AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="HomeNet")

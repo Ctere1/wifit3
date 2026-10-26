@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Iterable, Optional
@@ -10,6 +10,7 @@ from typing import Iterable, Optional
 from wifit3.crack.hc22000_format import Hc22000Line, hashline_id, read_hc22000
 from wifit3.crack.wpa_psk import psk_matches
 from wifit3.models import AP_RECOVERED_CAPTURE_TYPES, PSK_CAPTURE_TYPES, CaptureType, PersistedCapture
+from wifit3.persist.exhaustion import Exhaustion, read_exhaustion
 from wifit3.persist.meta import bssid_meta_paths, meta_path, read_meta, update_meta
 from wifit3.persist.pcap import read_pcap
 
@@ -81,6 +82,7 @@ class ApState:
     status: PasswordStatus
     status_key: Optional[Key]
     hashline_capture: Optional[PersistedCapture]    # the newest SSID's .hc22000; jobs are filed under it
+    uncracked_exhaustion: tuple[Exhaustion, ...] = ()   # wordlists that ran out on the uncracked lines
 
     @property
     def uncracked(self) -> tuple[DatedHashline, ...]:
@@ -252,8 +254,10 @@ def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
     ssids = _ssid_histories(hashlines, keys)
     hc22000 = sorted((c for c in captures if c.path.endswith(".hc22000")),
                      key=lambda c: (bool(ssids) and c.ssid == ssids[0].ssid, c.timestamp), reverse=True)
-    return ApState(bssid, ssids, tuple(hashlines), tuple(keys), status, status_key,
-                   hc22000[0] if hc22000 else None)
+    state = ApState(bssid, ssids, tuple(hashlines), tuple(keys), status, status_key,
+                    hc22000[0] if hc22000 else None)
+    exhaustion = read_exhaustion(bssid, [h.id for h in state.uncracked])
+    return replace(state, uncracked_exhaustion=tuple(exhaustion.values()))
 
 
 def _ssid_histories(hashlines: list[DatedHashline], keys: list[Key]) -> tuple[SsidHistory, ...]:

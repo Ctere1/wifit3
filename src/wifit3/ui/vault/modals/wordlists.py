@@ -22,8 +22,8 @@ from wifit3.crack.passwords import (DEFAULT_PASSWORDS_PATH, read_passwords, ssid
 from wifit3.models import PersistedCapture
 from wifit3.persist.config import Config, ConfigError, CpuCrackSettings, HashcatSettings
 from wifit3.ui.path_picker import BROWSE_GLYPH, PathPickerModal
-from wifit3.vault.exhaustion import (SSID_VARIANTS_IDENTITY, Exhaustion, capture_exhaustion,
-                                     wordlist_identity)
+from wifit3.persist.exhaustion import (SSID_VARIANTS_IDENTITY, Exhaustion, capture_hashline_ids,
+                                       read_exhaustion, wordlist_identity)
 from wifit3.vault.tools.cracker import capture_ssid_variants
 
 _EXAMPLE_SSID = "HomeWifi"
@@ -51,6 +51,10 @@ def _file_identity(path: str | Path) -> Optional[str]:
         return wordlist_identity(path) if Path(path).is_file() else None
     except OSError:
         return None
+
+
+def _capture_exhaustion(capture: PersistedCapture) -> dict[str, Exhaustion]:
+    return read_exhaustion(capture.bssid, capture_hashline_ids(capture.path))
 
 
 def _exhausted_tooltip(exhaustion: Exhaustion) -> str:
@@ -221,7 +225,7 @@ class WordlistConfigModal(ModalScreen[dict]):
         self.query_one("#ap-ssid-passwords", Checkbox).label = (
             f"This AP's SSID variants [dim]({ap_ssid})[/dim]")
         if self._capture is not None:
-            self._exhaustion = await asyncio.to_thread(capture_exhaustion, self._capture)
+            self._exhaustion = await asyncio.to_thread(_capture_exhaustion, self._capture)
             self._mark_exhausted()
 
     def _mark_exhausted(self) -> None:
