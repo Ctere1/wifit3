@@ -3,6 +3,7 @@ import functools
 import hashlib
 import hmac
 import re
+from typing import Iterable, Optional
 
 from wifit3.crack.hc22000_format import PMKID_SHA256_MESSAGE_PAIR_BIT, Hc22000Line
 from wifit3.crack.handshake import NONCE_CORRECTION_BIT, NONCE_ERROR_CORRECTIONS
@@ -141,3 +142,13 @@ def psk_matches(psk: str, line: Hc22000Line) -> bool:
     if RAW_PMK_RE.fullmatch(psk):
         return pmk_matches(bytes.fromhex(psk), line)
     return pmk_matches(_derive_pmk_cached(psk, bytes.fromhex(line.essid)), line)
+
+
+def psk_verdict(psks: Iterable[str], lines: Iterable[Hc22000Line]) -> Optional[bool]:
+    """Whether any PSK cracks the lines, judged on the authorized lines when there are any (an M1+M2
+    line may hold a client's wrong password); None when that can't be told."""
+    psks, lines = list(psks), list(lines)
+    authorized = [line for line in lines if line.authorized]
+    if any(psk_matches(psk, line) for psk in psks for line in authorized or lines):
+        return True
+    return False if psks and authorized else None

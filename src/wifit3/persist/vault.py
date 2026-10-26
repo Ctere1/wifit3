@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional
 
 from wifit3.crack.hc22000_format import Hc22000Line, hashline_id, read_hc22000
-from wifit3.crack.wpa_psk import psk_matches
+from wifit3.crack.wpa_psk import psk_verdict
 from wifit3.models import PSK_CAPTURE_TYPES, WPS_CAPTURE_TYPES, CaptureType, PersistedCapture
 from wifit3.persist import save
 from wifit3.persist.capture_history import load_capture_index, summarize
@@ -220,12 +220,8 @@ class Vault:
         return self.known_psk(ap) is not None
 
     def verify_wpa_psk(self, bssid: str, psk: str) -> Optional[bool]:
-        """Check a PSK or 64-hex raw PMK against the AP's saved hashlines. False only if a
-        non-M1+M2 line rejects it (M1+M2 may hold a wrong passphrase); None if unverifiable."""
-        lines = [line for _, line in read_hashlines(bssid, self.persisted(bssid)).values()]
-        if any(psk_matches(psk, line) for line in lines):
-            return True
-        return False if any(line.authorized for line in lines) else None
+        """Check a PSK or 64-hex raw PMK against the AP's saved hashlines (see psk_verdict)."""
+        return psk_verdict([psk], [line for _, line in read_hashlines(bssid, self.persisted(bssid)).values()])
 
     def propagate_verified_psk(self, source_bssid: str, source_ssid: Optional[str],
                                psk: str) -> List[str]:
@@ -301,9 +297,7 @@ class Vault:
     def _matches_saved_key(self, ap: "AccessPoint", lines: List[tuple[str, Hc22000Line]]) -> Optional[bool]:
         psks = {p.value for p in self.persisted(ap.bssid) if p.type in PSK_CAPTURE_TYPES and p.value}
         psks |= {psk for psk in (ap.wps_pbc_psk, ap.wps_pin_psk) if psk}
-        if not psks:
-            return None
-        return any(psk_matches(psk, line) for psk in psks for _, line in lines)
+        return psk_verdict(psks, [line for _, line in lines])
 
     def _auto_crack(self, ap: "AccessPoint", capture: PersistedCapture,
                     before: List[Hc22000Line], was_current: bool) -> None:

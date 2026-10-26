@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from wifit3.crack import wpa_psk
-from wifit3.crack.hc22000_format import Hc22000Line
+from wifit3.crack.hc22000_format import Hc22000Line, hashline_id
 from wifit3.dot11.wpa import derive_pmk
 from wifit3.models import AccessPoint, CaptureType, Handshake, HandshakeMessage, ToolName
 from wifit3.persist.config import Config
@@ -477,14 +477,20 @@ def test_save_does_not_submit_when_auto_crack_is_off(tmp_path, mocker, monkeypat
     v.manager.submit_job.assert_not_called()
 
 
+def _ap_with_pmkid_for(psk: str, client_mac: str = _CLIENT) -> AccessPoint:
+    """An AP holding a PMKID that ``psk`` cracks (authorized evidence)."""
+    pmk = derive_pmk(psk, b"HomeNet")
+    pmkid = wpa_psk.pmkid(pmk, bytes.fromhex("aabbccddeeff"), bytes.fromhex(client_mac.replace(":", "")))
+    return _ap_with_hs(client_mac=client_mac, pmkid=pmkid)
+
+
 def test_save_does_not_submit_when_a_known_psk_matches_the_capture(tmp_path, mocker):
     v = Vault()
     mocker.patch.object(v.manager, "submit_job")
-    mocker.patch("wifit3.persist.vault.psk_matches", return_value=True)
-    ap = _ap_with_hs()
+    ap = _ap_with_pmkid_for("knownpsk")
     ap.wps_pbc_psk = "knownpsk"
 
-    result = v.save_handshake(ap, _CLIENT)
+    result = v.save_pmkid(ap, _CLIENT)
 
     assert result.matches_saved_key is True
     v.manager.submit_job.assert_not_called()
@@ -493,32 +499,39 @@ def test_save_does_not_submit_when_a_known_psk_matches_the_capture(tmp_path, moc
 def test_save_submits_when_no_known_psk_matches_the_capture(tmp_path, mocker):
     v = Vault()
     mocker.patch.object(v.manager, "submit_job")
-    mocker.patch("wifit3.persist.vault.psk_matches", return_value=False)
-    ap = _ap_with_hs()
+    ap = _ap_with_pmkid_for("newpsk")
     ap.wps_pbc_psk = "oldpsk"
 
-    result = v.save_handshake(ap, _CLIENT)
+    result = v.save_pmkid(ap, _CLIENT)
 
     assert result.matches_saved_key is False
     v.manager.submit_job.assert_called_once()
 
 
-@pytest.mark.parametrize(("before", "submitted"), [("CURRENT", True), ("STALE", False)])
-def test_past_the_threshold_only_a_current_password_turning_stale_submits(
-        tmp_path, mocker, before, submitted):
-    from types import SimpleNamespace
-    from wifit3.persist.ap_state import PasswordStatus
+def test_an_unmatched_m1m2_capture_is_neither_a_match_nor_a_mismatch(tmp_path, mocker):
     v = Vault()
     mocker.patch.object(v.manager, "submit_job")
-    mocker.patch("wifit3.persist.vault.crosses_auto_crack_threshold", return_value=False)
-    mocker.patch("wifit3.persist.vault.psk_matches", return_value=False)
-    mocker.patch("wifit3.persist.vault.load_ap_state", side_effect=[
-        SimpleNamespace(status=PasswordStatus[before]),
-        SimpleNamespace(status=PasswordStatus.STALE, uncracked=[SimpleNamespace(raw="WPA*02*x")])])
     ap = _ap_with_hs()
     ap.wps_pbc_psk = "oldpsk"
 
-    v.save_handshake(ap, _CLIENT)
+    assert v.save_handshake(ap, _CLIENT).matches_saved_key is None
+
+
+@pytest.mark.parametrize(("already_stale", "submitted"), [(False, True), (True, False)])
+def test_past_the_threshold_only_a_current_password_turning_stale_submits(
+        tmp_path, mocker, already_stale, submitted):
+    _write_wpa_psk(tmp_path, "aa-bb-cc-dd-ee-ff", ssid="HomeNet", psk="oldpsk")
+    v = Vault()
+    mocker.patch.object(v.manager, "submit_job")
+    v.save_pmkid(_ap_with_pmkid_for("oldpsk", "11:22:33:44:55:01"), "11:22:33:44:55:01")
+    if already_stale:
+        v.save_pmkid(_ap_with_pmkid_for("newpsk", "11:22:33:44:55:02"), "11:22:33:44:55:02")
+    lines = (tmp_path / "HomeNet_aa-bb-cc-dd-ee-ff.hc22000").read_text(encoding="utf-8").split()
+    update_meta("HomeNet", "aa:bb:cc:dd:ee:ff",
+                hashlines={hashline_id(raw): {"captured": [1700000000 + i]} for i, raw in enumerate(lines)})
+    v.manager.submit_job.reset_mock()
+
+    v.save_pmkid(_ap_with_pmkid_for("newpsk", "11:22:33:44:55:03"), "11:22:33:44:55:03")
 
     assert v.manager.submit_job.called is submitted
 

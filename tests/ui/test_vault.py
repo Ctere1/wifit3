@@ -234,7 +234,7 @@ async def test_show_directory_warns_when_there_are_no_captures_yet(tmp_path, moc
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
-async def test_add_credential_prefills_the_row_and_rejects_a_psk_the_handshake_refutes(
+async def test_add_credential_prefills_the_row_and_saves_a_psk_the_handshake_refutes_unverified(
         tmp_path, mocker):
     _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", _PMKID_LINE)
     app = WifiteApp()
@@ -257,8 +257,9 @@ async def test_add_credential_prefills_the_row_and_rejects_a_psk_the_handshake_r
 
         assert app.screen is view
         verify.assert_called_once_with("aa:bb:cc:dd:ee:ff", "wrongpass")
-        assert notify.call_args.kwargs["severity"] == "error"
-        assert not app.vault.has_psk(AccessPoint(bssid="aa:bb:cc:dd:ee:ff"))
+        assert notify.call_args.args[0] == "PSK doesn't match the saved captures; added unverified"
+        assert notify.call_args.kwargs["severity"] == "warning"
+        assert app.vault.known_psk(AccessPoint(bssid="aa:bb:cc:dd:ee:ff")) == "wrongpass"
 
         verify.return_value = True
         propagate = mocker.patch.object(app.vault, "propagate_verified_psk",
@@ -267,7 +268,7 @@ async def test_add_credential_prefills_the_row_and_rejects_a_psk_the_handshake_r
                                                 "aa:bb:cc:dd:ee:ff", "rightpass"))
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert app.vault.known_psk(AccessPoint(bssid="aa:bb:cc:dd:ee:ff")) == "rightpass"
+        assert "rightpass" in {c.value for c in app.vault.persisted("aa:bb:cc:dd:ee:ff")}
         propagate.assert_called_once_with("aa:bb:cc:dd:ee:ff", "HomeNet", "rightpass")
         assert [c.args[0] for c in notify.call_args_list[-2:]] == [
             "Credential verified and added to Vault",

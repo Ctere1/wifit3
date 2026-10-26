@@ -15,7 +15,7 @@ from wifit3.persist.pcap import read_pcap
 
 _HASHLINES_KEY = "hashlines"
 _LIVE_VERIFICATIONS_KEY = "live_verifications"
-_pcap_cache: dict[tuple[str, int], list[tuple[bytes, int]]] = {}
+_PASSWORD_KEY_TYPES = frozenset({CaptureType.WPA_PSK, CaptureType.WEP})
 
 
 class PasswordStatus(Enum):
@@ -33,13 +33,8 @@ class DatedHashline:
     captured: tuple[int, ...]       # epoch seconds; empty when no record or pcap dates it
 
     @property
-    def first_captured(self) -> int:
-        return min(self.captured, default=0)
-
-    @property
-    def client(self) -> str:
-        """Last two bytes of the client MAC, ``aa:bb``."""
-        return f"{self.line.mac_sta[-4:-2]}:{self.line.mac_sta[-2:]}"
+    def first_captured(self) -> Optional[int]:
+        return min(self.captured, default=None)
 
 
 @dataclass(frozen=True)
@@ -50,23 +45,31 @@ class LiveVerification:
 
 @dataclass(frozen=True)
 class Key:
-    capture_type: CaptureType       # WPA_PSK (also when recovered over WPS), WPS_PIN or WEP
+    capture_type: CaptureType       # the key's kind: WPA_PSK (also when recovered over WPS), WPS_PIN or WEP
     value: str                      # passphrase or raw PMK, WPS PIN, or WEP key hex
-    capture: PersistedCapture       # the .txt it was read from
+    sources: tuple[PersistedCapture, ...]   # every saved capture holding it, newest first
     hashline_ids: frozenset[str]
     live_verifications: tuple[LiveVerification, ...]
 
     @property
-    def from_access_point(self) -> bool:
-        """Recovered from the AP itself (WEP key, WPS M7), so correct when it was recovered."""
-        return self.capture.type in AP_RECOVERED_CAPTURE_TYPES
+    def newest_source(self) -> PersistedCapture:
+        return self.sources[0]
+
+    @property
+    def is_password(self) -> bool:
+        return self.capture_type in _PASSWORD_KEY_TYPES
+
+    @property
+    def recovered_from_access_point_at(self) -> Optional[int]:
+        """When the AP itself gave the key up (WEP IVs, WPS), so it was correct then."""
+        return next((s.timestamp for s in self.sources if s.type in AP_RECOVERED_CAPTURE_TYPES), None)
 
 
 @dataclass(frozen=True)
 class SsidHistory:
     ssid: str
-    first_seen: int
-    last_seen: int
+    first_seen: Optional[int]
+    last_seen: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -85,15 +88,9 @@ class ApState:
         return tuple(h for h in self.hashlines if h.id not in cracked)
 
 
-def _pcap_frames(path: Path) -> list[tuple[bytes, int]]:
-    try:
-        stamp = path.stat().st_mtime_ns
-    except OSError:
-        return []
-    key = (str(path), stamp)
-    if key not in _pcap_cache:
-        _pcap_cache[key] = list(read_pcap(path))
-    return _pcap_cache[key]
+def _newest_first(epoch: Optional[int]) -> tuple[bool, int]:
+    """Sort key, with ``reverse=True``: newest first, undated last."""
+    return epoch is not None, epoch or 0
 
 
 def _pcap_dates(lines: dict[str, Hc22000Line], pcaps: Iterable[Path]) -> dict[str, set[int]]:
@@ -101,7 +98,7 @@ def _pcap_dates(lines: dict[str, Hc22000Line], pcaps: Iterable[Path]) -> dict[st
     needles = {hid: bytes.fromhex(line.pmkid_or_mic) for hid, line in lines.items()}
     found: dict[str, set[int]] = {}
     for pcap in pcaps:
-        for frame, epoch in _pcap_frames(pcap):
+        for frame, epoch in read_pcap(pcap):
             for hid, needle in needles.items():
                 if needle in frame:
                     found.setdefault(hid, set()).add(epoch)
@@ -121,6 +118,13 @@ def _stored_dates(metas: list[dict]) -> dict[str, set[int]]:
     return found
 
 
+def _capture_type(value: object) -> Optional[CaptureType]:
+    try:
+        return CaptureType(value)
+    except ValueError:
+        return None
+
+
 def _stored_verifications(metas: list[dict]) -> dict[tuple[CaptureType, str], list[LiveVerification]]:
     found: dict[tuple[CaptureType, str], list[LiveVerification]] = {}
     for meta in metas:
@@ -130,10 +134,9 @@ def _stored_verifications(metas: list[dict]) -> dict[tuple[CaptureType, str], li
         for record in stored:
             if not isinstance(record, dict):
                 continue
-            kind, value, at = record.get("kind"), record.get("key"), record.get("at")
-            if kind in list(CaptureType) and isinstance(value, str) and isinstance(at, int):
-                found.setdefault((CaptureType(kind), value), []).append(
-                    LiveVerification(at, bool(record.get("correct"))))
+            kind, value, at = _capture_type(record.get("kind")), record.get("key"), record.get("at")
+            if kind is not None and isinstance(value, str) and isinstance(at, int):
+                found.setdefault((kind, value), []).append(LiveVerification(at, bool(record.get("correct"))))
     return found
 
 
@@ -148,47 +151,66 @@ def read_hashlines(bssid: str, captures: list[PersistedCapture]) -> dict[str, tu
     return found
 
 
-def _keys_from_captures(captures: list[PersistedCapture]) -> list[tuple[CaptureType, str, PersistedCapture]]:
-    """Every saved key, newest capture first, one per capture type and value."""
-    found: dict[tuple[CaptureType, str], PersistedCapture] = {}
+def _keys_in_capture(capture: PersistedCapture) -> list[tuple[CaptureType, str]]:
+    keys = []
+    if capture.type == CaptureType.WEP and capture.value:
+        keys.append((CaptureType.WEP, capture.value))
+    if capture.type == CaptureType.WPS_PIN and capture.pin is not None:
+        keys.append((CaptureType.WPS_PIN, capture.pin))
+    if capture.type in PSK_CAPTURE_TYPES and capture.value:
+        keys.append((CaptureType.WPA_PSK, capture.value))
+    return keys
+
+
+def _key_sources(captures: list[PersistedCapture]) -> dict[tuple[CaptureType, str], list[PersistedCapture]]:
+    """Every saved key, ``(kind, value)``, and the captures holding it, newest first."""
+    found: dict[tuple[CaptureType, str], list[PersistedCapture]] = {}
     for capture in sorted(captures, key=lambda c: c.timestamp, reverse=True):
-        if capture.type == CaptureType.WEP and capture.value:
-            found.setdefault((CaptureType.WEP, capture.value), capture)
-        if capture.type == CaptureType.WPS_PIN and capture.pin is not None:
-            found.setdefault((CaptureType.WPS_PIN, capture.pin), capture)
-        if capture.type in PSK_CAPTURE_TYPES and capture.value:
-            found.setdefault((CaptureType.WPA_PSK, capture.value), capture)
-    return [(capture_type, value, capture) for (capture_type, value), capture in found.items()]
+        for kind_and_value in _keys_in_capture(capture):
+            found.setdefault(kind_and_value, []).append(capture)
+    return found
+
+
+def _confirmed_at(key: Key, hashlines: Iterable[DatedHashline]) -> int:
+    """The newest date a dated hashline or a correct live check confirmed the key; else when it was saved."""
+    dates = [h.first_captured for h in hashlines if h.id in key.hashline_ids and h.first_captured is not None]
+    dates += [v.at for v in key.live_verifications if v.correct]
+    return max(dates, default=key.newest_source.timestamp)
 
 
 def password_status(hashlines: Iterable[DatedHashline],
                     keys: Iterable[Key]) -> tuple[PasswordStatus, Optional[Key]]:
-    """Judged on the newest authorized hashline, live verification, or key recovered from the AP;
-    with none of those, on the newest M1+M2 hashline. ``keys`` is most recently confirmed first."""
-    hashlines, keys = list(hashlines), list(keys)
+    """Judged on the newest authorized hashline, correct live check, or key the AP gave up; with
+    none of those, on the newest M1+M2 hashline. Only PSKs and WEP keys count; ``keys`` is most
+    recently confirmed first."""
+    hashlines = list(hashlines)
+    keys = [k for k in keys if k.is_password]
     if not keys:
         return PasswordStatus.NOT_CRACKED, None
 
     def matching(hashline: DatedHashline) -> Optional[Key]:
         return next((k for k in keys if hashline.id in k.hashline_ids), None)
 
-    evidence: list[tuple[int, Optional[Key]]] = [
+    evidence: list[tuple[Optional[int], Optional[Key]]] = [
         (h.first_captured, matching(h)) for h in hashlines if h.line.authorized]
     for key in keys:
-        evidence += [(v.at, key if v.correct else None) for v in key.live_verifications]
-        if key.from_access_point:
-            evidence.append((key.capture.timestamp, key))
-    if evidence:
-        _, key = max(evidence, key=lambda e: e[0])
-        return (PasswordStatus.CURRENT, key) if key else (PasswordStatus.STALE, keys[0])
-    newest_match = next((k for h in hashlines if (k := matching(h))), None)
-    return PasswordStatus.NOT_VERIFIED, newest_match or keys[0]
+        evidence += [(v.at, key) for v in key.live_verifications if v.correct]
+        if (recovered_at := key.recovered_from_access_point_at) is not None:
+            evidence.append((recovered_at, key))
+    if not evidence:
+        newest_match = next((k for h in hashlines if (k := matching(h))), None)
+        return PasswordStatus.NOT_VERIFIED, newest_match or keys[0]
 
-
-def _confirmed_at(key: Key, hashlines: dict[str, DatedHashline]) -> int:
-    dates = [hashlines[h].first_captured for h in key.hashline_ids if h in hashlines]
-    dates += [v.at for v in key.live_verifications if v.correct]
-    return max(dates, default=key.capture.timestamp)
+    evidence.sort(key=lambda e: _newest_first(e[0]), reverse=True)
+    newest_at, newest_key = evidence[0]
+    if newest_key is not None:
+        return PasswordStatus.CURRENT, newest_key
+    unconfirmed_newer = [k for k in keys if newest_at is not None and k.newest_source.timestamp > newest_at
+                         and not k.hashline_ids and not any(v.correct for v in k.live_verifications)]
+    if unconfirmed_newer:
+        return PasswordStatus.NOT_VERIFIED, unconfirmed_newer[0]
+    last_matched = next((key for _, key in evidence if key is not None), None)
+    return PasswordStatus.STALE, last_matched or keys[0]
 
 
 def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
@@ -203,25 +225,23 @@ def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
         for hid, found in _pcap_dates(undated, pcaps).items():
             dates.setdefault(hid, set()).update(found)
 
-    hashlines = {
-        hid: DatedHashline(hid, raw, line, tuple(sorted(dates.get(hid, ()))))
-        for hid, (raw, line) in lines.items()}
+    hashlines = sorted(
+        (DatedHashline(hid, raw, line, tuple(sorted(dates.get(hid, ())))) for hid, (raw, line) in lines.items()),
+        key=lambda h: _newest_first(h.first_captured), reverse=True)
     verifications = _stored_verifications(metas)
     keys = []
-    for capture_type, value, capture in _keys_from_captures(captures):
-        matched = frozenset(h.id for h in hashlines.values()
+    for (capture_type, value), sources in _key_sources(captures).items():
+        matched = frozenset(h.id for h in hashlines
                             if capture_type == CaptureType.WPA_PSK and psk_matches(value, h.line))
-        keys.append(Key(capture_type, value, capture, matched,
+        keys.append(Key(capture_type, value, tuple(sources), matched,
                         tuple(sorted(verifications.get((capture_type, value), []), key=lambda v: v.at))))
     keys.sort(key=lambda k: _confirmed_at(k, hashlines), reverse=True)
 
-    ordered = sorted(hashlines.values(), key=lambda h: (h.first_captured != 0, h.first_captured),
-                     reverse=True)
-    status, status_key = password_status(ordered, keys)
-    ssids = _ssid_histories(ordered, keys)
+    status, status_key = password_status(hashlines, keys)
+    ssids = _ssid_histories(hashlines, keys)
     hc22000 = sorted((c for c in captures if c.path.endswith(".hc22000")),
                      key=lambda c: (bool(ssids) and c.ssid == ssids[0].ssid, c.timestamp), reverse=True)
-    return ApState(bssid, ssids, tuple(ordered), tuple(keys), status, status_key,
+    return ApState(bssid, ssids, tuple(hashlines), tuple(keys), status, status_key,
                    hc22000[0] if hc22000 else None)
 
 
@@ -230,33 +250,34 @@ def _ssid_histories(hashlines: list[DatedHashline], keys: list[Key]) -> tuple[Ss
     for h in hashlines:
         seen.setdefault(h.line.ssid, []).extend(h.captured)
     for key in keys:
-        if key.capture.ssid and key.capture.ssid not in seen:
-            seen[key.capture.ssid] = [key.capture.timestamp]
-    histories = [SsidHistory(ssid, min(epochs, default=0), max(epochs, default=0))
+        for source in key.sources:
+            if source.ssid and source.ssid not in seen:
+                seen[source.ssid] = [source.timestamp]
+    histories = [SsidHistory(ssid, min(epochs, default=None), max(epochs, default=None))
                  for ssid, epochs in seen.items()]
-    return tuple(sorted(histories, key=lambda s: s.last_seen, reverse=True))
+    return tuple(sorted(histories, key=lambda s: _newest_first(s.last_seen), reverse=True))
 
 
-def record_hashlines_captured(ssid: Optional[str], bssid: str, raw_lines: Iterable[str],
-                              epoch: Optional[int] = None) -> None:
+def record_hashlines_captured(ssid: Optional[str], bssid: str, raw_lines: Iterable[str]) -> None:
     """Note in the SSID's .meta that these hashlines were captured, now."""
-    path = meta_path(ssid, bssid)
-    stored = read_meta(path).get(_HASHLINES_KEY)
+    stored = read_meta(meta_path(ssid, bssid)).get(_HASHLINES_KEY)
     stored = stored if isinstance(stored, dict) else {}
-    at = int(time.time()) if epoch is None else epoch
+    now = int(time.time())
     for raw in raw_lines:
-        record = stored.setdefault(hashline_id(raw), {})
-        captured = record.setdefault("captured", [])
-        if at not in captured:
-            captured.append(at)
+        record = stored.get(hashline_id(raw))
+        record = stored[hashline_id(raw)] = record if isinstance(record, dict) else {}
+        captured = record.get("captured")
+        captured = record["captured"] = captured if isinstance(captured, list) else []
+        if now not in captured:
+            captured.append(now)
     update_meta(ssid, bssid, **{_HASHLINES_KEY: stored})
 
 
 def record_live_verification(key: Key, correct: bool) -> None:
-    """Note in the key's SSID .meta that a live check against the AP accepted or rejected it."""
-    capture = key.capture
-    stored = read_meta(meta_path(capture.ssid, capture.bssid)).get(_LIVE_VERIFICATIONS_KEY)
+    """Note in the key's newest SSID .meta that a live check against the AP accepted or rejected it."""
+    source = key.newest_source
+    stored = read_meta(meta_path(source.ssid, source.bssid)).get(_LIVE_VERIFICATIONS_KEY)
     stored = stored if isinstance(stored, list) else []
     stored.append({"kind": key.capture_type.value, "key": key.value, "at": int(time.time()),
                    "correct": correct})
-    update_meta(capture.ssid, capture.bssid, **{_LIVE_VERIFICATIONS_KEY: stored})
+    update_meta(source.ssid, source.bssid, **{_LIVE_VERIFICATIONS_KEY: stored})

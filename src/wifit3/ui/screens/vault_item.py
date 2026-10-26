@@ -69,9 +69,9 @@ def key_text(key: Key) -> str:
     return key.value
 
 
-def when(epoch: int) -> str:
-    """``today  19:37``, ``Oct 22 19:37``, ``Oct 22 2025``; ``no date`` for 0."""
-    if not epoch:
+def when(epoch: Optional[int]) -> str:
+    """``today  19:37``, ``Oct 22 19:37``, ``Oct 22 2025``; ``no date`` for None."""
+    if epoch is None:
         return "no date"
     moment, now = time.localtime(epoch), time.localtime()
     if moment.tm_year != now.tm_year:
@@ -81,16 +81,23 @@ def when(epoch: int) -> str:
     return time.strftime("%b %d %H:%M", moment)
 
 
+def _client(hashline: DatedHashline) -> str:
+    """Last two bytes of the client MAC, ``aa:bb``."""
+    mac_sta = hashline.line.mac_sta
+    return f"{mac_sta[-4:-2]}:{mac_sta[-2:]}"
+
+
 def hashline_groups(hashlines: tuple[DatedHashline, ...]) -> list[list[DatedHashline]]:
     """Runs of hashlines from the same minute, message pair, client and SSID."""
     def same(h: DatedHashline) -> tuple:
-        return h.first_captured // 60, h.line.pair_label, h.client, h.line.ssid, h.line.authorized
+        minute = None if h.first_captured is None else h.first_captured // 60
+        return minute, h.line.pair_label, h.line.mac_sta, h.line.ssid, h.line.authorized
     return [list(group) for _, group in groupby(hashlines, same)]
 
 
-def _columns(state: ApState, epoch: int, pair: str, client: str, verdict: Label) -> list[Label]:
+def _columns(state: ApState, epoch: Optional[int], pair: str, client: str, verdict: Label) -> list[Label]:
     columns = [Label(when(epoch), classes="date"), Label(pair, classes="pair")]
-    if len({h.client for h in state.hashlines}) > 1:
+    if len({h.line.mac_sta for h in state.hashlines}) > 1:
         columns.append(Label(client, classes="client"))
     columns.append(verdict)
     return columns
@@ -104,7 +111,7 @@ def _hashline_columns(group: list[DatedHashline], state: ApState) -> list[Label]
     else:
         verdict = Label("challenge", classes="verdict challenge")
         verdict.tooltip = _CHALLENGE_TOOLTIP
-    columns = _columns(state, first.first_captured, first.line.pair_label, f"…{first.client}", verdict)
+    columns = _columns(state, first.first_captured, first.line.pair_label, f"…{_client(first)}", verdict)
     columns.append(Label(f"×{len(group)}" if len(group) > 1 else "", classes="count"))
     if len(state.ssids) > 1:
         columns.append(Label(first.line.ssid, classes="row-ssid", markup=False))
@@ -150,12 +157,12 @@ class _KeyRow(VerticalGroup):
         self._state = state
         self._verify_task: Optional[asyncio.Task] = None
 
-    def _history(self) -> list[tuple[int, list[Label]]]:
+    def _history(self) -> list[tuple[Optional[int], list[Label]]]:
         rows = [(v.at, _live_verification_columns(v, self._state)) for v in self.key.live_verifications]
         matched = tuple(h for h in self._state.hashlines if h.id in self.key.hashline_ids)
         rows += [(group[0].first_captured, _hashline_columns(group, self._state))
                  for group in hashline_groups(matched)]
-        return sorted(rows, key=lambda row: row[0], reverse=True)
+        return sorted(rows, key=lambda row: (row[0] is not None, row[0] or 0), reverse=True)
 
     def compose(self) -> ComposeResult:
         history = self._history()
@@ -225,7 +232,7 @@ class _KeyRow(VerticalGroup):
         button.label = "Verifying…"
         try:
             res = await LiveKeyVerifier().verify_credential(
-                self.key.capture, self.app.array, target_type=self.key.capture_type)
+                self.key.newest_source, self.app.array, target_type=self.key.capture_type)
             if res.status in (VerifyStatus.SUCCESS, VerifyStatus.INCORRECT):
                 record_live_verification(self.key, correct=res.status == VerifyStatus.SUCCESS)
             severity = {VerifyStatus.SUCCESS: "information",

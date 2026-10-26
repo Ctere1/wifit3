@@ -18,13 +18,13 @@ def _hashline(captured: int, sta: str = "112233445566", pair: str = "02") -> Dat
 def _key(capture_type: CaptureType, value: str) -> Key:
     capture = PersistedCapture(type=CaptureType.WPA_PSK, timestamp=1, path="x.txt",
                                bssid="aa:bb:cc:dd:ee:ff", value=value)
-    return Key(capture_type, value, capture, frozenset(), ())
+    return Key(capture_type, value, (capture,), frozenset(), ())
 
 
 def test_when_says_today_and_drops_the_time_for_another_year():
     now = int(time.time())
     assert when(now).startswith("today ")
-    assert when(0) == "no date"
+    assert when(None) == "no date"
     assert when(now - 2 * 366 * 86400)[-4:].isdigit()
 
 

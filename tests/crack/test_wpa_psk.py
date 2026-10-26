@@ -274,3 +274,27 @@ def test_psk_matches_ft_eapol_corrects_frame_anonce_for_message_pairs_three_and_
             _FT_EAPOL_PAIR3_DRIFT_LINE, message_pair))
     assert not _matches("correct horse battery", _ft_line_with_message_pair(
         _FT_EAPOL_PAIR3_DRIFT_LINE, "93"))
+
+
+_CHALLENGE_LINE = _HASHCAT_EAPOL_LINE[:-2] + "80"                                   # M1+M2
+_UNMATCHED_AUTHORIZED_LINE = _HASHCAT_EAPOL_LINE.replace("024022795224bffca545276c3762686f", "f" * 32)
+
+
+def _verdict(psks: list[str], *lines: str) -> bool | None:
+    return wpa_psk.psk_verdict(psks, [parse_hc22000(line) for line in lines])
+
+
+def test_psk_verdict_judges_on_authorized_lines_when_there_are_any():
+    assert _verdict(["hashcat!"], _HASHCAT_EAPOL_LINE) is True
+    assert _verdict(["hashcat?"], _HASHCAT_EAPOL_LINE) is False
+    assert _verdict(["hashcat!"], _CHALLENGE_LINE, _UNMATCHED_AUTHORIZED_LINE) is False
+
+
+def test_psk_verdict_on_only_m1m2_lines_matches_or_cannot_tell():
+    assert _verdict(["hashcat!"], _CHALLENGE_LINE) is True
+    assert _verdict(["hashcat?"], _CHALLENGE_LINE) is None
+
+
+def test_psk_verdict_without_lines_or_psks_cannot_tell():
+    assert _verdict(["hashcat!"]) is None
+    assert _verdict([], _HASHCAT_EAPOL_LINE) is None
