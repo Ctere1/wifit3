@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Hashable
+from dataclasses import dataclass
 from itertools import groupby
 from typing import Mapping, Optional
 
@@ -50,9 +51,6 @@ _KEY_CHIP_STYLE = {
     PasswordStatus.NOT_VERIFIED: "black bold on $warning",
     PasswordStatus.STALE: f"black bold on {PASSWORD_MISMATCH_COLOR}",
 }
-_KEY_LABEL = {CaptureType.WPA_PSK: "PSK", CaptureType.WPS_PIN: "PIN", CaptureType.WEP: "Key"}
-_KEY_BADGE = {CaptureType.WPA_PSK: ("PSK", "$text-success"), CaptureType.WPS_PIN: ("WPS", "$text-accent"),
-              CaptureType.WEP: ("WEP", "$text-secondary")}
 _AUTHORIZED_TOOLTIP = "PMKID or M3/M4: the AP accepted this password"
 _CHALLENGE_TOOLTIP = "No M3/M4: could be a wrong password"
 _EXPAND_LABEL, _COLLAPSE_LABEL = "▶", "▼"
@@ -60,8 +58,24 @@ _EXPAND_TOOLTIP, _COLLAPSE_TOOLTIP = "Show captures and verifications", "Hide ca
 _VERIFY_TOOLTIP = "Connect to the live AP and verify this key"
 _BUSY_TOOLTIP = "A live check is running on another AP"
 
-_KEY_NAME = {CaptureType.WPA_PSK: "PSK", CaptureType.WPS_PIN: "WPS PIN", CaptureType.WEP: "WEP key"}
-_VALUE_COLUMN = 8       # where a key's value starts in its row: toggle (3), badge (3), a space, the chip's space
+
+@dataclass(frozen=True)
+class _KeyKind:
+    name: str           # in sentences: ``WPS PIN 12345670``
+    badge: str          # before the value in its row, and on the status chip
+    badge_color: str
+
+
+_KEY_KINDS = {
+    CaptureType.WPA_PSK: _KeyKind("PSK", "PSK", "$text-success"),
+    CaptureType.WPS_PIN: _KeyKind("WPS PIN", "WPS", "$text-accent"),
+    CaptureType.WEP: _KeyKind("WEP key", "WEP", "$text-secondary"),
+}
+_TOGGLE_WIDTH = 3
+_BADGE_WIDTH = max(len(kind.badge) for kind in _KEY_KINDS.values())
+_VALUE_COLUMN = _TOGGLE_WIDTH + _BADGE_WIDTH + 2       # a space after the badge, then the chip's own space
+_LIST_INDENT = 2                                        # the UNCRACKED rows under their header
+_CHECKBOX_WIDTH = 4                                     # SelectionList's ``▐X▌ ``
 
 _VerifyingKey = tuple[str, tuple[CaptureType, str]]    # BSSID, Key.id
 _HashlineGroup = tuple[DatedHashline, ...]
@@ -69,7 +83,7 @@ _HashlineGroup = tuple[DatedHashline, ...]
 
 def key_description(key: Key) -> str:
     """``PSK hunter22``, ``WPS PIN 12345670``, ``WEP key abcde``."""
-    return f"{_KEY_NAME[key.type]} {key_text(key)}"
+    return f"{_KEY_KINDS[key.type].name} {key_text(key)}"
 
 
 def key_text(key: Key) -> str:
@@ -120,52 +134,19 @@ def _selected_count_text(count: int) -> str:
     return f"{count} capture{'' if count == 1 else 's'} selected to crack"
 
 
-def _history_row_columns(epoch: Optional[int], pair: str, client: str, verdict: Label,
-                         show_client: bool) -> list[Label]:
-    columns = [Label(date_text(epoch), classes="date"), Label(pair, classes="pair")]
-    if show_client:
-        columns.append(Label(client, classes="client"))
-    columns.append(verdict)
-    return columns
-
-
-def _hashline_columns(group: _HashlineGroup, show_client: bool, show_ssid: bool) -> list[Label]:
-    first = group[0]
-    if first.line.authorized:
-        verdict = Label("authorized", classes="verdict authorized")
-        verdict.tooltip = _AUTHORIZED_TOOLTIP
-    else:
-        verdict = Label("challenge", classes="verdict challenge")
-        verdict.tooltip = _CHALLENGE_TOOLTIP
-    columns = _history_row_columns(first.first_captured, first.line.pair_label, _client_text(first),
-                                   verdict, show_client)
-    columns.append(Label(f"×{len(group)}" if len(group) > 1 else "", classes="count"))
-    if show_ssid:
-        columns.append(Label(first.line.ssid, classes="row-ssid", markup=False))
-    return columns
-
-
-def _live_verification_columns(verification: LiveVerification, show_client: bool) -> list[Label]:
-    verdict = (Label("✓ verified live", classes="verdict live verified") if verification.correct
-               else Label("✗ rejected live", classes="verdict live rejected"))
-    return _history_row_columns(verification.at, "", "", verdict, show_client)
-
-
 def _wordlists_text(count: int) -> str:
     return f"{count} wordlist{'' if count == 1 else 's'}"
 
 
 def _exhausted_count_text(group: _HashlineGroup,
                           exhausted: Mapping[str, frozenset[ExhaustedWordlist]]) -> str:
-    """``2 wordlists`` ran out on every line of the group, ``+1 partly`` on some of them."""
+    """``2 wordlists (1 on some lines)``: the wordlists that ran out on the group's lines."""
     per_line = [exhausted.get(h.id, frozenset()) for h in group]
-    on_every = frozenset.intersection(*per_line)
-    on_some = frozenset.union(*per_line) - on_every
-    if not on_some:
-        return _wordlists_text(len(on_every)) if on_every else ""
-    if not on_every:
-        return f"{_wordlists_text(len(on_some))} partly"
-    return f"{_wordlists_text(len(on_every))} +{len(on_some)} partly"
+    on_any = frozenset.union(*per_line)
+    on_some = on_any - frozenset.intersection(*per_line)
+    if not on_any:
+        return ""
+    return _wordlists_text(len(on_any)) + (f" ({len(on_some)} on some lines)" if on_some else "")
 
 
 def _exhausted_names(group: _HashlineGroup, exhausted: Mapping[str, frozenset[ExhaustedWordlist]]) -> list[str]:
@@ -173,21 +154,37 @@ def _exhausted_names(group: _HashlineGroup, exhausted: Mapping[str, frozenset[Ex
     return sorted(" / ".join(w.names) or "unnamed wordlist" for w in wordlists)
 
 
-def _hashline_prompt(group: _HashlineGroup, show_client: bool, show_ssid: bool, exhausted_count: str) -> Content:
-    """One row of the UNCRACKED list, in the history rows' columns."""
-    first = group[0]
-    verdict, verdict_style = (("authorized", "$text-success") if first.line.authorized
-                              else ("challenge", "$text-warning"))
-    columns: list[tuple[str, str]] = [(date_text(first.first_captured).ljust(12), "$foreground-muted"),
-                                      (first.line.pair_label.ljust(5), "")]
+def _verdict_tooltip(hashline: DatedHashline) -> str:
+    return _AUTHORIZED_TOOLTIP if hashline.line.authorized else _CHALLENGE_TOOLTIP
+
+
+def _row_content(epoch: Optional[int], pair: str, client: str, verdict: tuple[str, str], show_client: bool,
+                 trailing: list[tuple[str, str]]) -> Content:
+    """One history or UNCRACKED row: date, pair, client, verdict, then ``trailing`` (text, style) columns."""
+    columns = [(date_text(epoch).ljust(12), "$foreground-muted"), (pair.ljust(5), "")]
     if show_client:
-        columns.append((_client_text(first).ljust(6), "$text-secondary"))
-    columns += [(verdict.ljust(10), verdict_style), ((f"×{len(group)}" if len(group) > 1 else "").ljust(3), "$foreground-muted")]
-    if show_ssid:
-        columns.append((first.line.ssid, ""))
-    if exhausted_count:
-        columns.append((exhausted_count, "italic $text-accent"))
+        columns.append((client.ljust(6), "$text-secondary"))
+    columns += [(verdict[0].ljust(10), verdict[1]), *trailing]
     return Content(" ").join(Content.styled(text, style) for text, style in columns)
+
+
+def _hashline_prompt(group: _HashlineGroup, show_client: bool, show_ssid: bool,
+                     exhausted_count: str, exhausted_width: int) -> Content:
+    first = group[0]
+    verdict = ("authorized", "$text-success") if first.line.authorized else ("challenge", "$text-warning")
+    trailing = [((f"×{len(group)}" if len(group) > 1 else "").ljust(3), "$foreground-muted")]
+    if exhausted_width:
+        trailing.append((exhausted_count.ljust(exhausted_width), "italic $text-accent"))
+    if show_ssid:
+        trailing.append((first.line.ssid, ""))
+    return _row_content(first.first_captured, first.line.pair_label, _client_text(first), verdict, show_client,
+                        trailing)
+
+
+def _live_verification_content(verification: LiveVerification, show_client: bool) -> Content:
+    verdict = (("✓ verified live", "$text-success") if verification.correct
+               else ("✗ rejected live", "$foreground-muted"))
+    return _row_content(verification.at, "", "", verdict, show_client, [])
 
 
 def _status_class(status: PasswordStatus) -> str:
@@ -206,14 +203,17 @@ class _KeyRow(VerticalGroup):
     DEFAULT_CSS = f"""
     _KeyRow {{ height: auto; }}
     _KeyRow .key-line {{ height: 3; }}
-    _KeyRow .no-toggle {{ width: 3; }}
-    _KeyRow Button.toggle {{ width: 3; height: 100%; content-align: center middle; background: transparent; }}
+    _KeyRow .no-toggle {{ width: {_TOGGLE_WIDTH}; }}
+    _KeyRow Button.toggle {{
+        width: {_TOGGLE_WIDTH}; height: 100%; content-align: center middle; background: transparent;
+    }}
     _KeyRow .key-text {{
         width: 1fr; height: 100%; content-align: left middle; text-wrap: nowrap; text-overflow: ellipsis;
     }}
     _KeyRow .history {{ display: none; height: auto; padding-left: {_VALUE_COLUMN}; }}
     _KeyRow.-expanded .history {{ display: block; }}
     _KeyRow .history-rows {{ height: auto; max-height: 8; scrollbar-size-vertical: 1; }}
+    _KeyRow .history-row {{ height: 1; text-wrap: nowrap; text-overflow: ellipsis; }}
     """
 
     expanded: reactive[bool] = reactive(False)
@@ -250,12 +250,15 @@ class _KeyRow(VerticalGroup):
         self._show_expansion(expanded)
         self.show_verifying(verifying)
 
-    def _history(self) -> list[tuple[Optional[int], list[Label]]]:
-        rows = [(v.at, _live_verification_columns(v, self._show_client)) for v in self.key.live_verifications]
+    def _history(self) -> list[Static]:
+        rows = [(v.at, Static(_live_verification_content(v, self._show_client), classes="history-row"))
+                for v in self.key.live_verifications]
         matched = tuple(h for h in self._state.hashlines if h.id in self.key.hashline_ids)
-        rows += [(group[0].first_captured, _hashline_columns(group, self._show_client, self._show_ssid))
-                 for group in hashline_groups(matched)]
-        return sorted(rows, key=lambda row: epoch_sort_key(row[0]), reverse=True)
+        for group in hashline_groups(matched):
+            row = Static(_hashline_prompt(group, self._show_client, self._show_ssid, "", 0), classes="history-row")
+            row.tooltip = _verdict_tooltip(group[0])
+            rows.append((group[0].first_captured, row))
+        return [row for _, row in sorted(rows, key=lambda row: epoch_sort_key(row[0]), reverse=True)]
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="key-line"):
@@ -277,12 +280,13 @@ class _KeyRow(VerticalGroup):
         if self._history_built or not self._has_history:
             return
         self._history_built = True
-        await self.history_rows.mount_all(Horizontal(*columns, classes="row") for _, columns in self._history())
+        await self.history_rows.mount_all(self._history())
 
     def _summary_markup(self) -> str:
         key = self.key
-        badge, badge_color = _KEY_BADGE[key.type]
-        markup = f"[bold {badge_color}]{badge}[/] [{_KEY_CHIP_STYLE[self.status]}] {escape(key_text(key))} [/]"
+        kind = _KEY_KINDS[key.type]
+        markup = (f"[bold {kind.badge_color}]{kind.badge.ljust(_BADGE_WIDTH)}[/] "
+                  f"[{_KEY_CHIP_STYLE[self.status]}] {escape(key_text(key))} [/]")
         total = len(self._state.hashlines)
         if key.type == CaptureType.WPA_PSK and total:
             markup += f" {_captures_count_markup(len(key.hashline_ids), total)}"
@@ -375,24 +379,14 @@ class _ApStatePanel(VerticalGroup):
     _ApStatePanel .dates {{ width: auto; color: $text-muted; margin-left: 1; }}
     _ApStatePanel .none-yet {{ color: $text-muted; padding-left: 2; }}
     _ApStatePanel .tools {{ height: auto; }}
-    _ApStatePanel .selected-count {{ color: $text-muted; padding-left: 4; }}
-    _ApStatePanel .exhausted-names {{ padding-left: 6; text-wrap: nowrap; text-overflow: ellipsis; }}
+    _ApStatePanel .selected-count {{ color: $text-muted; padding-left: {2 * _LIST_INDENT}; }}
+    _ApStatePanel .exhausted-names {{
+        padding-left: {_LIST_INDENT + _CHECKBOX_WIDTH}; text-wrap: nowrap; text-overflow: ellipsis;
+    }}
     _ApStatePanel .uncracked {{
-        height: auto; max-height: 8; margin-top: 1; padding: 0 0 0 2; border: none;
+        height: auto; max-height: 8; margin-top: 1; padding: 0 0 0 {_LIST_INDENT}; border: none;
         background: transparent; scrollbar-size-vertical: 1; text-wrap: nowrap; text-overflow: ellipsis;
     }}
-    _ApStatePanel .row {{ height: 1; }}
-    _ApStatePanel .row > * {{ margin-right: 1; text-wrap: nowrap; }}
-    _ApStatePanel .row .date {{ width: 12; color: $text-muted; }}
-    _ApStatePanel .row .pair {{ width: 5; }}
-    _ApStatePanel .row .client {{ width: 6; color: $text-secondary; }}
-    _ApStatePanel .row .verdict {{ width: 10; }}
-    _ApStatePanel .row .live {{ width: auto; }}
-    _ApStatePanel .row .count {{ width: 3; color: $text-muted; }}
-    _ApStatePanel .row .row-ssid {{ width: 1fr; text-overflow: ellipsis; }}
-    _ApStatePanel .authorized, _ApStatePanel .verified {{ color: $text-success; }}
-    _ApStatePanel .challenge {{ color: $text-warning; }}
-    _ApStatePanel .rejected {{ color: $text-muted; }}
 
     Screen.{TINY} _ApStatePanel Button.tool-btn {{ height: 1; border: none; }}
     Screen.{SHORT} _ApStatePanel Button.key-btn, Screen.{TINY} _ApStatePanel Button.key-btn,
@@ -408,14 +402,13 @@ class _ApStatePanel(VerticalGroup):
     Screen.{TINY} _ApStatePanel Rule.uncracked-rule, Screen.{NARROW} _ApStatePanel Rule.uncracked-rule {{
         margin-top: 0;
     }}
-    Screen.{WIDE} _ApStatePanel .row > * {{ margin-right: 2; }}
     Screen.{TALL}.{WIDE} _ApStatePanel {{ min-height: 100%; }}
     Screen.{TALL}.{WIDE} _ApStatePanel .uncracked {{ height: 1fr; min-height: 8; max-height: 100%; }}
     """
 
     add_key_button: Button
     _selected_count_label: Label
-    _exhausted_names: Optional[Static] = None
+    _exhausted_names_line: Optional[Static] = None
     _uncracked_list: Optional[_UncrackedList] = None
 
     def __init__(self, state: ApState, expanded_key_ids: frozenset[tuple[CaptureType, str]],
@@ -428,7 +421,9 @@ class _ApStatePanel(VerticalGroup):
 
     async def show(self, state: ApState, expanded_key_ids: frozenset[tuple[CaptureType, str]],
                    unticked_hashline_ids: frozenset[str], verifying: Optional[_VerifyingKey]) -> None:
-        """Recompose for ``state``, keeping the focus, the highlighted hashline and each list's scroll."""
+        """Recompose for ``state``; for the same AP, keep the focus, the highlighted hashline and each
+        list's scroll."""
+        same_ap = state.bssid == self._state.bssid
         focused = self.screen.focused
         focus_key = self._focus_key(focused) if focused is not None and self in focused.ancestors else None
         history_scroll = {row.key.id: row.history_rows.scroll_y for row in self.query(_KeyRow).results(_KeyRow)}
@@ -438,8 +433,9 @@ class _ApStatePanel(VerticalGroup):
         self._state, self._expanded_key_ids = state, expanded_key_ids
         self._unticked_hashline_ids, self._verifying = unticked_hashline_ids, verifying
         await self.recompose()
-        self.call_after_refresh(self._restore, focus_key, history_scroll, uncracked_scroll,
-                                highlighted[0].id if highlighted else None)
+        if same_ap:
+            self.call_after_refresh(self._restore, focus_key, history_scroll, uncracked_scroll,
+                                    highlighted[0].id if highlighted else None)
 
     def _restore(self, focus_key: Optional[Hashable], history_scroll: dict[tuple[CaptureType, str], float],
                  uncracked_scroll: float, highlighted_hashline_id: Optional[str]) -> None:
@@ -493,7 +489,7 @@ class _ApStatePanel(VerticalGroup):
         if state.handshake_and_pmkid_files and not state.hashlines:
             yield Label(_no_crackable_text(state.handshake_and_pmkid_files), classes="none-yet")
         self._uncracked_list = None
-        self._exhausted_names = None
+        self._exhausted_names_line = None
         if state.uncracked:
             yield Rule(classes="uncracked-rule")
             yield from self._compose_uncracked(show_client, show_ssid)
@@ -504,7 +500,7 @@ class _ApStatePanel(VerticalGroup):
         key = state.status_key
         if key is None:
             return status
-        chip = f"[{_KEY_CHIP_STYLE[state.status]}] {_KEY_LABEL[key.type]}: {escape(key_text(key))} [/]"
+        chip = f"[{_KEY_CHIP_STYLE[state.status]}] {_KEY_KINDS[key.type].badge}: {escape(key_text(key))} [/]"
         return f"{chip} {status}"
 
     def _compose_ssids(self) -> ComposeResult:
@@ -531,15 +527,16 @@ class _ApStatePanel(VerticalGroup):
             yield Label(Content.from_markup(_captures_count_markup(len(uncracked), len(state.hashlines))))
         groups = hashline_groups(uncracked)
         ticked = [not all(h.id in self._unticked_hashline_ids for h in group) for group in groups]
+        exhausted_counts = [_exhausted_count_text(group, exhausted) for group in groups]
+        exhausted_width = max(map(len, exhausted_counts), default=0)
         self._uncracked_list = _UncrackedList(
-            *(Selection(_hashline_prompt(group, show_client, show_ssid, _exhausted_count_text(group, exhausted)),
-                        group, is_ticked)
-              for group, is_ticked in zip(groups, ticked)),
+            *(Selection(_hashline_prompt(group, show_client, show_ssid, count, exhausted_width), group, is_ticked)
+              for group, count, is_ticked in zip(groups, exhausted_counts, ticked)),
             classes="uncracked")
         yield self._uncracked_list
         if exhausted:
-            self._exhausted_names = Static("", classes="exhausted-names")
-            yield self._exhausted_names
+            self._exhausted_names_line = Static("", classes="exhausted-names")
+            yield self._exhausted_names_line
         selected = [h.line for group, is_ticked in zip(groups, ticked) if is_ticked for h in group]
         capture = state.hashline_capture
         with Horizontal(classes="tools"):
@@ -566,10 +563,13 @@ class _ApStatePanel(VerticalGroup):
 
     @on(SelectionList.SelectionHighlighted)
     def _hashline_highlighted(self, event: SelectionList.SelectionHighlighted) -> None:
-        if event.selection_list is not self._uncracked_list or self._exhausted_names is None:
+        if event.selection_list is not self._uncracked_list:
+            return
+        event.selection_list.tooltip = _verdict_tooltip(event.selection.value[0])
+        if self._exhausted_names_line is None:
             return
         names = _exhausted_names(event.selection.value, self._state.exhausted_wordlists)
-        self._exhausted_names.update(
+        self._exhausted_names_line.update(
             Content.assemble(("exhausted: ", "$foreground-muted"),
                              Content(", ").join(Content.styled(n, "italic $text-accent") for n in names))
             if names else "")

@@ -11,6 +11,7 @@ from textual.binding import Binding
 from .vault_breakpoints import COMPACT, NARROW, SHORT, TALL, TINY, WIDE
 from .vault_table import VaultTable
 from .vault_item import AddKeyPressed, DeleteKeyPressed, VaultItemView, key_description
+from wifit3.crack.wpa_psk import psk_matches
 from wifit3.models import AccessPoint, CaptureType, PersistedCapture
 from wifit3.persist.ap_state import ApState
 from wifit3.persist.meta import meta_path, read_meta, update_meta
@@ -262,10 +263,12 @@ class VaultDrawer(ModalScreen):
     @on(DeleteKeyPressed)
     def _delete_key_pressed(self, event: DeleteKeyPressed) -> None:
         key = event.key
+        bssid = key.newest_capture.bssid
         paths = {c.path for c in key.captures}
-        state = self.app.vault.ap_state(key.newest_capture.bssid)
-        others = [k for k in state.keys if k.id != key.id and paths.intersection(c.path for c in k.captures)]
-        prompt = f"Delete [bold]{escape(key_description(key))}[/]?"
+        state = self.app.vault.ap_state(bssid)
+        others = [k for k in state.keys if k.id != key.id and {c.path for c in k.captures} <= paths]
+        description = escape(key_description(key))
+        prompt = f"Delete [bold]{description}[/]?"
         if others:
             prompt += f" Also removes {escape(', '.join(key_description(k) for k in others))}."
 
@@ -273,11 +276,11 @@ class VaultDrawer(ModalScreen):
             if not confirmed:
                 return
             try:
-                self.app.vault.delete_key(key)
+                self.app.vault.delete_key(bssid, key.id)
             except OSError as exc:
-                self.notify(f"Could not delete {key_description(key)}: {exc}", severity="error")
+                self.notify(f"Could not delete {description}: {escape(str(exc))}", severity="error")
                 return
-            self.notify(f"Deleted {key_description(key)}")
+            self.notify(f"Deleted {description}")
 
         self.app.push_screen(ConfirmModal(prompt), _delete)
 
@@ -294,13 +297,15 @@ class VaultDrawer(ModalScreen):
             return
         vault = self.app.vault
         ap = AccessPoint(bssid=credential.bssid, ssid=credential.ssid)
-        verification: Optional[bool] = None
+        verified = False
         try:
             if credential.kind == CaptureType.WPA_PSK:
-                verification = vault.verify_wpa_psk(ap.bssid, credential.value)
-                if verification is not True and vault.ap_state(ap.bssid).hashlines:
+                hashlines = vault.ap_state(ap.bssid).hashlines
+                cracked = [h for h in hashlines if psk_matches(credential.value, h.line)]
+                if hashlines and not cracked:
                     self.notify("PSK doesn't crack any saved capture", severity="error")
                     return
+                verified = any(h.line.authorized for h in cracked)
                 result = vault.save_wpa_psk(ap.ssid, ap.bssid, credential.value)
                 if result is not None:
                     self._propagate_psk(ap.bssid, ap.ssid, credential.value)
@@ -317,10 +322,10 @@ class VaultDrawer(ModalScreen):
             self.notify("Credential could not be saved", severity="error")
         elif not result.was_new:
             self.notify("Credential is already in Vault", severity="warning")
-        elif verification is True:
+        elif verified:
             self.notify("Credential verified and added to Vault")
         else:
-            self.notify("Credential added to Vault")
+            self.notify("Credential added, not verified")
 
     @work(thread=True)
     def _propagate_psk(self, bssid: str, ssid: str, psk: str) -> None:
