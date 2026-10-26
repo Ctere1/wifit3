@@ -16,17 +16,15 @@ from textual.message import Message
 from textual.widgets import Button, Checkbox, Label, Rule, Static
 
 from wifit3.campaigns.pin import EMPTY_PIN_LABEL
-from wifit3.models import CaptureType, PersistedCapture
+from wifit3.models import CaptureType
 from wifit3.persist.ap_state import (
     ApState,
     DatedHashline,
     Key,
     LiveVerification,
     PasswordStatus,
-    confirmed_at,
     epoch_sort_key,
-    load_ap_state,
-    record_live_verification,
+    is_confirmed,
 )
 from wifit3.ui.vault.tools_ui import UI_TOOLS
 from wifit3.vault.exhaustion import exhausted_wordlist_names
@@ -191,7 +189,7 @@ class _KeyRow(VerticalGroup):
         total = len(self._state.hashlines)
         if key.type == CaptureType.WPA_PSK and total:
             markup += f" [dim]({len(key.hashline_ids)}/{total} captures)[/]"
-            if confirmed_at(key, self._state.hashlines) is None:
+            if not is_confirmed(key, self._state.hashlines):
                 markup += " [#ffaf00]unverified[/]"
         return markup
 
@@ -234,13 +232,11 @@ class _KeyRow(VerticalGroup):
         try:
             res = await LiveKeyVerifier().verify_credential(
                 self.key.newest_capture, self.app.array, target_type=self.key.type)
-            if res.status in (VerifyStatus.SUCCESS, VerifyStatus.INCORRECT):
-                record_live_verification(self.key, correct=res.status == VerifyStatus.SUCCESS)
             severity = {VerifyStatus.SUCCESS: "information",
                         VerifyStatus.INCORRECT: "warning"}.get(res.status, "error")
             self.notify(res.body, title=res.title, severity=severity)
             if res.status in (VerifyStatus.SUCCESS, VerifyStatus.INCORRECT):
-                self.app.vault.refresh()
+                self.app.vault.record_live_verification(self.key, correct=res.status == VerifyStatus.SUCCESS)
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -465,9 +461,9 @@ class VaultItemView(Vertical):
         for panel in self.query(_CapturePanel):
             panel.cancel_verification()
 
-    def load(self, bssid: str, ssid: Optional[str], captures: list[PersistedCapture]) -> None:
+    def load(self, bssid: str, ssid: Optional[str]) -> None:
         """Show this AP; reloading the AP in view keeps what the user expanded, ticked and scrolled."""
-        state = load_ap_state(bssid, captures) if bssid else None
+        state = self.app.vault.ap_state(bssid) if bssid else None
         if (bssid, ssid, state) == (self._bssid, self._ssid, self._state):
             return
         panels = list(self.query(_CapturePanel).results(_CapturePanel))

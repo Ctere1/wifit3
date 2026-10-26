@@ -171,15 +171,23 @@ def _key_captures(captures: list[PersistedCapture]) -> dict[tuple[CaptureType, s
     return found
 
 
-def confirmed_at(key: Key, hashlines: Iterable[DatedHashline]) -> Optional[int]:
-    """When a dated authorized hashline, a correct live check or the AP itself last confirmed the
-    key; None if nothing has (an M1+M2 match may be a client's wrong password)."""
-    dates = [h.first_captured for h in hashlines
-             if h.id in key.hashline_ids and h.line.authorized and h.first_captured is not None]
+def _confirmations(key: Key, hashlines: Iterable[DatedHashline]) -> list[Optional[int]]:
+    """Dates of the authorized hashlines (None when undated), correct live checks and AP recoveries
+    that confirm the key. An M1+M2 match doesn't: it may be a client's wrong password."""
+    dates = [h.first_captured for h in hashlines if h.id in key.hashline_ids and h.line.authorized]
     dates += [v.at for v in key.live_verifications if v.correct]
     if key.ap_recovered_at is not None:
         dates.append(key.ap_recovered_at)
-    return max(dates, default=None)
+    return dates
+
+
+def confirmed_at(key: Key, hashlines: Iterable[DatedHashline]) -> Optional[int]:
+    """When the key was last confirmed; None if nothing dated has (see ``is_confirmed``)."""
+    return max((d for d in _confirmations(key, hashlines) if d is not None), default=None)
+
+
+def is_confirmed(key: Key, hashlines: Iterable[DatedHashline]) -> bool:
+    return bool(_confirmations(key, hashlines))
 
 
 def password_status(hashlines: Iterable[DatedHashline],
@@ -210,7 +218,7 @@ def password_status(hashlines: Iterable[DatedHashline],
     if newest_key is not None:
         return PasswordStatus.CURRENT, newest_key
     unconfirmed_newer = [k for k in keys if newest_at is not None and k.newest_capture.timestamp > newest_at
-                         and confirmed_at(k, hashlines) is None]
+                         and not is_confirmed(k, hashlines)]
     if unconfirmed_newer:
         return PasswordStatus.NOT_VERIFIED, unconfirmed_newer[0]
     return PasswordStatus.STALE, next((key for _, key in evidence if key is not None), None)

@@ -22,10 +22,13 @@ from wifit3.persist.capture_history import load_capture_index, summarize
 from wifit3.persist.common import LEGACY_CAPTURE_RE, bssid_to_dashed, safe_ssid
 from wifit3.persist.config import Config
 from wifit3.persist.ap_state import (
+    ApState,
+    Key,
     PasswordStatus,
     load_ap_state,
     read_hashlines,
     record_hashlines_captured,
+    record_live_verification,
 )
 from wifit3.persist.meta import meta_path, update_meta
 from wifit3.persist.save import SaveResult
@@ -100,7 +103,8 @@ class Vault:
 
     def __init__(self) -> None:
         self._index: Dict[str, List[PersistedCapture]] = {}
-        self._change_listeners: list[Callable[[], None]] = []
+        self._ap_states: Dict[str, ApState] = {}
+        self._change_listeners: list[Callable[[Optional[str]], None]] = []
         self._probed_ssids_source: Callable[[], Iterable[str]] = lambda: ()
         self.revision = 0   # bumped on every index change; a cache key for readers
         self.errors: list[str] = []                       # surfaced as toasts by the app on mount
@@ -121,9 +125,10 @@ class Vault:
     def refresh(self) -> None:
         """Re-scan Config.captures_dir into the cache."""
         self._index = load_capture_index()
-        self._notify_changed()
+        self.notify_changed(None)
 
-    def subscribe(self, listener: Callable[[], None]) -> None:
+    def subscribe(self, listener: Callable[[Optional[str]], None]) -> None:
+        """``listener`` gets the BSSID of the AP that changed, or None when every AP may have."""
         self._change_listeners.append(listener)
 
     def set_probed_ssids_source(self, source: Callable[[], Iterable[str]]) -> None:
@@ -140,23 +145,38 @@ class Vault:
         """This session's probed SSIDs, sorted."""
         return sorted(self._probed_ssids_source())
 
-    def _notify_changed(self) -> None:
+    def notify_changed(self, bssid: Optional[str]) -> None:
+        """Drop the AP's cached state (every AP's for None) and tell the listeners."""
         self.revision += 1
+        if bssid is None:
+            self._ap_states.clear()
+        else:
+            self._ap_states.pop(bssid, None)
         for listener in self._change_listeners:
             try:
-                listener()
+                listener(bssid)
             except Exception:
                 logger.exception("Vault change listener failed")
 
     def _insert_capture(self, capture: PersistedCapture) -> None:
         self._index.setdefault(capture.bssid, []).insert(0, capture)
-        self._notify_changed()
+        self.notify_changed(capture.bssid)
 
     # ----- reads -----
 
     def persisted(self, bssid: str) -> List[PersistedCapture]:
         """This AP's saved captures, newest-first (empty if none)."""
         return self._index.get(bssid, [])
+
+    def ap_state(self, bssid: str) -> ApState:
+        """The AP's keys, hashlines and password status, cached until the AP changes."""
+        state = self._ap_states.get(bssid)
+        if state is None:
+            revision = self.revision
+            state = load_ap_state(bssid, self.persisted(bssid))
+            if self.revision == revision:       # not changed by another thread meanwhile
+                self._ap_states[bssid] = state
+        return state
 
     def ssid(self, bssid: str) -> Optional[str]:
         """The AP's SSID; a .pcap only knows the filename-safe form, so any other capture wins."""
@@ -320,6 +340,11 @@ class Vault:
             self.manager.submit_job(tool.name, capture, self.add_probed_ssids(config),
                                     auto_crack=True, hashlines=uncracked)
 
+    def record_live_verification(self, key: Key, correct: bool) -> None:
+        """Note that a live check against the AP accepted or rejected the key."""
+        record_live_verification(key, correct)
+        self.notify_changed(key.newest_capture.bssid)
+
     def save_wep_key(self, ap: "AccessPoint", key: bytes) -> Optional[SaveResult]:
         result = save.save_wep_key(ap, key)
         if result:
@@ -367,12 +392,12 @@ class Vault:
         """Delete a capture's file and drop every cache entry backed by it (an
         aggregate .hc22000 backs both an HS and a PMKID entry)."""
         Path(capture.path).unlink(missing_ok=True)
-        changed = False
+        changed: List[str] = []
         for bssid in list(self._index):
             remaining = [c for c in self._index[bssid] if c.path != capture.path]
             if len(remaining) == len(self._index[bssid]):
                 continue
-            changed = True
+            changed.append(bssid)
             if remaining:
                 self._index[bssid] = remaining
             else:
@@ -380,8 +405,8 @@ class Vault:
         meta_name = safe_ssid(capture.ssid)
         if not any(safe_ssid(c.ssid) == meta_name for c in self.persisted(capture.bssid)):
             meta_path(capture.ssid, capture.bssid).unlink(missing_ok=True)
-        if changed:
-            self._notify_changed()
+        for bssid in changed:
+            self.notify_changed(bssid)
 
     def zip_captures(self, captures: List[PersistedCapture],
                      save_as: Optional[Path] = None) -> Optional[Path]:

@@ -14,6 +14,8 @@ from wifit3.persist.ap_state import (
     Key,
     LiveVerification,
     PasswordStatus,
+    confirmed_at,
+    is_confirmed,
     load_ap_state,
     password_status,
     record_hashlines_captured,
@@ -150,6 +152,17 @@ def test_a_rejected_wps_pin_does_not_touch_the_psk():
 def test_undated_authorized_evidence_is_older_than_any_dated():
     key = _key(dated := _hashline(_EAPOL_LINE, 10))
     assert password_status([dated, _hashline(_OTHER_LINE)], [key]) == (PasswordStatus.CURRENT, key)
+
+
+def test_a_key_matched_only_by_an_undated_authorized_hashline_is_confirmed_but_undated():
+    key = _key(undated := _hashline(_EAPOL_LINE))
+    assert password_status([undated], [key]) == (PasswordStatus.CURRENT, key)
+    assert is_confirmed(key, [undated]) and confirmed_at(key, [undated]) is None
+
+
+def test_an_m1m2_match_does_not_confirm():
+    key = _key(challenge := _hashline(_CHALLENGE_LINE, 10))
+    assert not is_confirmed(key, [challenge]) and confirmed_at(key, [challenge]) is None
 
 
 def _write_aggregate(ssid: str, *lines: str) -> Path:

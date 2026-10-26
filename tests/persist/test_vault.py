@@ -104,13 +104,46 @@ def test_refresh_rescans_the_current_config_dir(tmp_path, monkeypatch):
 def test_vault_notifies_subscribers_only_when_capture_index_changes(tmp_path):
     vault = Vault()
     changes = []
-    vault.subscribe(lambda: changes.append(vault.revision))
+    vault.subscribe(lambda bssid: changes.append((bssid, vault.revision)))
     ap = AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="HomeNet")
 
     vault.save_wep_key(ap, b"abcde")
     vault.save_wep_key(ap, b"abcde")
 
-    assert changes == [2]
+    assert changes == [("aa:bb:cc:dd:ee:ff", 2)]
+
+
+def test_ap_state_is_cached_until_that_ap_changes(tmp_path):
+    v = Vault()
+    home = AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="HomeNet")
+    other = AccessPoint(bssid="aa:bb:cc:dd:ee:01", ssid="Other")
+    v.save_wep_key(home, b"abcde")
+    v.save_wep_key(other, b"fghij")
+    home_state, other_state = v.ap_state(home.bssid), v.ap_state(other.bssid)
+    assert v.ap_state(home.bssid) is home_state
+
+    v.save_wep_key(other, b"klmno")
+    assert v.ap_state(home.bssid) is home_state
+    assert len(v.ap_state(other.bssid).keys) == 2
+
+    v.refresh()
+    assert v.ap_state(home.bssid) is not home_state
+
+
+def test_each_write_notifies_its_ap_and_a_refresh_every_ap(tmp_path):
+    v = Vault()
+    changed: list[str | None] = []
+    v.subscribe(changed.append)
+    ap = AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="HomeNet")
+
+    v.save_wep_key(ap, b"abcde")
+    [key] = v.ap_state(ap.bssid).keys
+    v.record_live_verification(key, correct=True)
+    assert v.ap_state(ap.bssid).keys[0].live_verifications[0].correct
+    v.delete_capture(v.persisted(ap.bssid)[0])
+    v.refresh()
+
+    assert changed == [ap.bssid, ap.bssid, ap.bssid, None]
 
 
 def test_save_wep_caches_key_and_dedupes(tmp_path):

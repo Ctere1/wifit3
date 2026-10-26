@@ -170,12 +170,11 @@ class VaultDrawer(ModalScreen):
 
     def _load_widget(self, bssid: str) -> None:
         widget = self.query_one("#vault-item", VaultItemView)
-        table = self.query_one("#vault-table", VaultTable)
-        entry = table._aps.get(bssid)
-        if entry is not None:
-            widget.load(bssid, table.display_name(bssid, entry[0]), entry[1])
+        if bssid and self.app.vault.persisted(bssid):
+            ssid = self.app.vault.ssid(bssid)
+            widget.load(bssid, self.query_one("#vault-table", VaultTable).display_name(bssid, ssid))
         else:
-            widget.load("", None, [])
+            widget.load("", None)
 
     @on(VaultTable.TableReloaded)
     def _table_reloaded(self, event: VaultTable.TableReloaded) -> None:
@@ -207,8 +206,7 @@ class VaultDrawer(ModalScreen):
         if aps.row_count == 0:
             return None, ""
         bssid = aps.coordinate_to_cell_key(aps.cursor_coordinate).row_key.value or ""
-        entry = self.query_one("#vault-table", VaultTable)._aps.get(bssid)
-        return (entry[0] if entry is not None else None), bssid
+        return self.app.vault.ssid(bssid), bssid
 
     def action_set_nickname(self) -> None:
         ssid, bssid = self._selected_network()

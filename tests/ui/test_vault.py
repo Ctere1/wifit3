@@ -405,8 +405,8 @@ async def test_a_hashline_capture_offers_each_cracker_by_its_label(tmp_path, wid
     async with app.run_test(size=(width, 40)) as pilot:
         view = await _open_vault(app)
         await pilot.pause()
-        bssid, (ssid, caps) = next(iter(view.query_one("#vault-table")._aps.items()))
-        view.query_one("VaultItemView").load(bssid, ssid, caps)
+        bssid = "aa:bb:cc:dd:ee:ff"
+        view.query_one("VaultItemView").load(bssid, app.vault.ssid(bssid))
         await pilot.pause(0)
 
         panel = view.query_one(_CapturePanel)

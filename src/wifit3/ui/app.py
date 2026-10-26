@@ -161,7 +161,7 @@ class WifiteApp(App):
                                         on_fatal=self._on_usb_fatal)
         self.target_ap: Optional[AccessPoint] = None
         self.vault = Vault()
-        self.vault.subscribe(lambda: self.call_later(self._refresh_vault_table))   # any thread
+        self.vault.subscribe(lambda _bssid: self.call_later(self._refresh_vault_table))   # any thread
         self.vault.set_probed_ssids_source(self._probed_ssids)
         self._job_status: dict[str, ToolStatus] = {}
         self.pbc_enabled: bool = Config.wps_auto_pbc
