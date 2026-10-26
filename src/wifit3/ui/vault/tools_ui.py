@@ -13,7 +13,7 @@ class LaunchModalConstructor(Protocol):
     """The constructor every Vault tool's launch modal shares."""
 
     def __call__(self, confirm_label: str = "Launch", capture: Optional[PersistedCapture] = None,
-                 probed_ssids: Sequence[str] = ()) -> ModalScreen[dict]: ...
+                 probed_ssids: Sequence[str] = (), hashline_ids: Sequence[str] = ()) -> ModalScreen[dict]: ...
 
 
 UI_TOOLS: Dict[ToolName, LaunchModalConstructor] = {

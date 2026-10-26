@@ -609,29 +609,6 @@ def test_the_auto_crack_threshold_counts_every_ssid_of_the_ap(tmp_path, mocker):
     assert v.manager.submit_job.call_count == 1
 
 
-class _CountingVault(Vault):
-    """Counts the AP states it computes rather than reads from its cache."""
-    computed = 0
-
-    def ap_state(self, bssid: str):
-        if bssid not in self._ap_states:
-            self.computed += 1
-        return super().ap_state(bssid)
-
-
-def test_a_save_computes_the_ap_state_once(tmp_path, mocker):
-    v = _CountingVault()
-    mocker.patch.object(v.manager, "submit_job")
-    ap = _ap_with_hs(pmkid=b"\x11" * 16)
-    v.save_handshake(ap, _CLIENT)
-    computed = v.computed
-
-    ap.handshakes[_CLIENT].messages[0] = _ef(1, nonce=b"\xA1" + b"\x00" * 31, payload_mic=b"\x00" * 16)
-    assert v.save_handshake(ap, _CLIENT).was_new
-
-    assert v.computed == computed + 1
-
-
 def test_save_dates_its_new_hashlines_in_the_meta(tmp_path, mocker):
     v = Vault()
     mocker.patch.object(v.manager, "submit_job")

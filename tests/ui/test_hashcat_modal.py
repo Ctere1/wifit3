@@ -378,7 +378,7 @@ async def test_exhausted_wordlists_and_sources_are_marked_with_when_and_on_how_m
     date = datetime.fromtimestamp(when).strftime("%Y-%m-%d")
     app = _Host()
     async with app.run_test() as pilot:
-        modal = CpuCrackConfigModal(capture=persisted)
+        modal = CpuCrackConfigModal(capture=persisted, hashline_ids=ids)
         app.push_screen(modal)
         await app.workers.wait_for_complete()
         await pilot.pause()
@@ -406,7 +406,7 @@ async def test_exhausted_rows_start_unchecked_and_one_click_restores_them(tmp_pa
         wordlist_identity(exhausted_list): {hashline_id(line): int(time.time())}})
     app = _Host()
     async with app.run_test() as pilot:
-        modal = CpuCrackConfigModal(capture=persisted)
+        modal = CpuCrackConfigModal(capture=persisted, hashline_ids=[hashline_id(line)])
         app.push_screen(modal)
         await app.workers.wait_for_complete()
         await pilot.pause()

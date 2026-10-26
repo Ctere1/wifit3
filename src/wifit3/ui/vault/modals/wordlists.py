@@ -22,8 +22,8 @@ from wifit3.crack.passwords import (DEFAULT_PASSWORDS_PATH, read_passwords, ssid
 from wifit3.models import PersistedCapture
 from wifit3.persist.config import Config, ConfigError, CpuCrackSettings, HashcatSettings
 from wifit3.ui.path_picker import BROWSE_GLYPH, PathPickerModal
-from wifit3.persist.exhaustion import (SSID_VARIANTS_IDENTITY, Exhaustion, capture_hashline_ids,
-                                       read_exhaustion, wordlist_identity)
+from wifit3.persist.exhaustion import SSID_VARIANTS_IDENTITY, Exhaustion, read_exhaustion, wordlist_identity
+from wifit3.persist.meta import read_bssid_metas
 from wifit3.vault.tools.cracker import capture_ssid_variants
 
 _EXAMPLE_SSID = "HomeWifi"
@@ -51,10 +51,6 @@ def _file_identity(path: str | Path) -> Optional[str]:
         return wordlist_identity(path) if Path(path).is_file() else None
     except OSError:
         return None
-
-
-def _capture_exhaustion(capture: PersistedCapture) -> dict[str, Exhaustion]:
-    return read_exhaustion(capture.bssid, capture_hashline_ids(capture.path))
 
 
 def _exhausted_tooltip(exhaustion: Exhaustion) -> str:
@@ -91,12 +87,13 @@ class WordlistConfigModal(ModalScreen[dict]):
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
     def __init__(self, confirm_label: str = "Launch", capture: Optional[PersistedCapture] = None,
-                 probed_ssids: Sequence[str] = ()) -> None:
+                 probed_ssids: Sequence[str] = (), hashline_ids: Sequence[str] = ()) -> None:
         """``confirm_label`` "Save" configures the tool without the caller launching a job;
-        ``capture`` is the one a launch cracks, for its SSID variant count."""
+        ``capture`` (its SSID variant count) and ``hashline_ids`` (exhausted wordlists) are what a launch cracks."""
         super().__init__()
         self._confirm_label = confirm_label
         self._capture = capture
+        self._hashline_ids = list(hashline_ids)
         self._probed_ssid_passwords = len(ssid_passwords(probed_ssids))
         self._exhaustion: dict[str, Exhaustion] = {}
         self._wordlists: list[str] = list(self._settings().wordlists)
@@ -224,8 +221,9 @@ class WordlistConfigModal(ModalScreen[dict]):
                    else f"about {_ssid_variants_per_ssid():,} per SSID")
         self.query_one("#ap-ssid-passwords", Checkbox).label = (
             f"This AP's SSID variants [dim]({ap_ssid})[/dim]")
-        if self._capture is not None:
-            self._exhaustion = await asyncio.to_thread(_capture_exhaustion, self._capture)
+        if self._capture is not None and self._hashline_ids:
+            metas = await asyncio.to_thread(read_bssid_metas, self._capture.bssid)
+            self._exhaustion = read_exhaustion(metas, self._hashline_ids)
             self._mark_exhausted()
 
     def _mark_exhausted(self) -> None:

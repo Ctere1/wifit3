@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Iterable, Optional
@@ -11,7 +11,7 @@ from wifit3.crack.hc22000_format import Hc22000Line, hashline_id, read_hc22000
 from wifit3.crack.wpa_psk import psk_matches
 from wifit3.models import AP_RECOVERED_CAPTURE_TYPES, PSK_CAPTURE_TYPES, CaptureType, PersistedCapture
 from wifit3.persist.exhaustion import Exhaustion, read_exhaustion
-from wifit3.persist.meta import bssid_meta_paths, meta_path, read_meta, update_meta
+from wifit3.persist.meta import meta_path, read_bssid_metas, read_meta, update_meta
 from wifit3.persist.pcap import read_pcap
 
 _HASHLINES_KEY = "hashlines"
@@ -82,12 +82,8 @@ class ApState:
     status: PasswordStatus
     status_key: Optional[Key]
     hashline_capture: Optional[PersistedCapture]    # the newest SSID's .hc22000; jobs are filed under it
-    uncracked_exhaustion: tuple[Exhaustion, ...] = ()   # wordlists that ran out on the uncracked lines
-
-    @property
-    def uncracked(self) -> tuple[DatedHashline, ...]:
-        cracked = {h for key in self.keys for h in key.hashline_ids}
-        return tuple(h for h in self.hashlines if h.id not in cracked)
+    uncracked: tuple[DatedHashline, ...]            # the hashlines no key matches, newest first
+    uncracked_exhaustion: tuple[Exhaustion, ...]    # wordlists that ran out on the uncracked lines
 
 
 def epoch_sort_key(epoch: Optional[int]) -> tuple[bool, int]:
@@ -229,7 +225,7 @@ def password_status(hashlines: Iterable[DatedHashline],
 def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
     """``captures``: the AP's indexed captures (every SSID). Dates missing from the .meta files
     are read from the AP's pcaps."""
-    metas = [read_meta(path) for path in bssid_meta_paths(bssid)]
+    metas = read_bssid_metas(bssid)
     lines = read_hashlines(bssid, captures)
     dates = _stored_dates(metas)
     undated = {hid: line for hid, (_, line) in lines.items() if not dates.get(hid)}
@@ -254,10 +250,11 @@ def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
     ssids = _ssid_histories(hashlines, keys)
     hc22000 = sorted((c for c in captures if c.path.endswith(".hc22000")),
                      key=lambda c: (bool(ssids) and c.ssid == ssids[0].ssid, c.timestamp), reverse=True)
-    state = ApState(bssid, ssids, tuple(hashlines), tuple(keys), status, status_key,
-                    hc22000[0] if hc22000 else None)
-    exhaustion = read_exhaustion(bssid, [h.id for h in state.uncracked])
-    return replace(state, uncracked_exhaustion=tuple(exhaustion.values()))
+    cracked = {hid for key in keys for hid in key.hashline_ids}
+    uncracked = tuple(h for h in hashlines if h.id not in cracked)
+    exhaustion = read_exhaustion(metas, [h.id for h in uncracked]) if uncracked else {}
+    return ApState(bssid, ssids, tuple(hashlines), tuple(keys), status, status_key,
+                   hc22000[0] if hc22000 else None, uncracked, tuple(exhaustion.values()))
 
 
 def _ssid_histories(hashlines: list[DatedHashline], keys: list[Key]) -> tuple[SsidHistory, ...]:

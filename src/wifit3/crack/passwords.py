@@ -97,3 +97,16 @@ def read_passwords(path: Path) -> Iterator[str]:
             psk = line.rstrip("\r\n")
             if is_valid_psk(psk):
                 yield psk
+
+
+def expand_wordlists(wordlist_paths: list[str]) -> list[str]:
+    """The existing files among ``wordlist_paths``; a directory contributes the files inside it."""
+    expanded: list[str] = []
+    for raw in wordlist_paths:
+        path = Path(raw).expanduser()
+        if path.is_dir():
+            children = sorted(child.resolve() for child in path.iterdir() if child.is_file())
+            expanded.extend(str(child) for child in children)
+        elif path.is_file():
+            expanded.append(str(path.resolve()))
+    return expanded

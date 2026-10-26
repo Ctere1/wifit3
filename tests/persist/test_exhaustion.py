@@ -3,7 +3,7 @@ import time
 
 from wifit3.crack.hc22000_format import hashline_id
 from wifit3.models import CaptureType, PersistedCapture
-from wifit3.persist.meta import meta_path, read_meta, update_meta
+from wifit3.persist.meta import meta_path, read_bssid_metas, read_meta, update_meta
 from wifit3.persist.config import Config
 from wifit3.persist.exhaustion import (Exhaustion, capture_hashline_ids, read_exhaustion,
                                        record_exhausted, wordlist_identity)
@@ -45,7 +45,7 @@ def test_exhaustion_counts_the_captures_current_hashlines_and_keeps_the_latest(t
     record_exhausted("Home_Net", _BSSID, "8:200", "b.txt", [hashline_id(_LINE_A), hashline_id("WPA*gone")])
     record_exhausted("Home_Net", _BSSID, "ssid-variants:v1", "SSID variants", [])
 
-    found = read_exhaustion(_BSSID, capture_hashline_ids(capture.path))
+    found = read_exhaustion(read_bssid_metas(_BSSID), capture_hashline_ids(capture.path))
     assert found["9:100"] == Exhaustion("9:100", ("a.txt",), 2, 2, future)
     assert (found["8:200"].exhausted_hashlines, found["8:200"].hashlines) == (1, 2)
     assert found["8:200"].latest >= before and "ssid-variants:v1" not in found
@@ -54,22 +54,22 @@ def test_exhaustion_counts_the_captures_current_hashlines_and_keeps_the_latest(t
     assert meta["exhausted"]["9:100"][hashline_id(_LINE_A)] >= before
 
 
-def test_read_exhaustion_merges_every_ssid_and_names_old_records(tmp_path, monkeypatch):
+def test_read_exhaustion_merges_every_ssid_and_names_old_records(tmp_path):
     configured = tmp_path / "rockyou.txt"
     configured.write_bytes(b"password\n")
-    monkeypatch.setattr(Config.hashcat, "wordlists", [str(configured)])
+    Config.hashcat.wordlists = [str(tmp_path)]      # a directory; conftest resets the settings
     a, b = hashline_id(_LINE_A), hashline_id(_LINE_B)
     record_exhausted("Old", _BSSID, "9:100", "a.txt", [a])
     record_exhausted("New", _BSSID, "9:100", "a-copy.txt", [b])
     update_meta("New", _BSSID, exhausted={"9:100": {b: 1}, wordlist_identity(configured): {b: 1}})
 
-    found = read_exhaustion(_BSSID, [a, b])
+    found = read_exhaustion(read_bssid_metas(_BSSID), [a, b])
     assert (found["9:100"].wordlist_names, found["9:100"].exhausted_hashlines) == (("a-copy.txt", "a.txt"), 2)
     assert found[wordlist_identity(configured)].wordlist_names == ("rockyou.txt",)
-    assert read_exhaustion(_BSSID, [hashline_id("WPA*other")]) == {}
+    assert read_exhaustion(read_bssid_metas(_BSSID), [hashline_id("WPA*other")]) == {}
 
 
 def test_a_record_with_no_name_and_no_configured_wordlist_has_no_names(tmp_path):
     a = hashline_id(_LINE_A)
     update_meta("Home", _BSSID, exhausted={"7:700": {a: 1}})
-    assert read_exhaustion(_BSSID, [a])["7:700"].wordlist_names == ()
+    assert read_exhaustion(read_bssid_metas(_BSSID), [a])["7:700"].wordlist_names == ()

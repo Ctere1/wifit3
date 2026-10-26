@@ -65,9 +65,9 @@ class HashtopolisConfigModal(ModalScreen[dict]):
     """
 
     def __init__(self, confirm_label: str = "Launch", capture: Optional[PersistedCapture] = None,
-                 probed_ssids: Sequence[str] = ()) -> None:
-        """``confirm_label`` "Save" configures the tool without the caller launching a job;
-        ``capture`` and ``probed_ssids`` are unused, the server holds the wordlists."""
+                 probed_ssids: Sequence[str] = (), hashline_ids: Sequence[str] = ()) -> None:
+        """``confirm_label`` "Save" configures the tool without the caller launching a job; the
+        other arguments are unused, the server holds the wordlists."""
         super().__init__()
         self._confirm_label = confirm_label
         settings = Config.hashtopolis

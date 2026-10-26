@@ -20,6 +20,7 @@ from wifit3.models import Handshake, PersistedCapture, ToolResult, ToolStatus
 from wifit3.models.access_point import CaptureType
 from wifit3.models.jobs import JobAction, JobState
 from wifit3.persist.config import Config
+from wifit3.persist.meta import read_bssid_metas
 from wifit3.persist.exhaustion import (SSID_VARIANTS_IDENTITY, capture_hashline_ids, read_exhaustion,
                                        wordlist_identity)
 from wifit3.vault.tools.cpu_crack import CpuCrackTool
@@ -340,7 +341,7 @@ def test_a_job_with_no_password_source_refuses_to_launch(tool, tmp_path):
 
 
 def _capture_exhaustion(job: JobState) -> set[str]:
-    return set(read_exhaustion("fc:69:0c:15:82:64", capture_hashline_ids(job.capture_path)))
+    return set(read_exhaustion(read_bssid_metas("fc:69:0c:15:82:64"), capture_hashline_ids(job.capture_path)))
 
 
 def test_each_password_source_is_its_own_queue_entry_recorded_once_exhausted(tool, tmp_path,

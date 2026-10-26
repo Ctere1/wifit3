@@ -4,7 +4,7 @@ import tempfile
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from wifit3.models import PersistedCapture
 from wifit3.models.jobs import JobAction, JobState, ToolCapability, ToolStatus, ToolResult
@@ -92,6 +92,7 @@ class JobManager:
                     job.progress_msg = "Interrupted: wifit3 closed before the job started"
                     changed = True
                     continue
+                detail_and_status = (job.detail, job.status)
                 res = tool.poll_status(job)
                 if res.status == ToolStatus.RUNNING:
                     logger.info(f"Adopted still-running {job.tool_name} job {job_id}")
@@ -107,6 +108,7 @@ class JobManager:
                     self._persist_cracked_key(job, res)
                     changed = True
                 _set_actions(job, res.actions)
+                self._notify_if_moved_on(job, detail_and_status, self._capture)
             except Exception as exc:
                 logger.exception(f"Failed to reconcile job {job_id}")
                 job.status = ToolStatus.ERROR
@@ -197,7 +199,7 @@ class JobManager:
             elif job.status == ToolStatus.RUNNING:
                 try:
                     tracked = job.to_dict()
-                    wordlist_and_status = (job.detail, job.status)
+                    detail_and_status = (job.detail, job.status)
                     res = tool.poll_status(job)
                     if res.status != job.status or res.value != job.progress_msg:
                         logger.info(f"Changed status for job ID {job_id}: {res}")
@@ -210,8 +212,7 @@ class JobManager:
                     elif job.to_dict() != tracked:
                         changed = True      # the tool moved the job on (its next wordlist)
                     _set_actions(job, res.actions)
-                    if (job.detail, job.status) != wordlist_and_status and (cap := capture_for(job.capture_path)):
-                        self.vault.notify_changed(cap.bssid)    # a wordlist that ran out is in the AP's .meta
+                    self._notify_if_moved_on(job, detail_and_status, capture_for)
                 except Exception as exc:
                     logger.exception(f"Error while polling status for job ID {job_id}")
                     job.status = ToolStatus.ERROR
@@ -221,13 +222,22 @@ class JobManager:
         if changed:
             self._save()
 
+    def _notify_if_moved_on(self, job: JobState, detail_and_status: tuple[str, ToolStatus],
+                            capture_for: Callable[[str], Optional[PersistedCapture]]) -> None:
+        """A job that moved to its next wordlist or ended may have recorded the last one as run out,
+        in its AP's .meta."""
+        if (job.detail, job.status) != detail_and_status and (capture := capture_for(job.capture_path)):
+            self.vault.notify_changed(capture.bssid)
+
+    def _capture(self, path: str) -> Optional[PersistedCapture]:
+        return next((c for c in self.vault.all_captures() if c.path == path), None)
+
     def _persist_cracked_key(self, job: JobState, res: ToolResult, capture_for=None) -> None:
         """A SUCCESS result carrying a recovered key is written beside its capture as a
         vault artifact, then folded into the in-memory index."""
         if res.status != ToolStatus.SUCCESS or res.key is None:
             return
-        cap = (capture_for(job.capture_path) if capture_for is not None else
-               next((c for c in self.vault.all_captures() if c.path == job.capture_path), None))
+        cap = capture_for(job.capture_path) if capture_for is not None else self._capture(job.capture_path)
         if not cap:
             return
         ssid = self._essid_from_capture(job.hashlines_source) or cap.ssid

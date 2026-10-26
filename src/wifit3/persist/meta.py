@@ -14,9 +14,9 @@ def meta_path(ssid: Optional[str], bssid: str) -> Path:
     return Path(Config.captures_dir) / f"{safe_ssid(ssid)}_{bssid_to_dashed(bssid)}.meta"
 
 
-def bssid_meta_paths(bssid: str) -> list[Path]:
-    """Every SSID's .meta for this BSSID."""
-    return sorted(Path(Config.captures_dir).glob(f"*_{bssid_to_dashed(bssid)}.meta"))
+def read_bssid_metas(bssid: str) -> list[dict[str, Any]]:
+    """Every SSID's .meta for this BSSID, read (see ``read_meta``)."""
+    return [read_meta(path) for path in sorted(Path(Config.captures_dir).glob(f"*_{bssid_to_dashed(bssid)}.meta"))]
 
 
 def read_meta(path: Path) -> dict[str, Any]:

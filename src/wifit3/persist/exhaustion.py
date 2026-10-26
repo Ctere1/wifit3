@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from wifit3.crack.hc22000_format import hashline_id, read_hc22000
-from wifit3.crack.passwords import DEFAULT_PASSWORDS_PATH, SSID_VARIANTS_VERSION
+from wifit3.crack.passwords import DEFAULT_PASSWORDS_PATH, SSID_VARIANTS_VERSION, expand_wordlists
 from wifit3.persist.config import Config
-from wifit3.persist.meta import bssid_meta_paths, meta_path, read_meta, update_meta
+from wifit3.persist.meta import meta_path, read_meta, update_meta
 
 SSID_VARIANTS_IDENTITY = f"ssid-variants:v{SSID_VARIANTS_VERSION}"
 SSID_VARIANTS_NAME = "SSID variants"
@@ -73,9 +73,10 @@ def record_exhausted(ssid: Optional[str], bssid: str, identity: str, wordlist_na
 
 
 def _configured_wordlist_names() -> dict[str, str]:
-    """Names for records saved before names were: the configured wordlists still on disk."""
+    """Names for records from before names were stored: the configured wordlists on disk now."""
     names = {SSID_VARIANTS_IDENTITY: SSID_VARIANTS_NAME}
-    for wordlist in [DEFAULT_PASSWORDS_PATH, *Config.hashcat.wordlists, *Config.cpu_crack.wordlists]:
+    for wordlist in expand_wordlists([str(DEFAULT_PASSWORDS_PATH), *Config.hashcat.wordlists,
+                                      *Config.cpu_crack.wordlists]):
         try:
             names.setdefault(wordlist_identity(wordlist), Path(wordlist).name)
         except OSError:
@@ -83,24 +84,24 @@ def _configured_wordlist_names() -> dict[str, str]:
     return names
 
 
-def read_exhaustion(bssid: str, hashline_ids: Iterable[str]) -> dict[str, Exhaustion]:
-    """Per wordlist identity that ran out on any of these hashlines, from every SSID's .meta."""
+def read_exhaustion(metas: list[dict], hashline_ids: Iterable[str]) -> dict[str, Exhaustion]:
+    """Per wordlist identity that ran out on any of these hashlines, from the AP's .meta files
+    (every SSID's, see ``read_bssid_metas``)."""
     exhausted: dict[str, dict[str, int]] = {}
     names: dict[str, list[str]] = {}
-    for path in bssid_meta_paths(bssid):
-        meta = read_meta(path)
+    for meta in metas:
         for identity, recorded in _exhausted(meta).items():
             merged = exhausted.setdefault(identity, {})
             for hashline, epoch in recorded.items():
                 merged[hashline] = max(merged.get(hashline, 0), epoch)
         for identity, stored in _wordlist_names(meta).items():
             names.setdefault(identity, []).extend(n for n in stored if n not in names[identity])
-    configured = _configured_wordlist_names() if any(not names.get(i) for i in exhausted) else {}
     wanted = list(dict.fromkeys(hashline_ids))
-    found: dict[str, Exhaustion] = {}
-    for identity, recorded in exhausted.items():
-        epochs = [recorded[hashline] for hashline in wanted if hashline in recorded]
-        if epochs:
-            wordlist_names = names.get(identity) or ([configured[identity]] if identity in configured else [])
-            found[identity] = Exhaustion(identity, tuple(wordlist_names), len(epochs), len(wanted), max(epochs))
-    return found
+    epochs_by_identity = {identity: epochs for identity, recorded in exhausted.items()
+                          if (epochs := [recorded[hashline] for hashline in wanted if hashline in recorded])}
+    unnamed = [identity for identity in epochs_by_identity if not names.get(identity)]
+    configured = _configured_wordlist_names() if unnamed else {}
+    for identity in unnamed:
+        names[identity] = [configured[identity]] if identity in configured else []
+    return {identity: Exhaustion(identity, tuple(names[identity]), len(epochs), len(wanted), max(epochs))
+            for identity, epochs in epochs_by_identity.items()}

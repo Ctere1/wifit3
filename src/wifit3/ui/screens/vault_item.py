@@ -375,8 +375,8 @@ class _CapturePanel(VerticalGroup):
     def _selected_markup(count: int) -> str:
         return f"{count} capture{'' if count == 1 else 's'} selected to crack"
 
-    def _selected_hashlines(self) -> list[str]:
-        return [h.raw for i, group in enumerate(self._groups)
+    def _selected_hashlines(self) -> list[DatedHashline]:
+        return [h for i, group in enumerate(self._groups)
                 if self.query_one(f"#hashlines-{i}", Checkbox).value for h in group]
 
     def user_choices(self, scroll_y: float) -> _UserChoices:
@@ -423,17 +423,17 @@ class _CapturePanel(VerticalGroup):
             logger.error(f"Unable to launch tool: No entry in UI_TOOLS for {tool_name}")
             self.notify(f"No UI configured for tool: {tool_name}", severity="error")
             return
-        hashlines = self._selected_hashlines()
+        selected = self._selected_hashlines()
 
         def _on_config(config: dict | None) -> None:
             if not config:
                 return
             job_id = self.app.vault.manager.submit_job(
-                tool_name, capture, self.app.vault.add_probed_ssids(config), hashlines=hashlines)
+                tool_name, capture, self.app.vault.add_probed_ssids(config), hashlines=[h.raw for h in selected])
             self.notify(f"Queued job: {job_id}")
 
-        self.app.push_screen(modal_cls(capture=capture, probed_ssids=self.app.vault.probed_ssids()),
-                             _on_config)
+        self.app.push_screen(modal_cls(capture=capture, probed_ssids=self.app.vault.probed_ssids(),
+                                       hashline_ids=[h.id for h in selected]), _on_config)
 
 
 class VaultItemView(Vertical):

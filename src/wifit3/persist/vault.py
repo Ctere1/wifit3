@@ -111,7 +111,7 @@ class Vault:
         self._ap_states: Dict[str, ApState] = {}
         self._change_listeners: list[Callable[[Optional[str]], None]] = []
         self._probed_ssids_source: Callable[[], Iterable[str]] = lambda: ()
-        self.revision = 0   # bumped on every index change; a cache key for readers
+        self.revision = 0   # bumped on every notify_changed; a cache key for readers
         self.errors: list[str] = []                       # surfaced as toasts by the app on mount
         try:
             self.refresh()
@@ -178,9 +178,9 @@ class Vault:
         state = self._ap_states.get(bssid)
         if state is None:
             revision = self.revision
-            state = load_ap_state(bssid, self.persisted(bssid))
-            if self.revision == revision:       # not changed by another thread meanwhile
-                self._ap_states[bssid] = state
+            state = self._ap_states[bssid] = load_ap_state(bssid, self.persisted(bssid))
+            if self.revision != revision:       # changed by another thread meanwhile
+                self._ap_states.pop(bssid, None)
         return state
 
     def ssid(self, bssid: str) -> Optional[str]:
@@ -255,15 +255,17 @@ class Vault:
 
     def propagate_verified_psk(self, source_bssid: str, source_ssid: Optional[str],
                                psk: str) -> List[str]:
-        """Save ``psk`` for every related AP (SSID family or sibling BSSID) with no PSK yet that
-        it verifies against; returns their BSSIDs."""
+        """Save ``psk`` for every related AP (SSID family or sibling BSSID) that holds no PSK
+        (see ``_saved_psk``) and that it verifies against; returns their BSSIDs."""
         matched: List[str] = []
         for bssid in list(self._index):
-            if bssid == source_bssid or self._saved_psk(bssid) is not None:
+            if bssid == source_bssid:
                 continue
             ssid = self.ssid(bssid)
             if not ((source_ssid and ssid and _related_ssids(source_ssid, ssid))
                     or _sibling_bssids(source_bssid, bssid)):
+                continue
+            if self._saved_psk(bssid) is not None:
                 continue
             if self.verify_wpa_psk(bssid, psk) is True:
                 self.save_wpa_psk(ssid, bssid, psk)
@@ -300,20 +302,19 @@ class Vault:
 
     def _save_hashlines(self, ap: "AccessPoint", kind: CaptureType,
                         write: Callable[[], Optional[SaveResult]]) -> Optional[HashlineSaveResult]:
-        """Run ``write``; date its new hashlines in the .meta and check them against the saved PSKs,
-        then auto-crack the AP's uncracked hashlines (every SSID's) when no saved PSK matches."""
+        """Run ``write``; date its new hashlines in the .meta and check them against the saved PSKs.
+        Unless one matches, auto-crack the AP's uncracked hashlines (every SSID's)."""
         state = self.ap_state(ap.bssid)
-        before = read_hashlines(ap.bssid, self.persisted(ap.bssid))
         result = write()
-        if result:
-            update_meta(ap.ssid, ap.bssid)
         if not result:
             return None
+        update_meta(ap.ssid, ap.bssid)
         if not result.was_new:
             return HashlineSaveResult(result.path, was_new=False)
         capture = PersistedCapture(type=kind, timestamp=int(time.time()), path=str(result.path),
                                    bssid=ap.bssid, ssid=ap.ssid)
         after = read_hashlines(ap.bssid, [*self.persisted(ap.bssid), capture])
+        before = {h.id: h.line for h in state.hashlines}
         new_lines = {hid: raw_and_line for hid, raw_and_line in after.items() if hid not in before}
         matches_saved_psk = None
         if new_lines:
@@ -323,8 +324,8 @@ class Vault:
             matches_saved_psk = psk_verdict(psks, [line for _, line in new_lines.values()])
         self._insert_capture(capture)
         if not matches_saved_psk:
-            self._auto_crack(ap, capture, [line for _, line in before.values()],
-                             [line for _, line in after.values()], state.status is PasswordStatus.CURRENT)
+            self._auto_crack(ap, capture, list(before.values()), [line for _, line in after.values()],
+                             state.status is PasswordStatus.CURRENT)
         return HashlineSaveResult(result.path, was_new=True, matches_saved_psk=matches_saved_psk)
 
     def _auto_crack(self, ap: "AccessPoint", capture: PersistedCapture, before: List[Hc22000Line],
