@@ -2,14 +2,16 @@
 The autouse _captures_to_tmp fixture points Config.captures_dir at tmp_path, and WifiteApp builds its Vault from there.
 """
 import asyncio
+import os
 
 import pytest
 from textual.containers import VerticalScroll
 from textual.widgets import Button, Checkbox, DataTable, Input, Label, Static
 
 from wifit3.campaigns.live_check import LiveKeyVerifier, VerifyResult, VerifyStatus
-from wifit3.models import AccessPoint, CaptureType, PersistedCapture
+from wifit3.models import AccessPoint, CaptureType, PersistedCapture, ToolName
 from wifit3.models.jobs import JobState, ToolStatus
+from wifit3.persist.ap_state import PasswordStatus
 from wifit3.persist.meta import meta_path, read_meta, update_meta
 from wifit3.persist.save import SaveResult
 from wifit3.ui.app import WifiteApp
@@ -17,8 +19,8 @@ from wifit3.ui.screens.vault_drawer import VaultDrawer
 from wifit3.ui.screens.vault_item import VaultItemView, _ApStatePanel, _CrackerButton, _HashlineGroupCheckbox, _KeyRow
 from wifit3.ui.vault.modals.add_credential import AddCredentialModal, ManualCredential
 from wifit3.ui.vault.modals.nickname import NicknameModal
+from tests.hashline_dates import write_hashline_dates
 
-_HS_LINE = "WPA*02*" + "0" * 32 + "*aabbccddeeff*112233445566*5465737431***2\n"
 _EAPOL_LINE = ("WPA*02*" + "0" * 32 + "*aabbccddeeff*112233445566*5465737431*" + "a" * 64 + "*"
                + "00" * 99 + "*02\n")
 _PMKID_LINE = "WPA*01*" + "0" * 32 + "*aabbccddeeff*112233445566*5465737431***\n"
@@ -253,13 +255,13 @@ async def test_show_directory_warns_when_there_are_no_captures_yet(tmp_path, moc
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
-async def test_add_credential_prefills_the_row_and_saves_a_psk_the_handshake_refutes_unverified(
+async def test_add_credential_prefills_the_row_and_saves_a_psk_the_capture_refutes_as_stale(
         tmp_path, mocker):
     _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", _PMKID_LINE)
+    write_hashline_dates("HomeNet", "aa:bb:cc:dd:ee:ff", {_PMKID_LINE: 1_700_000_000})
     app = WifiteApp()
     async with app.run_test() as pilot:
         view = await _open_vault(app, pilot)
-        verify = mocker.patch.object(app.vault, "verify_wpa_psk", return_value=False)
         notify = mocker.patch.object(view, "notify")
 
         await pilot.press("a")
@@ -274,14 +276,15 @@ async def test_add_credential_prefills_the_row_and_saves_a_psk_the_handshake_ref
         await pilot.pause(0)
 
         assert app.screen is view
-        verify.assert_called_once_with("aa:bb:cc:dd:ee:ff", "wrongpass")
         assert notify.call_args.args[0] == "PSK doesn't match the saved captures; added unverified"
         assert notify.call_args.kwargs["severity"] == "warning"
         assert [c.value for c in app.vault.persisted("aa:bb:cc:dd:ee:ff")
                 if c.type == CaptureType.WPA_PSK] == ["wrongpass"]
+        state = app.vault.ap_state("aa:bb:cc:dd:ee:ff")
+        assert (state.status, state.status_key) == (PasswordStatus.STALE, None)
         assert app.vault.known_psk(AccessPoint(bssid="aa:bb:cc:dd:ee:ff")) is None   # refuted, not held
 
-        verify.return_value = True
+        verify = mocker.patch.object(app.vault, "verify_wpa_psk", return_value=True)
         propagate = mocker.patch.object(app.vault, "propagate_verified_psk",
                                         return_value=["02:00:00:00:00:10"])
         view._credential_added(ManualCredential(CaptureType.WPA_PSK, "HomeNet",
@@ -493,14 +496,12 @@ async def test_a_refresh_shows_the_new_state_and_keeps_expansion_ticks_and_scrol
         assert scrolled > 0
         item.scroll_to(y=scrolled, animate=False)
         await pilot.pause()
-        panel = drawer.query_one(_ApStatePanel)
 
         update_meta("HomeNet", "aa:bb:cc:dd:ee:ff",
                     live_verifications=[{**_LIVE_CHECK, "at": 1000}, {**_LIVE_CHECK, "at": 2000}])
         app.vault.refresh()
         await pilot.pause()
 
-        assert drawer.query_one(_ApStatePanel) is panel
         row = drawer.query_one(_KeyRow)
         assert row.has_class("-expanded")
         assert len(row.query(".row")) == 2
@@ -516,14 +517,18 @@ async def test_another_aps_capture_leaves_the_pane_alone(tmp_path):
     app = WifiteApp()
     async with app.run_test(size=(80, 40)) as pilot:
         drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
-        panel = drawer.query_one(_ApStatePanel)
         table = drawer.query_one("#vault-aps", DataTable)
+        checkbox = drawer.query(_HashlineGroupCheckbox).last(_HashlineGroupCheckbox)
+        checkbox.focus()
+        drawer.query_one(_KeyRow).toggle_button.press()
+        await pilot.pause()
 
         app.vault.save_wpa_psk("Cafe", "02:00:00:00:00:01", "cafepass")
         await pilot.pause()
 
-        assert drawer.query_one(_ApStatePanel) is panel
         assert "✓PSK" in str(table.get_row("02:00:00:00:00:01")[0])
+        assert app.focused is checkbox
+        assert drawer.query_one(_KeyRow).expanded
 
 
 @pytest.mark.asyncio
@@ -590,17 +595,33 @@ async def test_a_tall_wide_drawer_starts_key_histories_expanded_and_shows_the_ss
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
-async def test_a_burst_of_vault_changes_reloads_the_drawer_once(mocker):
+async def test_a_burst_of_vault_changes_reloads_the_table_once(mocker):
     app = WifiteApp()
     async with app.run_test(size=(100, 40)) as pilot:
         drawer = await _open_vault(app, pilot)
-        vault_changed = mocker.patch.object(drawer, "vault_changed")
+        table = drawer.query_one("#vault-table")
+        reload_table = mocker.patch.object(table, "reload_table", wraps=table.reload_table)
 
         for bssid in ("aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02", "aa:bb:cc:dd:ee:01"):
             app.vault.notify_changed(bssid)
         await pilot.pause()
 
-        vault_changed.assert_called_once_with({"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"})
+        assert reload_table.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_a_vault_change_from_another_thread_reloads_the_table(mocker):
+    app = WifiteApp()
+    async with app.run_test(size=(100, 40)) as pilot:
+        drawer = await _open_vault(app, pilot)
+        table = drawer.query_one("#vault-table")
+        reload_table = mocker.patch.object(table, "reload_table", wraps=table.reload_table)
+
+        await asyncio.to_thread(app.vault.notify_changed, "aa:bb:cc:dd:ee:01")
+        await pilot.pause()
+
+        assert reload_table.call_count == 1
 
 
 class _HeldVerifier(LiveKeyVerifier):
@@ -644,7 +665,7 @@ async def test_one_live_check_runs_at_a_time_even_across_a_refresh(tmp_path):
         rows = list(drawer.query(_KeyRow).results(_KeyRow))
         assert [(str(r.verify_button.label), r.verify_button.disabled) for r in rows] == [
             ("Verifying…", True), ("Verify", True)]
-        rows[1].post_message(_KeyRow.VerifyPressed(rows[1].key))
+        rows[1].verify_button.press()
         await pilot.pause()
         assert len(verifier.checked) == 1
 
@@ -744,6 +765,57 @@ async def test_closing_the_drawer_cancels_a_running_live_check(tmp_path):
 
         assert verifier.cancelled
         assert app.vault.ap_state("aa:bb:cc:dd:ee:ff").keys[0].live_verifications == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_the_title_names_the_ssid_of_the_newest_capture_even_when_it_is_not_utf8(tmp_path):
+    newest_line = _EAPOL_LINE.replace("5465737431", b"Caf\xe9".hex())
+    older_line = _PMKID_LINE.replace("5465737431", b"Old".hex())
+    _write(tmp_path, "Caf__aa-bb-cc-dd-ee-ff.hc22000", newest_line)
+    _write(tmp_path, "Old_aa-bb-cc-dd-ee-ff.hc22000", older_line)
+    os.utime(tmp_path / "Caf__aa-bb-cc-dd-ee-ff.hc22000", (1_600_000_000, 1_600_000_000))
+    write_hashline_dates("Caf_", "aa:bb:cc:dd:ee:ff", {newest_line: 1_700_000_000})
+    write_hashline_dates("Old", "aa:bb:cc:dd:ee:ff", {older_line: 1_600_000_000})
+    app = WifiteApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
+        assert "Caf�" in str(drawer.query_one(VaultItemView).border_title)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_a_collapsed_keys_history_is_built_when_first_expanded(tmp_path):
+    _write_a_checked_wep_key_and_three_hashlines(tmp_path)
+    app = WifiteApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
+        row = drawer.query_one(_KeyRow)
+        assert not row.expanded and len(row.query(".row")) == 0
+
+        row.toggle_button.press()
+        await pilot.pause()
+
+        assert len(row.query(".row")) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_hashtopolis_is_offered_only_for_a_selection_holding_a_line_it_can_upload(tmp_path):
+    ft_pmkid_line = _PMKID_LINE.replace("WPA*01*", "WPA*03*")
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", ft_pmkid_line + _OTHER_CLIENT_LINE)
+    app = WifiteApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
+        hashtopolis = next(b for b in drawer.query(_CrackerButton).results(_CrackerButton)
+                           if b.tool.name == ToolName.HASHTOPOLIS)
+        assert not hashtopolis.disabled
+
+        for checkbox in drawer.query(_HashlineGroupCheckbox).results(_HashlineGroupCheckbox):
+            checkbox.value = checkbox.group[0].line.kind == "03"
+        await pilot.pause()
+
+        assert hashtopolis.disabled
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 from textual import events, work
 from textual.app import App
 from textual.binding import Binding
@@ -160,7 +161,9 @@ class WifiteApp(App):
                                         on_fatal=self._on_usb_fatal)
         self.target_ap: Optional[AccessPoint] = None
         self.vault = Vault()
-        self._changed_bssids: set[Optional[str]] = set()     # Vault notices since the last table refresh
+        self._vault_notices_lock = threading.Lock()
+        self._vault_refresh_pending = False     # a table refresh is scheduled for the notices so far
+        self._vault_full_refresh = False        # one of them was a full refresh (BSSID None)
         self.vault.subscribe(self._vault_changed)
         self.vault.set_probed_ssids_source(self._probed_ssids)
         self._job_status: dict[str, ToolStatus] = {}
@@ -258,17 +261,24 @@ class WifiteApp(App):
 
     def _vault_changed(self, bssid: Optional[str]) -> None:
         """Any thread: one table refresh per tick, however many notices the Vault sends."""
-        first = not self._changed_bssids
-        self._changed_bssids.add(bssid)
-        if first:
+        with self._vault_notices_lock:
+            self._vault_full_refresh |= bssid is None
+            if self._vault_refresh_pending:
+                return
+            self._vault_refresh_pending = True
+        if threading.current_thread() is threading.main_thread():    # the app runs on the main thread
             self.call_later(self._refresh_vault_table)
+        else:
+            self.call_from_thread(self.call_later, self._refresh_vault_table)
 
     def _refresh_vault_table(self) -> None:
         """Reload the vault table if its drawer is open."""
-        changed, self._changed_bssids = self._changed_bssids, set()
+        with self._vault_notices_lock:
+            full_refresh, self._vault_full_refresh = self._vault_full_refresh, False
+            self._vault_refresh_pending = False
         if isinstance(self.screen, VaultDrawer):
             try:
-                self.screen.vault_changed(changed)
+                self.screen.vault_changed(full_refresh)
             except Exception:
                 logger.debug("Vault table refresh skipped", exc_info=True)
 

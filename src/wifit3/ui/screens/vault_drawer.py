@@ -156,16 +156,17 @@ class VaultDrawer(ModalScreen):
     def _load_widget(self, bssid: str) -> None:
         widget = self.query_one("#vault-item", VaultItemView)
         if bssid and self.app.vault.persisted(bssid):
-            ssid = self.app.vault.ssid(bssid)
+            ssids = self.app.vault.ap_state(bssid).ssids
+            ssid = ssids[0].ssid if ssids else self.app.vault.ssid(bssid)
             widget.load(bssid, self.query_one("#vault-table", VaultTable).display_name(bssid, ssid))
         else:
             widget.load("", None)
 
-    def vault_changed(self, bssids: set[Optional[str]]) -> None:
-        """Reload the table, re-reading nicknames after a full refresh (None); its TableReloaded
-        reloads the item view, which repaints only when its AP's state changed."""
+    def vault_changed(self, full_refresh: bool) -> None:
+        """Reload the table, re-reading nicknames after a full refresh; its TableReloaded reloads
+        the item view, which repaints only when its AP's state changed."""
         table = self.query_one("#vault-table", VaultTable)
-        if None in bssids:
+        if full_refresh:
             table.reload_nicknames()
         else:
             table.reload_table()
