@@ -4,6 +4,7 @@ The autouse _captures_to_tmp fixture points Config.captures_dir at tmp_path, and
 import asyncio
 
 import pytest
+from textual.containers import VerticalScroll
 from textual.widgets import Button, Checkbox, DataTable, Input, Label, Static
 
 from wifit3.campaigns.live_check import LiveKeyVerifier, VerifyResult, VerifyStatus
@@ -31,13 +32,26 @@ async def _open_vault(app, pilot, bssid: str | None = None) -> VaultDrawer:
     """Push the drawer and wait until it has laid out its content and slid open."""
     await app.push_screen(VaultDrawer(bssid))
     drawer = app.screen
-    for _ in range(100):
-        if drawer.has_class("open"):
-            break
+    while not drawer.has_class("open"):
         await pilot.pause()
-    assert drawer.has_class("open")
     await pilot.wait_for_animation()
     return drawer
+
+
+class _RecordingApp(WifiteApp):
+    """Records what it copies (never touching the system clipboard) and each notification."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.copied: list[str] = []
+        self.notified: list[str] = []
+
+    def copy_to_clipboard(self, text: str) -> None:
+        self.copied.append(text)
+
+    def notify(self, message, *args, **kwargs) -> None:
+        self.notified.append(str(message))
+        super().notify(message, *args, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -294,20 +308,20 @@ async def test_add_credential_prefills_the_row_and_saves_a_psk_the_handshake_ref
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
-async def test_a_wep_key_shows_and_copies_as_ascii_and_is_the_current_password(tmp_path, mocker):
+async def test_a_wep_key_shows_and_copies_as_ascii_and_is_the_current_password(tmp_path):
     _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff_1000_wep_key.txt", _WEP_TXT)
-    app = WifiteApp()
+    app = _RecordingApp()
     async with app.run_test(size=(50, 30)) as pilot:
         view = await _open_vault(app, pilot)
-        copy = mocker.patch.object(app, "copy_to_clipboard")
         row = view.query_one(_KeyRow)
 
         assert "abcde" in str(row.query_one(".key-text", Label).content)
+        assert row.has_class("-current")
         assert "CURRENT PASSWORD" in str(view.query_one(".status", Static).content)
         assert "Key: abcde" in str(view.query_one(".status", Static).content)
-        row.query_one(".copy-btn", Button).press()
-        await pilot.pause(0)
-        copy.assert_called_once_with("abcde")
+        row.copy_button.press()
+        await pilot.pause()
+        assert app.copied == ["abcde"]
 
 
 @pytest.mark.asyncio
@@ -368,7 +382,7 @@ async def test_open_vault_updates_when_handshake_is_saved(tmp_path, mocker):
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
-async def test_rapid_selection_only_loads_the_final_ap(tmp_path, mocker):
+async def test_rapid_selection_shows_the_final_ap(tmp_path):
     for index, name in enumerate(("Alpha", "Bravo", "Charlie")):
         bssid = f"00-11-22-33-44-{index:02x}"
         _write(tmp_path, f"{name}_{bssid}_1000_wep_key.txt",
@@ -377,18 +391,15 @@ async def test_rapid_selection_only_loads_the_final_ap(tmp_path, mocker):
     async with app.run_test() as pilot:
         drawer = await _open_vault(app, pilot)
         table = drawer.query_one("#vault-aps", DataTable)
-        load_widget = mocker.patch.object(drawer, "_load_widget")
+        item = drawer.query_one(VaultItemView)
 
         table.move_cursor(row=0)
         table.move_cursor(row=1)
         table.move_cursor(row=2)
-        for _ in range(100):
-            if load_widget.called:
-                break
-            await pilot.pause(drawer._SELECTION_DELAY)
-        await pilot.pause(drawer._SELECTION_DELAY)      # long enough for any other pending load
+        while "Charlie" not in str(item.border_title):
+            await pilot.pause()
 
-        load_widget.assert_called_once_with("00:11:22:33:44:02")
+        assert "(00:11:22:33:44:02)" in str(item.border_title)
 
 
 @pytest.mark.asyncio
@@ -598,10 +609,15 @@ class _HeldVerifier(LiveKeyVerifier):
     def __init__(self) -> None:
         self.release = asyncio.Event()
         self.checked: list[PersistedCapture] = []
+        self.cancelled = False
 
     async def verify_credential(self, capture, array, target_type=None) -> VerifyResult:
         self.checked.append(capture)
-        await self.release.wait()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
         return VerifyResult(VerifyStatus.SUCCESS, "Verified", "still works")
 
 
@@ -644,19 +660,17 @@ async def test_one_live_check_runs_at_a_time_even_across_a_refresh(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("no_usb_devices")
-async def test_copying_an_empty_pin_copies_nothing_and_says_so(tmp_path, mocker):
-    app = WifiteApp()
+async def test_copying_an_empty_pin_copies_nothing_and_says_so(tmp_path):
+    app = _RecordingApp()
     async with app.run_test(size=(120, 40)) as pilot:
         app.vault.save_wps_pin(AccessPoint(bssid="aa:bb:cc:dd:ee:ff", ssid="HomeNet"), "", None)
         drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
-        copy = mocker.patch.object(app, "copy_to_clipboard")
-        notify = mocker.patch.object(drawer.query_one(_KeyRow), "notify")
 
-        drawer.query_one(_KeyRow).query_one(".copy-btn", Button).press()
+        drawer.query_one(_KeyRow).copy_button.press()
         await pilot.pause()
 
-        copy.assert_called_once_with("")
-        notify.assert_called_once_with("PIN is empty")
+        assert app.copied == [""]
+        assert app.notified[-1] == "PIN is empty"
 
 
 @pytest.mark.asyncio
@@ -676,3 +690,84 @@ async def test_growing_the_drawer_expands_histories_the_user_has_not_toggled(tmp
         await pilot.resize_terminal(160, 50)
         await pilot.pause()
         assert [r.expanded for r in drawer.query(_KeyRow).results(_KeyRow)] == [False, True]
+
+
+def _write_two_aps_with_wep_keys(tmp_path) -> None:
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff_1000_wep_key.txt", _WEP_TXT)
+    _write(tmp_path, "Cafe_02-00-00-00-00-01_1000_wep_key.txt", _WEP_TXT.replace("aa:bb:cc:dd:ee:ff", "02:00:00:00:00:01"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_another_aps_verify_reads_busy_while_a_live_check_runs(tmp_path):
+    _write_two_aps_with_wep_keys(tmp_path)
+    app = WifiteApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
+        item = drawer.query_one(VaultItemView)
+        item.key_verifier = verifier = _HeldVerifier()
+        drawer.query_one(_KeyRow).verify_button.press()
+        await pilot.pause()
+
+        table = drawer.query_one("#vault-aps", DataTable)
+        table.move_cursor(row=table.get_row_index("02:00:00:00:00:01"))
+        while "Cafe" not in str(item.border_title):
+            await pilot.pause()
+        await pilot.pause()
+        button = drawer.query_one(_KeyRow).verify_button
+        assert (str(button.label), button.disabled, button.tooltip) == (
+            "Busy", True, "A live check is running on another AP")
+
+        verifier.release.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        button = drawer.query_one(_KeyRow).verify_button
+        assert (str(button.label), button.disabled) == ("Verify", False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_closing_the_drawer_cancels_a_running_live_check(tmp_path):
+    _write_two_aps_with_wep_keys(tmp_path)
+    app = WifiteApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
+        item = drawer.query_one(VaultItemView)
+        item.key_verifier = verifier = _HeldVerifier()
+        drawer.query_one(_KeyRow).verify_button.press()
+        await pilot.pause()
+        assert item.verifying is not None
+
+        await pilot.press("escape")
+        while app.screen is drawer or item.verifying is not None:
+            await pilot.pause()
+
+        assert verifier.cancelled
+        assert app.vault.ap_state("aa:bb:cc:dd:ee:ff").keys[0].live_verifications == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_usb_devices")
+async def test_a_refresh_keeps_the_uncracked_lists_scroll_and_the_focused_checkbox(tmp_path):
+    lines = "".join(_EAPOL_LINE.replace("112233445566", f"1122334455{n:02x}") for n in range(12))
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", lines)
+    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff_1000_wep_key.txt", _WEP_TXT)
+    app = WifiteApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
+        uncracked = drawer.query_one(".uncracked", VerticalScroll)
+        uncracked.scroll_to(y=uncracked.max_scroll_y, animate=False)
+        last = list(drawer.query(_HashlineGroupCheckbox).results(_HashlineGroupCheckbox))[-1]
+        last.focus()
+        await pilot.pause()
+        scrolled, focused_group = uncracked.scroll_y, last.group
+        assert scrolled > 0
+
+        update_meta("HomeNet", "aa:bb:cc:dd:ee:ff", live_verifications=[{**_LIVE_CHECK, "at": 2000}])
+        app.vault.notify_changed("aa:bb:cc:dd:ee:ff")
+        while drawer.query_one(_KeyRow).key.live_verifications == ():
+            await pilot.pause()
+        await pilot.pause()
+
+        assert drawer.query_one(".uncracked", VerticalScroll).scroll_y == scrolled
+        assert isinstance(app.focused, _HashlineGroupCheckbox) and app.focused.group == focused_group

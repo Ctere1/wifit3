@@ -8,7 +8,7 @@ from typing import Optional, TYPE_CHECKING
 from rich.markup import escape
 from wifit3.wlan.array import WlanArray
 
-from .encryption_format import format_encryption_markup, wep_key_ascii
+from .encryption_format import format_encryption_markup, wep_key_hex_and_ascii
 from ..campaigns.campaign import Campaign
 from ..campaigns.pmkid import PmkidHarvestAttack
 from ..campaigns.wep import WepCampaign
@@ -308,7 +308,7 @@ def status_headlines(ap: AccessPoint, array: WlanArray, vault: Vault) -> list[st
                    else next((c.value for c in vault.persisted(ap.bssid)
                               if c.type == CaptureType.WEP and c.value), None))
     if wep_key_hex:
-        return [f"[black bold on green] ✓ WEP key: {escape(wep_key_ascii(wep_key_hex))} [/black bold on green]",
+        return [f"[black bold on green] ✓ WEP key: {escape(wep_key_hex_and_ascii(wep_key_hex))} [/black bold on green]",
                 "[dim]● Listening for WEP IVs[/dim]"]
     psk = vault.known_psk(ap)
     if psk:

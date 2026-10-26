@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from wifit3.crack.hc22000_format import Hc22000Line, read_hc22000
-from wifit3.models import PersistedCapture, ToolCapability, ToolResult
+from wifit3.models import PersistedCapture, ToolCapability, ToolName, ToolResult
 from wifit3.models.jobs import JobAction, JobState
 from wifit3.persist.config import Config
 
@@ -26,7 +26,7 @@ def require_hashlines(path: str) -> list[tuple[str, Hc22000Line]]:
 
 
 class VaultTool(ABC):
-    name: str
+    name: ToolName
     label: str                  # what the UI calls the tool, e.g. "Hashcat"
     capabilities: ToolCapability
 

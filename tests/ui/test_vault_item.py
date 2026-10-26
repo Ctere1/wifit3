@@ -44,22 +44,16 @@ def _row(key: Key, state: ApState) -> _KeyRow:
     return _KeyRow(key, state, show_client=False, show_ssid=False, expanded=False, verifying=None)
 
 
-def test_key_row_tags_a_psk_nothing_confirmed_as_unverified_but_not_one_the_ap_gave_up():
+def test_key_row_takes_its_keys_status_and_tags_only_a_not_verified_psk_unverified():
     hashlines = (_hashline(1_700_000_000),)
-    state = ApState("aa:bb:cc:dd:ee:ff", (), hashlines, (), PasswordStatus.NOT_CRACKED, None, None, hashlines, ())
-    cracked = _key(CaptureType.WPA_PSK, "hunter22")
-    wps = Key(CaptureType.WPA_PSK, "hunter22", (PersistedCapture(type=CaptureType.WPS_PBC, timestamp=1, path="x.txt",
-                                                                  bssid="aa:bb:cc:dd:ee:ff", value="hunter22"),),
-              frozenset(), ())
-    assert "unverified" in _row(cracked, state)._summary_markup()
-    assert "unverified" not in _row(wps, state)._summary_markup()
-
-
-def test_key_row_chip_takes_the_keys_status_colour():
     current = Key(CaptureType.WPA_PSK, "hunter22", (PersistedCapture(type=CaptureType.WPS_PBC, timestamp=1,
                                                                       path="x.txt", bssid="aa:bb:cc:dd:ee:ff",
                                                                       value="hunter22"),), frozenset(), ())
     guess = _key(CaptureType.WPA_PSK, "guess")
-    state = ApState("aa:bb:cc:dd:ee:ff", (), (), (current, guess), PasswordStatus.CURRENT, current, None, (), ())
-    assert "on lightgreen" in _row(current, state)._summary_markup()
-    assert "on $warning" in _row(guess, state)._summary_markup()
+    state = ApState("aa:bb:cc:dd:ee:ff", (), hashlines, (current, guess), PasswordStatus.CURRENT, current,
+                    {current.id: PasswordStatus.CURRENT, guess.id: PasswordStatus.NOT_VERIFIED}, None, hashlines, ())
+    current_row, guess_row = _row(current, state), _row(guess, state)
+
+    assert current_row.has_class("-current") and guess_row.has_class("-not-verified")
+    assert "unverified" not in current_row._summary_markup()
+    assert "unverified" in guess_row._summary_markup()

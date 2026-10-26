@@ -65,7 +65,7 @@ from ...capture_events import (
 from ...capture_log import saved_psk_markup, short_sta
 from ...eapol_aggregate import EapolAggregator
 from ... import pmkid_log
-from ...encryption_format import wep_key_ascii
+from ...encryption_format import wep_key_hex_and_ascii
 from .card_endpoint import CardEndpoint
 from .tx_picker import TxDevicePicker
 from .clients_list import ClientsList, ClientWidget, FingerprintModal
@@ -135,7 +135,7 @@ def _wep_key_chip(key_hex) -> str:
     """Black-bold-on-cyan WEP key chip (bare hex for non-printable keys)."""
     if not key_hex:
         return "[dim]?[/dim]"
-    return f"[black bold on cyan] {wep_key_ascii(key_hex)} [/black bold on cyan]"
+    return f"[black bold on cyan] {wep_key_hex_and_ascii(key_hex)} [/black bold on cyan]"
 
 
 class FocusViewV2(Screen):

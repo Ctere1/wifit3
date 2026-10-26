@@ -7,6 +7,7 @@ from textual.screen import ModalScreen
 from textual import events, on, work
 from textual.binding import Binding
 
+from .vault_breakpoints import COMPACT, NARROW, SHORT, TALL, TINY, WIDE
 from .vault_table import VaultTable
 from .vault_item import AddKeyPressed, VaultItemView
 from wifit3.models import AccessPoint, CaptureType
@@ -20,8 +21,8 @@ class VaultDrawer(ModalScreen):
 
     _SELECTION_DELAY = 0.08
 
-    HORIZONTAL_BREAKPOINTS = [(0, "-tiny"), (60, "-narrow"), (90, "-compact"), (105, "-wide")]
-    VERTICAL_BREAKPOINTS = [(0, "-short"), (36, "-tall")]
+    HORIZONTAL_BREAKPOINTS = [(0, TINY), (60, NARROW), (90, COMPACT), (105, WIDE)]
+    VERTICAL_BREAKPOINTS = [(0, SHORT), (36, TALL)]
 
     BINDINGS = [
         Binding("v", "dismiss_drawer", "Close", show=False),

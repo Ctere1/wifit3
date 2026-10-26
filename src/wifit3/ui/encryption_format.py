@@ -202,7 +202,7 @@ def format_encryption_markup(ap: AccessPoint, detailed: bool = False, muted: str
     return EncryptionSummary.from_ap(ap).markup(detailed=detailed, muted=muted)
 
 
-def printable_wep_key(key_hex: str) -> Optional[str]:
+def wep_key_ascii(key_hex: str) -> Optional[str]:
     """The WEP key in ASCII when every byte is printable, else None."""
     try:
         kb = bytes.fromhex(key_hex)
@@ -211,7 +211,7 @@ def printable_wep_key(key_hex: str) -> Optional[str]:
     return kb.decode("ascii") if kb and all(0x20 <= b < 0x7F for b in kb) else None
 
 
-def wep_key_ascii(key_hex: str) -> str:
+def wep_key_hex_and_ascii(key_hex: str) -> str:
     """A recovered WEP key as ``<hex> = "<ascii>"``."""
-    ascii_key = printable_wep_key(key_hex)
+    ascii_key = wep_key_ascii(key_hex)
     return f'{key_hex} = "{ascii_key}"' if ascii_key is not None else key_hex

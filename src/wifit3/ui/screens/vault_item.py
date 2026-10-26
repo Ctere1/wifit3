@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Hashable
 from itertools import groupby
 from typing import Optional
 
@@ -13,11 +14,12 @@ from textual.content import Content
 from textual.events import Resize
 from textual.message import Message
 from textual.reactive import reactive, var
+from textual.widget import Widget
 from textual.widgets import Button, Checkbox, Label, Rule, Static
 
 from wifit3.campaigns.live_check import LiveKeyVerifier, VerifyStatus
 from wifit3.campaigns.pin import EMPTY_PIN_LABEL
-from wifit3.models import CaptureType, PersistedCapture, ToolName
+from wifit3.models import CaptureType, PersistedCapture
 from wifit3.persist.ap_state import (
     ApState,
     DatedHashline,
@@ -25,12 +27,11 @@ from wifit3.persist.ap_state import (
     LiveVerification,
     PasswordStatus,
     epoch_sort_key,
-    is_confirmed,
-    key_status,
 )
 from wifit3.persist.exhaustion import Exhaustion
-from wifit3.ui.capture_log import STALE_PASSWORD_COLOR
-from wifit3.ui.encryption_format import printable_wep_key
+from wifit3.ui.colors import PASSWORD_MISMATCH_COLOR
+from wifit3.ui.encryption_format import wep_key_ascii
+from wifit3.ui.screens.vault_breakpoints import NARROW, TALL, TINY, WIDE
 from wifit3.ui.vault.tools_ui import UI_TOOLS
 from wifit3.vault.tools.base import VaultTool
 
@@ -40,13 +41,13 @@ logger = logging.getLogger(__name__)
 _STATUS_COLOR = {
     PasswordStatus.CURRENT: "$text-success",
     PasswordStatus.NOT_VERIFIED: "$text-warning",
-    PasswordStatus.STALE: STALE_PASSWORD_COLOR,
+    PasswordStatus.STALE: PASSWORD_MISMATCH_COLOR,
     PasswordStatus.NOT_CRACKED: "$text-error",
 }
 _KEY_CHIP_STYLE = {
     PasswordStatus.CURRENT: "black bold on lightgreen",
     PasswordStatus.NOT_VERIFIED: "black bold on $warning",
-    PasswordStatus.STALE: f"black bold on {STALE_PASSWORD_COLOR}",
+    PasswordStatus.STALE: f"black bold on {PASSWORD_MISMATCH_COLOR}",
 }
 _KEY_LABEL = {CaptureType.WPA_PSK: "PSK", CaptureType.WPS_PIN: "PIN", CaptureType.WEP: "Key"}
 _KEY_BADGE = {CaptureType.WPA_PSK: ("PSK", "$text-success"), CaptureType.WPS_PIN: ("WPS", "$text-accent"),
@@ -55,14 +56,16 @@ _AUTHORIZED_TOOLTIP = "PMKID or M3/M4: the AP accepted this password"
 _CHALLENGE_TOOLTIP = "No M3/M4: could be a wrong password"
 _EXPAND_LABEL, _COLLAPSE_LABEL = "▶", "▼"
 _EXPAND_TOOLTIP, _COLLAPSE_TOOLTIP = "Show captures and verifications", "Hide captures and verifications"
+_VERIFY_TOOLTIP = "Connect to the live AP and verify this key"
+_BUSY_TOOLTIP = "A live check is running on another AP"
 
-KeyId = tuple[str, CaptureType, str]    # BSSID, key type, value
+_KeyId = tuple[str, CaptureType, str]    # BSSID, key type, value
 
 
 def key_text(key: Key) -> str:
     """The key as the user types it: a WEP key in ASCII when printable, else hex."""
     if key.type == CaptureType.WEP:
-        return printable_wep_key(key.value) or key.value
+        return wep_key_ascii(key.value) or key.value
     if key.type == CaptureType.WPS_PIN:
         return key.value or EMPTY_PIN_LABEL
     return key.value
@@ -98,7 +101,7 @@ def _captures_count_markup(count: int, total: int) -> str:
     return f"[dim]({count}/{total} captures)[/]"
 
 
-def _selected_text(count: int) -> str:
+def _selected_count_text(count: int) -> str:
     return f"{count} capture{'' if count == 1 else 's'} selected to crack"
 
 
@@ -128,11 +131,8 @@ def _hashline_columns(group: list[DatedHashline], show_client: bool, show_ssid: 
 
 
 def _live_verification_columns(verification: LiveVerification, show_client: bool) -> list[Label]:
-    if verification.correct:
-        verdict = Label("✓ verified live", classes="verdict live verified")
-    else:
-        verdict = Label("✗ rejected live", classes="verdict live rejected")
-        verdict.styles.color = STALE_PASSWORD_COLOR
+    verdict = (Label("✓ verified live", classes="verdict live verified") if verification.correct
+               else Label("✗ rejected live", classes="verdict live rejected"))
     return _history_row_columns(verification.at, "", "", verdict, show_client)
 
 
@@ -143,8 +143,12 @@ def _exhaustion_text(exhaustion: Exhaustion) -> str:
     return f"{name} ({exhaustion.exhausted_hashlines}/{exhaustion.hashlines})"
 
 
-def _key_id(key: Key) -> KeyId:
+def _key_id(key: Key) -> _KeyId:
     return key.newest_capture.bssid, key.type, key.value
+
+
+def _status_class(status: PasswordStatus) -> str:
+    return "-" + status.name.lower().replace("_", "-")
 
 
 class _KeyRow(VerticalGroup):
@@ -175,14 +179,17 @@ class _KeyRow(VerticalGroup):
 
     def __init__(self, key: Key, state: ApState, *, show_client: bool, show_ssid: bool, expanded: bool,
                  verifying: Optional[Key]) -> None:
-        super().__init__()
+        status = state.key_statuses[key.id]
+        super().__init__(classes=_status_class(status))
+        self.status = status
         self.key = key
         self._state = state
         self._show_client = show_client
         self._show_ssid = show_ssid
-        self.verify_button = Button("Verify", compact=True, variant="primary", classes="verify-btn",
-                                     tooltip="Connect to the live AP and verify this key")
         self.toggle_button = Button("", compact=True, classes="toggle")
+        self.copy_button = Button("Copy", compact=True, classes="copy-btn")
+        self.verify_button = Button("Verify", compact=True, variant="primary", classes="verify-btn")
+        self.history_rows = VerticalScroll(classes="history-rows")
         self.set_reactive(_KeyRow.expanded, expanded)
         self._show_expansion(expanded)
         self.show_verifying(verifying)
@@ -199,23 +206,22 @@ class _KeyRow(VerticalGroup):
         with Horizontal(classes="key-line"):
             yield self.toggle_button if history else Label("", classes="no-toggle")
             yield Label(Content.from_markup(self._summary_markup()), classes="key-text")
-            yield Button("Copy", compact=True, classes="copy-btn")
+            yield self.copy_button
             yield self.verify_button
         if history:
             with Vertical(classes="history"):
-                with VerticalScroll(classes="history-rows"):
+                with self.history_rows:
                     for _, columns in history:
                         yield Horizontal(*columns, classes="row")
 
     def _summary_markup(self) -> str:
         key = self.key
         badge, badge_color = _KEY_BADGE[key.type]
-        chip = _KEY_CHIP_STYLE[key_status(key, self._state)]
-        markup = f"[bold {badge_color}]{badge}[/] [{chip}] {escape(key_text(key))} [/]"
+        markup = f"[bold {badge_color}]{badge}[/] [{_KEY_CHIP_STYLE[self.status]}] {escape(key_text(key))} [/]"
         total = len(self._state.hashlines)
         if key.type == CaptureType.WPA_PSK and total:
             markup += f" {_captures_count_markup(len(key.hashline_ids), total)}"
-            if not is_confirmed(key, self._state.hashlines):
+            if self.status is PasswordStatus.NOT_VERIFIED:
                 markup += " [$text-warning]unverified[/]"
         return markup
 
@@ -228,31 +234,36 @@ class _KeyRow(VerticalGroup):
         self._show_expansion(expanded)
 
     def show_verifying(self, verifying: Optional[Key]) -> None:
-        """Disable Verify while any live check runs; label the row whose key it checks."""
-        self.verify_button.disabled = verifying is not None
-        checking_this = verifying is not None and _key_id(verifying) == _key_id(self.key)
-        self.verify_button.label = "Verifying…" if checking_this else "Verify"
+        """Verify is disabled while any live check runs: "Verifying…" on its key, "Busy" when it is
+        another AP's."""
+        button = self.verify_button
+        button.disabled = verifying is not None
+        button.label, button.tooltip = "Verify", _VERIFY_TOOLTIP
+        if verifying is not None and _key_id(verifying) == _key_id(self.key):
+            button.label = "Verifying…"
+        elif verifying is not None and verifying.newest_capture.bssid != self.key.newest_capture.bssid:
+            button.label, button.tooltip = "Busy", _BUSY_TOOLTIP
 
-    @on(Button.Pressed, ".toggle")
-    def _toggle_pressed(self, event: Button.Pressed) -> None:
+    @on(Button.Pressed)
+    def _button_pressed(self, event: Button.Pressed) -> None:
+        if event.button is self.toggle_button:
+            self.expanded = not self.expanded
+            self.post_message(self.Toggled(self.key, self.expanded))
+        elif event.button is self.copy_button:
+            self._copy()
+        elif event.button is self.verify_button:
+            self.post_message(self.VerifyPressed(self.key))
+        else:
+            return
         event.stop()
-        self.expanded = not self.expanded
-        self.post_message(self.Toggled(self.key, self.expanded))
 
-    @on(Button.Pressed, ".copy-btn")
-    def _copy(self, event: Button.Pressed) -> None:
-        event.stop()
+    def _copy(self) -> None:
         if self.key.type == CaptureType.WPS_PIN and not self.key.value:
             self.app.copy_to_clipboard("")
             self.notify("PIN is empty")
             return
         self.app.copy_to_clipboard(key_text(self.key))
         self.notify("Copied to clipboard")
-
-    @on(Button.Pressed, ".verify-btn")
-    def _verify_pressed(self, event: Button.Pressed) -> None:
-        event.stop()
-        self.post_message(self.VerifyPressed(self.key))
 
 
 class AddKeyPressed(Message):
@@ -277,62 +288,101 @@ class _HashlineGroupCheckbox(Checkbox):
 
 
 class _ApStatePanel(VerticalGroup):
-    """One AP's status, SSIDs, keys and uncracked hashlines; ``view`` holds what the user chose."""
+    """One AP's status, SSIDs, keys and uncracked hashlines."""
 
     SCOPED_CSS = False
-    DEFAULT_CSS = """
-    _ApStatePanel { height: auto; max-width: 81; }
-    _ApStatePanel Rule.-horizontal { margin: 0; color: $panel-lighten-2; }
-    _ApStatePanel Rule.uncracked-rule { margin-top: 1; }
-    _ApStatePanel .status { width: 100%; text-align: center; margin-top: 1; }
-    _ApStatePanel .ssids { height: auto; }
-    _ApStatePanel .section-line { height: 1; }
-    _ApStatePanel .section { text-style: bold; color: $text-muted; width: auto; margin-right: 2; }
-    _ApStatePanel .ssids .section { width: 4; }
-    _ApStatePanel .ssid { width: 1fr; text-wrap: nowrap; text-overflow: ellipsis; }
-    _ApStatePanel .dates { width: auto; color: $text-muted; margin-left: 1; }
-    _ApStatePanel .none-yet { color: $text-muted; padding-left: 2; }
-    _ApStatePanel .tools { height: auto; }
-    _ApStatePanel .tools Button { margin-right: 1; }
-    _ApStatePanel .selected-count, _ApStatePanel .exhausted { color: $text-muted; }
-    _ApStatePanel .uncracked { height: auto; max-height: 8; scrollbar-size-vertical: 1; }
-    _ApStatePanel .row { height: 1; }
-    _ApStatePanel .row > * { margin-right: 1; text-wrap: nowrap; }
-    _ApStatePanel .row Checkbox { width: 3; text-overflow: clip; }
-    _ApStatePanel .row:focus-within { background: $block-hover-background; }
-    _ApStatePanel .row .date { width: 12; color: $text-muted; }
-    _ApStatePanel .row .pair { width: 5; }
-    _ApStatePanel .row .client { width: 6; color: $text-muted; }
-    _ApStatePanel .row .verdict { width: 10; }
-    _ApStatePanel .row .live { width: auto; }
-    _ApStatePanel .row .count { width: 4; color: $text-muted; }
-    _ApStatePanel .row .row-ssid { width: 1fr; text-overflow: ellipsis; }
-    _ApStatePanel .authorized, _ApStatePanel .verified { color: $text-success; }
-    _ApStatePanel .challenge { color: $text-warning; }
+    DEFAULT_CSS = f"""
+    _ApStatePanel {{ height: auto; max-width: 81; }}
+    _ApStatePanel Rule.-horizontal {{ margin: 0; color: $panel-lighten-2; }}
+    _ApStatePanel Rule.uncracked-rule {{ margin-top: 1; }}
+    _ApStatePanel .status {{ width: 100%; text-align: center; margin-top: 1; }}
+    _ApStatePanel .ssids {{ height: auto; }}
+    _ApStatePanel .section-line {{ height: 1; }}
+    _ApStatePanel .section {{ text-style: bold; color: $text-muted; width: auto; margin-right: 2; }}
+    _ApStatePanel .ssids .section {{ width: 4; }}
+    _ApStatePanel .ssid {{ width: 1fr; text-wrap: nowrap; text-overflow: ellipsis; }}
+    _ApStatePanel .dates {{ width: auto; color: $text-muted; margin-left: 1; }}
+    _ApStatePanel .none-yet {{ color: $text-muted; padding-left: 2; }}
+    _ApStatePanel .tools {{ height: auto; }}
+    _ApStatePanel .selected-count, _ApStatePanel .exhausted {{ color: $text-muted; }}
+    _ApStatePanel .uncracked {{ height: auto; max-height: 8; scrollbar-size-vertical: 1; }}
+    _ApStatePanel .row {{ height: 1; }}
+    _ApStatePanel .row > * {{ margin-right: 1; text-wrap: nowrap; }}
+    _ApStatePanel .row Checkbox {{ width: 3; text-overflow: clip; }}
+    _ApStatePanel .row:focus-within {{ background: $block-hover-background; }}
+    _ApStatePanel .row .date {{ width: 12; color: $text-muted; }}
+    _ApStatePanel .row .pair {{ width: 5; }}
+    _ApStatePanel .row .client {{ width: 6; color: $text-muted; }}
+    _ApStatePanel .row .verdict {{ width: 10; }}
+    _ApStatePanel .row .live {{ width: auto; }}
+    _ApStatePanel .row .count {{ width: 4; color: $text-muted; }}
+    _ApStatePanel .row .row-ssid {{ width: 1fr; text-overflow: ellipsis; }}
+    _ApStatePanel .authorized, _ApStatePanel .verified {{ color: $text-success; }}
+    _ApStatePanel .challenge {{ color: $text-warning; }}
+    _ApStatePanel .rejected {{ color: $text-muted; }}
 
-    Screen.-tiny _ApStatePanel Button.tool-btn { height: 1; border: none; }
-    Screen.-tiny _ApStatePanel .ssids, Screen.-narrow _ApStatePanel .ssids { display: none; }
-    Screen.-tiny _ApStatePanel .status, Screen.-narrow _ApStatePanel .status,
-    Screen.-tiny _ApStatePanel Rule.uncracked-rule, Screen.-narrow _ApStatePanel Rule.uncracked-rule {
+    Screen.{TINY} _ApStatePanel Button.tool-btn {{ height: 1; border: none; }}
+    Screen.{TINY} _ApStatePanel .ssids, Screen.{NARROW} _ApStatePanel .ssids {{ display: none; }}
+    Screen.{TINY} _ApStatePanel .status, Screen.{NARROW} _ApStatePanel .status,
+    Screen.{TINY} _ApStatePanel Rule.uncracked-rule, Screen.{NARROW} _ApStatePanel Rule.uncracked-rule {{
         margin-top: 0;
-    }
-    Screen.-wide _ApStatePanel .row > * { margin-right: 2; }
-    Screen.-tall.-wide _ApStatePanel { min-height: 100%; }
-    Screen.-tall.-wide _ApStatePanel .uncracked { height: 1fr; min-height: 8; max-height: 100%; }
+    }}
+    Screen.{WIDE} _ApStatePanel .row > * {{ margin-right: 2; }}
+    Screen.{TALL}.{WIDE} _ApStatePanel {{ min-height: 100%; }}
+    Screen.{TALL}.{WIDE} _ApStatePanel .uncracked {{ height: 1fr; min-height: 8; max-height: 100%; }}
     """
 
-    def __init__(self, view: VaultItemView, state: ApState) -> None:
-        super().__init__()
-        self._view = view
-        self._state = state
+    add_key_button: Button
+    _selected_count_label: Label
+    _uncracked_list: Optional[VerticalScroll] = None
 
-    def show(self, state: ApState) -> None:
+    def __init__(self, state: ApState, expanded_key_ids: frozenset[_KeyId],
+                 unticked_hashline_ids: frozenset[str], verifying: Optional[Key]) -> None:
+        super().__init__()
         self._state = state
-        self.refresh(recompose=True)
+        self._expanded_key_ids = expanded_key_ids
+        self._unticked_hashline_ids = unticked_hashline_ids
+        self._verifying = verifying
+
+    async def show(self, state: ApState, expanded_key_ids: frozenset[_KeyId],
+                   unticked_hashline_ids: frozenset[str], verifying: Optional[Key]) -> None:
+        """Recompose for ``state``, keeping the focus and the scroll of each list."""
+        focused = self.screen.focused
+        focus_key = self._focus_key(focused) if focused is not None and self in focused.ancestors else None
+        history_scroll = {row.key.id: row.history_rows.scroll_y for row in self.query(_KeyRow).results(_KeyRow)}
+        uncracked_scroll = self._uncracked_list.scroll_y if self._uncracked_list is not None else 0.0
+        self._state, self._expanded_key_ids = state, expanded_key_ids
+        self._unticked_hashline_ids, self._verifying = unticked_hashline_ids, verifying
+        await self.recompose()
+        self.call_after_refresh(self._restore, focus_key, history_scroll, uncracked_scroll)
+
+    def _restore(self, focus_key: Optional[Hashable], history_scroll: dict[tuple[CaptureType, str], float],
+                 uncracked_scroll: float) -> None:
+        for row in self.query(_KeyRow).results(_KeyRow):
+            row.history_rows.scroll_to(y=history_scroll.get(row.key.id, 0.0), animate=False)
+        if self._uncracked_list is not None:
+            self._uncracked_list.scroll_to(y=uncracked_scroll, animate=False)
+        if focus_key is not None:
+            match = next((w for w in self.query("*") if w.focusable and self._focus_key(w) == focus_key), None)
+            if match is not None:
+                match.focus(scroll_visible=False)
+
+    def _focus_key(self, widget: Widget) -> Optional[Hashable]:
+        """What ``widget`` stands for, the same before and after a recompose; None if nothing."""
+        if isinstance(widget, _HashlineGroupCheckbox):
+            return "hashlines", widget.group[0].id
+        if isinstance(widget, _CrackerButton):
+            return "tool", widget.tool.name
+        if widget is self.add_key_button:
+            return "add-key"
+        row = next((a for a in widget.ancestors if isinstance(a, _KeyRow)), None)
+        if row is None:
+            return None
+        buttons = (row.toggle_button, row.copy_button, row.verify_button)
+        return ("key", row.key.id, buttons.index(widget)) if widget in buttons else None
 
     def compose(self) -> ComposeResult:
         state = self._state
-        view = self._view
         show_client = len({h.line.mac_sta for h in state.hashlines}) > 1
         show_ssid = len(state.ssids) > 1
         yield Static(Content.from_markup(self._status_markup()), classes="status")
@@ -342,12 +392,15 @@ class _ApStatePanel(VerticalGroup):
             yield Rule()
         with Horizontal(classes="section-line"):
             yield Label("KEYS", classes="section")
-            yield Button("Add key", compact=True, classes="add-key", tooltip="Add a PSK, WPS PIN or WEP key")
+            self.add_key_button = Button("Add key", compact=True, classes="add-key",
+                                         tooltip="Add a PSK, WPS PIN or WEP key")
+            yield self.add_key_button
         for key in state.keys:
             yield _KeyRow(key, state, show_client=show_client, show_ssid=show_ssid,
-                          expanded=view.key_expanded(key), verifying=view.verifying)
+                          expanded=_key_id(key) in self._expanded_key_ids, verifying=self._verifying)
         if not state.keys:
             yield Label("none yet", classes="none-yet")
+        self._uncracked_list = None
         if state.uncracked:
             yield Rule(classes="uncracked-rule")
             yield from self._compose_uncracked(show_client, show_ssid)
@@ -382,9 +435,8 @@ class _ApStatePanel(VerticalGroup):
         with Horizontal(classes="section-line"):
             yield Label("UNCRACKED", classes="section")
             yield Label(Content.from_markup(_captures_count_markup(len(uncracked), len(state.hashlines))))
-        unticked = self._view.unticked_hashline_ids
         groups = hashline_groups(uncracked)
-        ticked = [not all(h.id in unticked for h in group) for group in groups]
+        ticked = [not all(h.id in self._unticked_hashline_ids for h in group) for group in groups]
         selected = sum(len(group) for group, is_ticked in zip(groups, ticked) if is_ticked)
         capture = state.hashline_capture
         with Horizontal(classes="tools"):
@@ -392,11 +444,13 @@ class _ApStatePanel(VerticalGroup):
                 for tool in self.app.vault.manager.tools.values():
                     if tool.can_crack(capture):
                         yield _CrackerButton(tool, capture, disabled=selected == 0)
-        yield Label(_selected_text(selected), classes="selected-count")
+        self._selected_count_label = Label(_selected_count_text(selected), classes="selected-count")
+        yield self._selected_count_label
         if state.uncracked_exhaustion:
             names = [_exhaustion_text(e) for e in state.uncracked_exhaustion]
             yield Static(f"exhausted: {escape(', '.join(names))}", classes="exhausted")
-        with VerticalScroll(classes="uncracked"):
+        self._uncracked_list = VerticalScroll(classes="uncracked")
+        with self._uncracked_list:
             for group, is_ticked in zip(groups, ticked):
                 yield Horizontal(_HashlineGroupCheckbox(group, is_ticked),
                                  *_hashline_columns(group, show_client, show_ssid), classes="row")
@@ -407,21 +461,25 @@ class _ApStatePanel(VerticalGroup):
 
     @on(Checkbox.Changed)
     def _selection_changed(self, event: Checkbox.Changed) -> None:
+        if not isinstance(event.checkbox, _HashlineGroupCheckbox):
+            return
         count = len(self._selected_hashlines())
-        self.query_one(".selected-count", Label).update(_selected_text(count))
+        self._selected_count_label.update(_selected_count_text(count))
         for button in self.query(_CrackerButton).results(_CrackerButton):
             button.disabled = count == 0
 
-    @on(Button.Pressed, ".add-key")
-    def _add_key(self, event: Button.Pressed) -> None:
+    @on(Button.Pressed)
+    def _button_pressed(self, event: Button.Pressed) -> None:
+        if isinstance(event.button, _CrackerButton):
+            self._launch_tool(event.button)
+        elif event.button is self.add_key_button:
+            self.post_message(AddKeyPressed())
+        else:
+            return
         event.stop()
-        self.post_message(AddKeyPressed())
 
-    @on(Button.Pressed, ".tool-btn")
-    def _launch_tool(self, event: Button.Pressed) -> None:
-        event.stop()
-        assert isinstance(event.button, _CrackerButton)
-        tool, capture = event.button.tool, event.button.capture
+    def _launch_tool(self, button: _CrackerButton) -> None:
+        tool, capture = button.tool, button.capture
         selected = self._selected_hashlines()
 
         def _on_config(config: dict | None) -> None:
@@ -431,9 +489,8 @@ class _ApStatePanel(VerticalGroup):
                 tool.name, capture, self.app.vault.add_probed_ssids(config), hashlines=[h.raw for h in selected])
             self.notify(f"Queued job: {job_id}")
 
-        modal_type = UI_TOOLS[ToolName(tool.name)]
-        self.app.push_screen(modal_type(capture=capture, probed_ssids=self.app.vault.probed_ssids(),
-                                        hashlines=selected), _on_config)
+        self.app.push_screen(UI_TOOLS[tool.name](capture=capture, probed_ssids=self.app.vault.probed_ssids(),
+                                                 hashlines=selected), _on_config)
 
 
 class VaultItemView(Vertical):
@@ -459,34 +516,43 @@ class VaultItemView(Vertical):
     def __init__(self, id: Optional[str] = None) -> None:
         super().__init__(id=id)
         self.key_verifier = LiveKeyVerifier()
-        self.expanded_key_ids: set[KeyId] = set()       # toggled open by the user
-        self.collapsed_key_ids: set[KeyId] = set()      # toggled shut by the user
+        self.history_expanded_by_user: dict[_KeyId, bool] = {}
         self.unticked_hashline_ids: set[str] = set()
         self._bssid = ""
         self._ssid: Optional[str] = None
         self._state: Optional[ApState] = None
 
     def load(self, bssid: str, ssid: Optional[str]) -> None:
-        """Show this AP; reloading the AP in view keeps what the user expanded, ticked and scrolled."""
+        """Show this AP. Reloading the AP in view keeps the pane's scroll, the focus, each list's
+        scroll, and what the user expanded and ticked."""
         state = self.app.vault.ap_state(bssid) if bssid else None
         if (bssid, ssid, state) == (self._bssid, self._ssid, self._state):
             return
-        same_ap, shown = bssid == self._bssid, self._state is not None
+        same_ap, same_state = bssid == self._bssid, state == self._state
         self._bssid, self._ssid, self._state = bssid, ssid, state
-        if state is None or not shown:
+        if state is None or not self.query_children(_ApStatePanel):
             self.refresh(recompose=True)
             return
         self._set_title()
-        self.query_one(_ApStatePanel).show(state)
+        if same_ap and same_state:
+            return
+        self.call_later(self._show_state)
         if not same_ap:
             self.scroll_home(animate=False)
 
-    def key_expanded(self, key: Key) -> bool:
+    async def _show_state(self) -> None:
+        panel = next(iter(self.query_children(_ApStatePanel).results(_ApStatePanel)), None)
+        if panel is not None and self._state is not None:
+            await panel.show(self._state, *self._panel_choices(self._state))
+
+    def history_expanded(self, key: Key) -> bool:
         """The user's choice for this key's history, else expanded only in a tall, wide drawer."""
-        key_id = _key_id(key)
-        if key_id in self.expanded_key_ids or key_id in self.collapsed_key_ids:
-            return key_id in self.expanded_key_ids
-        return self.screen.has_class("-tall") and self.screen.has_class("-wide")
+        chosen = self.history_expanded_by_user.get(_key_id(key))
+        return chosen if chosen is not None else self.screen.has_class(TALL) and self.screen.has_class(WIDE)
+
+    def _panel_choices(self, state: ApState) -> tuple[frozenset[_KeyId], frozenset[str], Optional[Key]]:
+        expanded = frozenset(_key_id(key) for key in state.keys if self.history_expanded(key))
+        return expanded, frozenset(self.unticked_hashline_ids), self.verifying
 
     def _set_title(self) -> None:
         name = self._ssid or "‹hidden›"
@@ -499,14 +565,14 @@ class VaultItemView(Vertical):
             yield Label("Select an AP to view its captures", id="vault-item-empty")
             return
         self._set_title()
-        yield _ApStatePanel(self, self._state)
+        yield _ApStatePanel(self._state, *self._panel_choices(self._state))
 
     def on_resize(self, event: Resize) -> None:
         self.call_after_refresh(self._expand_by_drawer_size)
 
     def _expand_by_drawer_size(self) -> None:
         for row in self.query(_KeyRow).results(_KeyRow):
-            row.expanded = self.key_expanded(row.key)
+            row.expanded = self.history_expanded(row.key)
 
     def watch_verifying(self, verifying: Optional[Key]) -> None:
         for row in self.query(_KeyRow).results(_KeyRow):
@@ -514,12 +580,10 @@ class VaultItemView(Vertical):
 
     @on(_KeyRow.Toggled)
     def _key_toggled(self, event: _KeyRow.Toggled) -> None:
-        key_id = _key_id(event.key)
-        (self.expanded_key_ids if event.expanded else self.collapsed_key_ids).add(key_id)
-        (self.collapsed_key_ids if event.expanded else self.expanded_key_ids).discard(key_id)
+        self.history_expanded_by_user[_key_id(event.key)] = event.expanded
 
     @on(Checkbox.Changed)
-    def _hashlines_ticked(self, event: Checkbox.Changed) -> None:
+    def _hashline_tick_changed(self, event: Checkbox.Changed) -> None:
         if not isinstance(event.checkbox, _HashlineGroupCheckbox):
             return
         ids = {h.id for h in event.checkbox.group}
@@ -530,13 +594,14 @@ class VaultItemView(Vertical):
 
     @on(_KeyRow.VerifyPressed)
     def _verify_pressed(self, event: _KeyRow.VerifyPressed) -> None:
-        if self.verifying is None:
-            self._verify(event.key)
+        if self.verifying is not None:
+            return
+        self.verifying = event.key
+        self._verify(event.key)
 
-    @work(exclusive=True, group="live-verify")
+    @work
     async def _verify(self, key: Key) -> None:
         """Check the key against the live AP; one check at a time, since they share the devices."""
-        self.verifying = key
         try:
             res = await self.key_verifier.verify_credential(key.newest_capture, self.app.array,
                                                             target_type=key.type)

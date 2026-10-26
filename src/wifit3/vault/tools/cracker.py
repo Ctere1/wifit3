@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Generic, Optional, Self, TypeVar
 
 from wifit3.crack.hc22000_format import read_hc22000
-from wifit3.crack.passwords import ssid_variants
+from wifit3.crack.passwords import all_ssid_variants
 from wifit3.models import PersistedCapture, ToolResult, ToolStatus
 from wifit3.models.jobs import JobAction, JobState
 from wifit3.persist.exhaustion import SSID_VARIANTS_IDENTITY, SSID_VARIANTS_NAME, record_exhausted
@@ -16,8 +16,7 @@ logger = logging.getLogger(__name__)
 
 def capture_ssid_variants(capture_path: str) -> list[str]:
     """``ssid_variants`` of every ESSID in the capture's hashlines, deduped."""
-    essids = dict.fromkeys(line.ssid for _, line in read_hc22000(capture_path))
-    return list(dict.fromkeys(psk for essid in essids for psk in ssid_variants(essid)))
+    return all_ssid_variants(line.ssid for _, line in read_hc22000(capture_path))
 
 
 @dataclass
