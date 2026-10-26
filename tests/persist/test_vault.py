@@ -18,6 +18,7 @@ from wifit3.models import AccessPoint, CaptureType, Handshake, HandshakeMessage,
 from wifit3.persist.config import Config
 from wifit3.persist.ap_state import PasswordStatus
 from wifit3.persist.meta import meta_path, read_meta, update_meta
+from wifit3.persist.pcap import write_pcap
 from wifit3.persist.vault import Vault, crosses_auto_crack_threshold
 from tests.hashline_dates import write_hashline_dates
 
@@ -707,6 +708,47 @@ def _append_eapol_line(d, ssid: str, bssid: str, message_pair: str) -> None:
             f"*{_eapol_payload(bytes(16)).hex()}*{message_pair}\n")
     with (d / f"{ssid}_{bssid.replace(':', '-')}.hc22000").open("a", encoding="utf-8") as f:
         f.write(line)
+
+
+def test_dates_read_from_pcaps_are_saved_so_they_are_read_once(tmp_path):
+    bssid, pmk = "aa:bb:cc:dd:ee:01", derive_pmk("correct horse", b"HomeNet")
+    _write_pmkid_line(tmp_path, "HomeNet", bssid, pmk)
+    pmkid = wpa_psk.pmkid(pmk, bytes.fromhex(bssid.replace(":", "")), bytes.fromhex(_STA))
+    pcap = tmp_path / "HomeNet_aa-bb-cc-dd-ee-01_1700000005_pmkid.pcap"
+    write_pcap(pcap, [(b"\x88\x02" + pmkid, 1_700_000_003.5)])
+    v = Vault()
+    assert v.ap_state(bssid).hashlines[0].captured == (1_700_000_003,)
+
+    pcap.unlink()
+    v.refresh()
+    assert v.ap_state(bssid).hashlines[0].captured == (1_700_000_003,)
+
+
+def test_a_typed_psk_a_dated_authorized_capture_refutes_is_stale_and_not_held(tmp_path):
+    bssid = "aa:bb:cc:dd:ee:01"
+    _write_pmkid_line(tmp_path, "HomeNet", bssid, derive_pmk("correct horse", b"HomeNet"))
+    v = Vault()
+    write_hashline_dates("HomeNet", bssid, {v.ap_state(bssid).hashlines[0].raw: 1_700_000_000})
+    v.notify_changed(bssid)
+
+    assert v.verify_wpa_psk(bssid, "wrong horse") is False
+    v.save_wpa_psk("HomeNet", bssid, "wrong horse")
+
+    state = v.ap_state(bssid)
+    assert (state.status, state.status_key) == (PasswordStatus.STALE, None)
+    assert v.known_psk(AccessPoint(bssid=bssid)) is None
+
+
+def test_a_typed_psk_does_not_block_auto_crack_once_a_capture_refutes_it(tmp_path, mocker):
+    v = Vault()
+    submit = mocker.patch.object(v.manager, "submit_job")
+    v.save_wpa_psk("HomeNet", "aa:bb:cc:dd:ee:ff", "typed guess")
+    assert v.known_psk(AccessPoint(bssid="aa:bb:cc:dd:ee:ff")) == "typed guess"    # nothing refutes it yet
+
+    assert v.save_pmkid(_ap_with_pmkid_for("real password"), _CLIENT).matches_saved_psk is False
+
+    assert v.known_psk(AccessPoint(bssid="aa:bb:cc:dd:ee:ff")) is None
+    submit.assert_called_once()
 
 
 def test_verify_wpa_psk_m1m2_lines_cannot_reject(tmp_path):

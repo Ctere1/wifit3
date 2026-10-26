@@ -5,7 +5,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from wifit3.models import PersistedCapture
+from wifit3.models import CaptureType, PersistedCapture
 from wifit3.models.jobs import JobAction, JobState, ToolCapability, ToolStatus, ToolResult
 from wifit3.vault.tools.base import VaultTool, job_file, jobs_dir
 from wifit3.vault.tools.cpu_crack import CpuCrackTool
@@ -102,7 +102,7 @@ class JobManager:
                     else:
                         job.progress_msg = res.value or "Process ended while wifit3 was closed."
                     _copy_progress(job, res)
-                    self._persist_cracked_key(job, res)
+                    self._persist_cracked_key(job, res, self._capture)
                     changed = True
                 _set_actions(job, res.actions)
                 self._notify_if_moved_on(job, detail_and_status, self._capture)
@@ -180,9 +180,9 @@ class JobManager:
 
                 # Slot available, launch it
                 try:
-                    cap = capture_for(job.capture_path)
+                    cap = self._job_capture(job, capture_for)
                     if not cap:
-                        logger.error(f"Unable to find capture for job ID {job_id}, path {job.capture_path} not found")
+                        logger.error(f"No capture or hashlines for job ID {job_id}: {job.hashlines_path}")
                         job.status = ToolStatus.ERROR
                         job.progress_msg = "Capture file deleted or missing."
                         changed = True
@@ -230,19 +230,35 @@ class JobManager:
                             capture_for: Callable[[str], Optional[PersistedCapture]]) -> None:
         """A job that moved to its next wordlist or ended may have recorded the last one as run out,
         in its AP's .meta."""
-        if (job.detail, job.status) != detail_and_status and (capture := capture_for(job.capture_path)):
+        if (job.detail, job.status) != detail_and_status and (capture := self._job_capture(job, capture_for)):
             self.vault.notify_changed(capture.bssid)
 
     def _capture(self, path: str) -> Optional[PersistedCapture]:
         return next((c for c in self.vault.all_captures() if c.path == path), None)
 
-    def _persist_cracked_key(self, job: JobState, res: ToolResult, capture_for=None) -> None:
+    @staticmethod
+    def _job_capture(job: JobState, capture_for: Callable[[str], Optional[PersistedCapture]]
+                     ) -> Optional[PersistedCapture]:
+        """The job's capture; once it's gone from the vault, one standing in for it, read from the
+        job's own hashlines file."""
+        capture = capture_for(job.capture_path)
+        if capture is not None:
+            return capture
+        line = next((line for _, line in read_hc22000(job.hashlines_path)), None)
+        if line is None:
+            return None
+        return PersistedCapture(type=CaptureType.PMKID if line.is_pmkid else CaptureType.HS, timestamp=0,
+                                path=job.hashlines_path, bssid=line.bssid, ssid=line.ssid)
+
+    def _persist_cracked_key(self, job: JobState, res: ToolResult,
+                             capture_for: Callable[[str], Optional[PersistedCapture]]) -> None:
         """Save a SUCCESS result's key under each SSID whose line it cracks, and pass it on to
         related APs."""
         if res.status != ToolStatus.SUCCESS or res.key is None:
             return
-        cap = capture_for(job.capture_path) if capture_for is not None else self._capture(job.capture_path)
+        cap = self._job_capture(job, capture_for)
         if not cap:
+            logger.warning(f"Recovered key for job {job.job_id} not saved: no capture or hashlines")
             return
         try:
             for ssid in self._cracked_ssids(job, res.key, cap):

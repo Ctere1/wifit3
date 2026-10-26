@@ -1,6 +1,7 @@
 """Tests for one AP's keys, hashlines, SSIDs and password status, across its SSID files."""
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -96,10 +97,10 @@ def test_stale_with_no_key_ever_matching_names_no_key():
     assert password_status([_hashline(_OTHER_LINE, 20)], [guess]) == (PasswordStatus.STALE, None)
 
 
-def test_a_key_cracked_from_a_newer_m1m2_line_is_not_verified():
+def test_a_key_cracked_from_a_newer_m1m2_line_is_refuted_by_the_older_authorized_one():
     newer = _key(challenge := _hashline(_CHALLENGE_LINE, 25), value="newpass", saved_at=30)
     status = password_status([challenge, _hashline(_OTHER_LINE, 20)], [newer])
-    assert status == (PasswordStatus.NOT_VERIFIED, newer)
+    assert status == (PasswordStatus.STALE, None)
 
 
 def test_a_key_the_ap_gave_up_before_the_unmatched_capture_is_stale_though_saved_again_after():
@@ -108,11 +109,11 @@ def test_a_key_the_ap_gave_up_before_the_unmatched_capture_is_stale_though_saved
     assert password_status([_hashline(_OTHER_LINE, 20)], [key]) == (PasswordStatus.STALE, key)
 
 
-def test_a_key_saved_after_the_unmatched_capture_is_not_verified():
+def test_a_key_saved_after_the_unmatched_capture_is_refuted_by_it():
     old_key = _key(old := _hashline(_EAPOL_LINE, 10))
     added = _key(value="newpass", saved_at=30)
     status = password_status([_hashline(_OTHER_LINE, 20), old], [added, old_key])
-    assert status == (PasswordStatus.NOT_VERIFIED, added)
+    assert status == (PasswordStatus.STALE, old_key)
 
 
 def test_a_newer_challenge_hashline_does_not_make_it_stale():
@@ -233,6 +234,20 @@ def test_load_matches_saved_psks_against_every_ssid_file(tmp_path):
     assert [h.raw for h in state.uncracked] == [_OLD_SSID_LINE]
     assert [(s.ssid, s.first_seen) for s in state.ssids] == [(_SSID, 1700000000), ("Old", 1600000000)]
     assert state.hashline_capture.path.endswith(f"{_SSID}_{_DASHED}.hc22000")
+
+
+def test_jobs_are_filed_under_the_newest_ssids_file_even_when_its_ssid_is_not_utf8(tmp_path):
+    non_utf8_line = _OTHER_LINE.replace("54502d4c494e4b5f484153484341545f54455354", b"Caf\xe9".hex())
+    newest = _write_aggregate("Caf_", non_utf8_line)
+    older = _write_aggregate("Old", _OLD_SSID_LINE)
+    os.utime(newest, (1_600_000_000, 1_600_000_000))       # the older file on disk
+    os.utime(older, (1_700_000_000, 1_700_000_000))
+    write_hashline_dates("Caf_", _BSSID, {non_utf8_line: 1_700_000_000})
+    write_hashline_dates("Old", _BSSID, {_OLD_SSID_LINE: 1_600_000_000})
+
+    state = _state()
+    assert state.ssids[0].ssid == "Caf�"
+    assert state.hashline_capture.path == str(newest)
 
 
 def test_load_lists_undated_hashlines_last(tmp_path):

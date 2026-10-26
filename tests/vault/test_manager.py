@@ -17,7 +17,7 @@ class DummyTool:
         self.capabilities = capabilities
         self.applied = []
 
-    def can_crack(self, capture):
+    def can_crack(self, lines):
         return True
 
     def launch(self, job: JobState, capture):
@@ -273,6 +273,33 @@ def test_a_key_no_line_verifies_is_saved_under_the_first_lines_ssid_not_the_file
     _crack(manager, cap, [_pmkid_line("newpass1", "Cafe WiFi")], "not-the-psk")
 
     manager.vault.save_wpa_psk.assert_called_once_with("Cafe WiFi", "00:11:22:33:44:55", "not-the-psk")
+
+
+def test_a_job_whose_capture_is_gone_still_launches_and_saves_its_key_from_its_own_hashlines(manager):
+    from wifit3.models.access_point import CaptureType
+    cap = PersistedCapture(type=CaptureType.PMKID, timestamp=0, path="Cafe_WiFi_00-11-22-33-44-55.hc22000",
+                           bssid="00:11:22:33:44:55", ssid="Cafe_WiFi")
+    job_id = manager.submit_job("dummy", cap, {}, [_pmkid_line("newpass1", "Cafe WiFi")])
+    manager.vault.all_captures.return_value = []
+
+    manager.poll_jobs()
+    assert manager.jobs[job_id].status == ToolStatus.RUNNING
+    with patch.object(manager.tools["dummy"], "poll_status") as mock_poll:
+        mock_poll.return_value = ToolResult(status=ToolStatus.SUCCESS, value="Cracked!", key="newpass1")
+        manager.poll_jobs()
+
+    manager.vault.save_wpa_psk.assert_called_once_with("Cafe WiFi", "00:11:22:33:44:55", "newpass1")
+
+
+def test_a_job_with_neither_capture_nor_hashlines_errors(manager):
+    from wifit3.models.access_point import CaptureType
+    cap = PersistedCapture(type=CaptureType.PMKID, timestamp=0, path="gone.hc22000", bssid="00:11:22:33:44:55")
+    job_id = manager.submit_job("dummy", cap, {}, [])
+    manager.vault.all_captures.return_value = []
+
+    manager.poll_jobs()
+
+    assert manager.jobs[job_id].status == ToolStatus.ERROR
 
 
 def test_reconcile_recovers_the_key_of_a_hashcat_job_from_an_older_jobs_json(tmp_path):

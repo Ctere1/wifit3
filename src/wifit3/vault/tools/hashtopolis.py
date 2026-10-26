@@ -2,9 +2,9 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
-from wifit3.crack.hc22000_format import Hc22000Line, read_hc22000
+from wifit3.crack.hc22000_format import Hc22000Line
 from wifit3.models import PersistedCapture, ToolCapability, ToolResult, ToolStatus
 from wifit3.models.jobs import JobAction, JobState, ToolName
 from wifit3.persist.config import Config
@@ -46,8 +46,8 @@ class HashtopolisTool(VaultTool):
     def __init__(self) -> None:
         self._runs: Dict[str, _ServerRun] = {}
 
-    def can_crack(self, capture: PersistedCapture) -> bool:
-        return capture.path.endswith(".hc22000") and bool(uploadable_hashlines(read_hc22000(capture.path)))
+    def can_crack(self, lines: Sequence[Hc22000Line]) -> bool:
+        return any(line.kind in _UPLOADED_KINDS for line in lines)
 
     def auto_crack_config(self) -> Optional[dict[str, Any]]:
         settings = Config.hashtopolis

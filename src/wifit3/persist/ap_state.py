@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Iterable, Optional
+from types import MappingProxyType
+from typing import Iterable, Mapping, Optional
 
 from wifit3.crack.hc22000_format import Hc22000Line, hashline_id, read_hc22000
 from wifit3.crack.wpa_psk import psk_matches
 from wifit3.models import AP_RECOVERED_CAPTURE_TYPES, PSK_CAPTURE_TYPES, CaptureType, PersistedCapture
+from wifit3.persist.common import safe_ssid
 from wifit3.persist.exhaustion import Exhaustion, read_exhaustion
 from wifit3.persist.meta import meta_path, read_bssid_metas, read_meta, update_meta
 from wifit3.persist.pcap import read_pcap
@@ -32,6 +34,7 @@ class DatedHashline:
     raw: str
     line: Hc22000Line
     captured: tuple[int, ...]       # epoch seconds; empty when no record or pcap dates it
+    dated_from_pcaps: bool = field(default=False, compare=False)    # no .meta record: dated from the pcaps
 
     @property
     def first_captured(self) -> Optional[int]:
@@ -85,7 +88,7 @@ class ApState:
     keys: tuple[Key, ...]                   # most recently confirmed first
     status: PasswordStatus
     status_key: Optional[Key]
-    key_statuses: dict[tuple[CaptureType, str], PasswordStatus]    # by Key.id; see ``key_statuses``
+    key_statuses: Mapping[tuple[CaptureType, str], PasswordStatus]    # by Key.id; see ``key_statuses``
     hashline_capture: Optional[PersistedCapture]    # the newest SSID's .hc22000; jobs are filed under it
     uncracked: tuple[DatedHashline, ...]            # the hashlines no key matches, newest first
     uncracked_exhaustion: tuple[Exhaustion, ...]    # wordlists that ran out on the uncracked lines
@@ -109,6 +112,7 @@ def _pcap_dates(lines: dict[str, Hc22000Line], pcaps: Iterable[Path]) -> dict[st
 
 
 def _stored_dates(metas: list[dict]) -> dict[str, set[int]]:
+    """Dates per hashline id with a .meta record; an empty set records that none were found."""
     found: dict[str, set[int]] = {}
     for meta in metas:
         stored = meta.get(_HASHLINES_KEY)
@@ -211,9 +215,8 @@ def _evidence(hashlines: list[DatedHashline], keys: list[Key]) -> list[tuple[Opt
 
 def password_status(hashlines: Iterable[DatedHashline],
                     keys: Iterable[Key]) -> tuple[PasswordStatus, Optional[Key]]:
-    """Judged on the newest authorized hashline, correct live check, or key the AP gave up; with
-    none of those, on the newest M1+M2 hashline. Only PSKs and WEP keys count; ``hashlines`` is
-    newest first, ``keys`` most recently confirmed first."""
+    """Judged on the newest authorized hashline, correct live check, or AP recovery of a PSK or WEP
+    key, else the newest M1+M2 hashline. ``hashlines`` newest first, ``keys`` newest confirmed first."""
     hashlines = list(hashlines)
     keys = [k for k in keys if k.is_password]
     if not keys:
@@ -223,20 +226,16 @@ def password_status(hashlines: Iterable[DatedHashline],
         newest_match = next((k for h in hashlines if (k := _matching_key(h, keys))), None)
         return PasswordStatus.NOT_VERIFIED, newest_match or keys[0]
 
-    newest_at, newest_key = evidence[0]
+    _, newest_key = evidence[0]
     if newest_key is not None:
         return PasswordStatus.CURRENT, newest_key
-    unconfirmed_newer = [k for k in keys if newest_at is not None and k.newest_capture.timestamp > newest_at
-                         and not is_confirmed(k, hashlines)]
-    if unconfirmed_newer:
-        return PasswordStatus.NOT_VERIFIED, unconfirmed_newer[0]
     return PasswordStatus.STALE, next((key for _, key in evidence if key is not None), None)
 
 
 def key_statuses(keys: Iterable[Key], hashlines: Iterable[DatedHashline], status: PasswordStatus,
-                 status_key: Optional[Key]) -> dict[tuple[CaptureType, str], PasswordStatus]:
-    """Each key's status: the AP's for its status key. Any other key is NOT_VERIFIED when nothing
-    confirms it; a confirmed PIN is CURRENT, a confirmed password key STALE (newer evidence won)."""
+                 status_key: Optional[Key]) -> Mapping[tuple[CaptureType, str], PasswordStatus]:
+    """By Key.id: the AP's status for its status key; else NOT_VERIFIED when unconfirmed, CURRENT
+    for a confirmed PIN, STALE for a confirmed password key (newer evidence won)."""
     hashlines = list(hashlines)
     statuses: dict[tuple[CaptureType, str], PasswordStatus] = {}
     for key in keys:
@@ -246,23 +245,23 @@ def key_statuses(keys: Iterable[Key], hashlines: Iterable[DatedHashline], status
             statuses[key.id] = PasswordStatus.NOT_VERIFIED
         else:
             statuses[key.id] = PasswordStatus.STALE if key.is_password else PasswordStatus.CURRENT
-    return statuses
+    return MappingProxyType(statuses)
 
 
 def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
-    """``captures``: the AP's indexed captures (every SSID). Dates missing from the .meta files
-    are read from the AP's pcaps."""
+    """``captures``: the AP's indexed captures (every SSID). Hashlines with no .meta record are
+    dated from the AP's pcaps."""
     metas = read_bssid_metas(bssid)
     lines = read_hashlines(bssid, captures)
     dates = _stored_dates(metas)
-    undated = {hid: line for hid, (_, line) in lines.items() if not dates.get(hid)}
-    if undated:
+    unrecorded = {hid: line for hid, (_, line) in lines.items() if hid not in dates}
+    if unrecorded:
         pcaps = [Path(c.path) for c in captures if c.path.endswith(".pcap")]
-        for hid, found in _pcap_dates(undated, pcaps).items():
-            dates.setdefault(hid, set()).update(found)
+        dates.update({hid: set() for hid in unrecorded} | _pcap_dates(unrecorded, pcaps))
 
     hashlines = sorted(
-        (DatedHashline(hid, raw, line, tuple(sorted(dates.get(hid, ())))) for hid, (raw, line) in lines.items()),
+        (DatedHashline(hid, raw, line, tuple(sorted(dates[hid])), dated_from_pcaps=hid in unrecorded)
+         for hid, (raw, line) in lines.items()),
         key=lambda h: epoch_sort_key(h.first_captured), reverse=True)
     verifications = _stored_verifications(metas)
     keys = []
@@ -275,8 +274,9 @@ def load_ap_state(bssid: str, captures: list[PersistedCapture]) -> ApState:
 
     status, status_key = password_status(hashlines, keys)
     ssids = _ssid_histories(hashlines, keys)
+    newest_ssid = safe_ssid(ssids[0].ssid) if ssids else None
     hc22000 = sorted((c for c in captures if c.path.endswith(".hc22000")),
-                     key=lambda c: (bool(ssids) and c.ssid == ssids[0].ssid, c.timestamp), reverse=True)
+                     key=lambda c: (safe_ssid(c.ssid) == newest_ssid, c.timestamp), reverse=True)
     cracked = {hid for key in keys for hid in key.hashline_ids}
     uncracked = tuple(h for h in hashlines if h.id not in cracked)
     exhaustion = read_exhaustion(metas, [h.id for h in uncracked]) if uncracked else {}
@@ -300,23 +300,26 @@ def _ssid_histories(hashlines: list[DatedHashline], keys: list[Key]) -> tuple[Ss
 
 def record_hashlines_captured(ssid: Optional[str], bssid: str, raw_lines: Iterable[str]) -> None:
     """Note in the SSID's .meta that these hashlines were captured, now."""
+    now = int(time.time())
+    record_hashline_dates(ssid, bssid, {hashline_id(raw): [now] for raw in raw_lines})
+
+
+def record_hashline_dates(ssid: Optional[str], bssid: str, dates: Mapping[str, Iterable[int]]) -> None:
+    """Add capture dates, by hashline id, to the SSID's .meta; no dates records that none exist."""
     stored = read_meta(meta_path(ssid, bssid)).get(_HASHLINES_KEY)
     stored = stored if isinstance(stored, dict) else {}
-    now = int(time.time())
-    for raw in raw_lines:
-        hid = hashline_id(raw)
+    for hid, epochs in dates.items():
         if not isinstance(stored.get(hid), dict):
             stored[hid] = {}
         if not isinstance(stored[hid].get("captured"), list):
             stored[hid]["captured"] = []
-        if now not in stored[hid]["captured"]:
-            stored[hid]["captured"].append(now)
+        captured = stored[hid]["captured"]
+        captured.extend(e for e in epochs if e not in captured)
     update_meta(ssid, bssid, **{_HASHLINES_KEY: stored})
 
 
 def record_live_verification(key: Key, correct: bool) -> None:
-    """Note in the .meta of the key's newest capture that a live check against the AP accepted or
-    rejected it."""
+    """Note in the .meta of the key's newest capture that a live check accepted or rejected it."""
     capture = key.newest_capture
     stored = read_meta(meta_path(capture.ssid, capture.bssid)).get(_LIVE_VERIFICATIONS_KEY)
     stored = stored if isinstance(stored, list) else []

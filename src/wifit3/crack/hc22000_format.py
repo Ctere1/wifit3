@@ -97,6 +97,11 @@ class Hc22000Line:
         return bytes.fromhex(self.essid).decode("utf-8", errors="replace")
 
     @property
+    def bssid(self) -> str:
+        """``mac_ap`` in colon form, ``aa:bb:cc:dd:ee:ff``."""
+        return ":".join(self.mac_ap[i:i + 2] for i in range(0, len(self.mac_ap), 2))
+
+    @property
     def message_pair_bits(self) -> int:
         return int(self.message_pair, 16) if self.message_pair else 0
 

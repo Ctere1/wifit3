@@ -19,7 +19,6 @@ from textual.widgets import Button, Checkbox, Label
 
 from wifit3.crack.passwords import (DEFAULT_PASSWORDS_PATH, all_ssid_variants, read_passwords,
                                     ssid_passwords, ssid_variants)
-from wifit3.models import PersistedCapture
 from wifit3.persist.ap_state import DatedHashline
 from wifit3.persist.config import Config, ConfigError, CpuCrackSettings, HashcatSettings
 from wifit3.ui.path_picker import BROWSE_GLYPH, PathPickerModal
@@ -86,13 +85,13 @@ class WordlistConfigModal(ModalScreen[dict]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, confirm_label: str = "Launch", capture: Optional[PersistedCapture] = None,
+    def __init__(self, confirm_label: str = "Launch", bssid: Optional[str] = None,
                  probed_ssids: Sequence[str] = (), hashlines: Sequence[DatedHashline] = ()) -> None:
         """``confirm_label`` "Save" configures the tool without the caller launching a job;
-        ``hashlines`` (SSID variant count, exhausted wordlists) are what a launch cracks."""
+        ``hashlines``, of AP ``bssid``, are what a launch cracks."""
         super().__init__()
         self._confirm_label = confirm_label
-        self._capture = capture
+        self._bssid = bssid
         self._hashlines = list(hashlines)
         self._probed_ssid_passwords = len(ssid_passwords(probed_ssids))
         self._exhaustion: dict[str, Exhaustion] = {}
@@ -221,8 +220,8 @@ class WordlistConfigModal(ModalScreen[dict]):
                    else f"about {_ssid_variants_per_ssid():,} per SSID")
         self.query_one("#ap-ssid-passwords", Checkbox).label = (
             f"This AP's SSID variants [dim]({ap_ssid})[/dim]")
-        if self._capture is not None and self._hashlines:
-            metas = await asyncio.to_thread(read_bssid_metas, self._capture.bssid)
+        if self._bssid is not None and self._hashlines:
+            metas = await asyncio.to_thread(read_bssid_metas, self._bssid)
             self._exhaustion = read_exhaustion(metas, [h.id for h in self._hashlines])
             self._mark_exhausted()
 

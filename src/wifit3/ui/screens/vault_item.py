@@ -59,7 +59,7 @@ _EXPAND_TOOLTIP, _COLLAPSE_TOOLTIP = "Show captures and verifications", "Hide ca
 _VERIFY_TOOLTIP = "Connect to the live AP and verify this key"
 _BUSY_TOOLTIP = "A live check is running on another AP"
 
-_KeyId = tuple[str, CaptureType, str]    # BSSID, key type, value
+_VerifyingKey = tuple[str, tuple[CaptureType, str]]    # BSSID, Key.id
 
 
 def key_text(key: Key) -> str:
@@ -143,10 +143,6 @@ def _exhaustion_text(exhaustion: Exhaustion) -> str:
     return f"{name} ({exhaustion.exhausted_hashlines}/{exhaustion.hashlines})"
 
 
-def _key_id(key: Key) -> _KeyId:
-    return key.newest_capture.bssid, key.type, key.value
-
-
 def _status_class(status: PasswordStatus) -> str:
     return "-" + status.name.lower().replace("_", "-")
 
@@ -178,7 +174,7 @@ class _KeyRow(VerticalGroup):
             self.key = key
 
     def __init__(self, key: Key, state: ApState, *, show_client: bool, show_ssid: bool, expanded: bool,
-                 verifying: Optional[Key]) -> None:
+                 verifying: Optional[_VerifyingKey]) -> None:
         status = state.key_statuses[key.id]
         super().__init__(classes=_status_class(status))
         self.status = status
@@ -186,6 +182,8 @@ class _KeyRow(VerticalGroup):
         self._state = state
         self._show_client = show_client
         self._show_ssid = show_ssid
+        self._has_history = bool(key.live_verifications or key.hashline_ids)
+        self._history_built = False
         self.toggle_button = Button("", compact=True, classes="toggle")
         self.copy_button = Button("Copy", compact=True, classes="copy-btn")
         self.verify_button = Button("Verify", compact=True, variant="primary", classes="verify-btn")
@@ -202,17 +200,25 @@ class _KeyRow(VerticalGroup):
         return sorted(rows, key=lambda row: epoch_sort_key(row[0]), reverse=True)
 
     def compose(self) -> ComposeResult:
-        history = self._history()
         with Horizontal(classes="key-line"):
-            yield self.toggle_button if history else Label("", classes="no-toggle")
+            yield self.toggle_button if self._has_history else Label("", classes="no-toggle")
             yield Label(Content.from_markup(self._summary_markup()), classes="key-text")
             yield self.copy_button
             yield self.verify_button
-        if history:
+        if self._has_history:
             with Vertical(classes="history"):
-                with self.history_rows:
-                    for _, columns in history:
-                        yield Horizontal(*columns, classes="row")
+                yield self.history_rows
+
+    async def on_mount(self) -> None:
+        if self.expanded:
+            await self._build_history()
+
+    async def _build_history(self) -> None:
+        """The history rows, built the first time the key is expanded."""
+        if self._history_built or not self._has_history:
+            return
+        self._history_built = True
+        await self.history_rows.mount_all(Horizontal(*columns, classes="row") for _, columns in self._history())
 
     def _summary_markup(self) -> str:
         key = self.key
@@ -230,18 +236,20 @@ class _KeyRow(VerticalGroup):
         self.toggle_button.label = _COLLAPSE_LABEL if expanded else _EXPAND_LABEL
         self.toggle_button.tooltip = _COLLAPSE_TOOLTIP if expanded else _EXPAND_TOOLTIP
 
-    def watch_expanded(self, expanded: bool) -> None:
+    async def watch_expanded(self, expanded: bool) -> None:
         self._show_expansion(expanded)
+        if expanded and self.is_mounted:
+            await self._build_history()
 
-    def show_verifying(self, verifying: Optional[Key]) -> None:
+    def show_verifying(self, verifying: Optional[_VerifyingKey]) -> None:
         """Verify is disabled while any live check runs: "Verifying…" on its key, "Busy" when it is
         another AP's."""
         button = self.verify_button
         button.disabled = verifying is not None
         button.label, button.tooltip = "Verify", _VERIFY_TOOLTIP
-        if verifying is not None and _key_id(verifying) == _key_id(self.key):
+        if verifying == (self._state.bssid, self.key.id):
             button.label = "Verifying…"
-        elif verifying is not None and verifying.newest_capture.bssid != self.key.newest_capture.bssid:
+        elif verifying is not None and verifying[0] != self._state.bssid:
             button.label, button.tooltip = "Busy", _BUSY_TOOLTIP
 
     @on(Button.Pressed)
@@ -336,16 +344,16 @@ class _ApStatePanel(VerticalGroup):
     _selected_count_label: Label
     _uncracked_list: Optional[VerticalScroll] = None
 
-    def __init__(self, state: ApState, expanded_key_ids: frozenset[_KeyId],
-                 unticked_hashline_ids: frozenset[str], verifying: Optional[Key]) -> None:
+    def __init__(self, state: ApState, expanded_key_ids: frozenset[tuple[CaptureType, str]],
+                 unticked_hashline_ids: frozenset[str], verifying: Optional[_VerifyingKey]) -> None:
         super().__init__()
         self._state = state
         self._expanded_key_ids = expanded_key_ids
         self._unticked_hashline_ids = unticked_hashline_ids
         self._verifying = verifying
 
-    async def show(self, state: ApState, expanded_key_ids: frozenset[_KeyId],
-                   unticked_hashline_ids: frozenset[str], verifying: Optional[Key]) -> None:
+    async def show(self, state: ApState, expanded_key_ids: frozenset[tuple[CaptureType, str]],
+                   unticked_hashline_ids: frozenset[str], verifying: Optional[_VerifyingKey]) -> None:
         """Recompose for ``state``, keeping the focus and the scroll of each list."""
         focused = self.screen.focused
         focus_key = self._focus_key(focused) if focused is not None and self in focused.ancestors else None
@@ -397,7 +405,7 @@ class _ApStatePanel(VerticalGroup):
             yield self.add_key_button
         for key in state.keys:
             yield _KeyRow(key, state, show_client=show_client, show_ssid=show_ssid,
-                          expanded=_key_id(key) in self._expanded_key_ids, verifying=self._verifying)
+                          expanded=key.id in self._expanded_key_ids, verifying=self._verifying)
         if not state.keys:
             yield Label("none yet", classes="none-yet")
         self._uncracked_list = None
@@ -437,14 +445,14 @@ class _ApStatePanel(VerticalGroup):
             yield Label(Content.from_markup(_captures_count_markup(len(uncracked), len(state.hashlines))))
         groups = hashline_groups(uncracked)
         ticked = [not all(h.id in self._unticked_hashline_ids for h in group) for group in groups]
-        selected = sum(len(group) for group, is_ticked in zip(groups, ticked) if is_ticked)
+        selected = [h.line for group, is_ticked in zip(groups, ticked) if is_ticked for h in group]
         capture = state.hashline_capture
         with Horizontal(classes="tools"):
             if capture is not None:
                 for tool in self.app.vault.manager.tools.values():
-                    if tool.can_crack(capture):
-                        yield _CrackerButton(tool, capture, disabled=selected == 0)
-        self._selected_count_label = Label(_selected_count_text(selected), classes="selected-count")
+                    if tool.can_crack([h.line for h in uncracked]):
+                        yield _CrackerButton(tool, capture, disabled=not tool.can_crack(selected))
+        self._selected_count_label = Label(_selected_count_text(len(selected)), classes="selected-count")
         yield self._selected_count_label
         if state.uncracked_exhaustion:
             names = [_exhaustion_text(e) for e in state.uncracked_exhaustion]
@@ -463,10 +471,10 @@ class _ApStatePanel(VerticalGroup):
     def _selection_changed(self, event: Checkbox.Changed) -> None:
         if not isinstance(event.checkbox, _HashlineGroupCheckbox):
             return
-        count = len(self._selected_hashlines())
-        self._selected_count_label.update(_selected_count_text(count))
+        selected = [h.line for h in self._selected_hashlines()]
+        self._selected_count_label.update(_selected_count_text(len(selected)))
         for button in self.query(_CrackerButton).results(_CrackerButton):
-            button.disabled = count == 0
+            button.disabled = not button.tool.can_crack(selected)
 
     @on(Button.Pressed)
     def _button_pressed(self, event: Button.Pressed) -> None:
@@ -489,7 +497,7 @@ class _ApStatePanel(VerticalGroup):
                 tool.name, capture, self.app.vault.add_probed_ssids(config), hashlines=[h.raw for h in selected])
             self.notify(f"Queued job: {job_id}")
 
-        self.app.push_screen(UI_TOOLS[tool.name](capture=capture, probed_ssids=self.app.vault.probed_ssids(),
+        self.app.push_screen(UI_TOOLS[tool.name](bssid=self._state.bssid, probed_ssids=self.app.vault.probed_ssids(),
                                                  hashlines=selected), _on_config)
 
 
@@ -511,12 +519,12 @@ class VaultItemView(Vertical):
     VaultItemView #vault-item-empty { color: $text-muted; }
     """
 
-    verifying: var[Optional[Key]] = var(None)
+    verifying: var[Optional[_VerifyingKey]] = var(None)
 
     def __init__(self, id: Optional[str] = None) -> None:
         super().__init__(id=id)
         self.key_verifier = LiveKeyVerifier()
-        self.history_expanded_by_user: dict[_KeyId, bool] = {}
+        self.history_expanded_by_user: dict[tuple[CaptureType, str], bool] = {}    # by Key.id, this AP's
         self.unticked_hashline_ids: set[str] = set()
         self._bssid = ""
         self._ssid: Optional[str] = None
@@ -529,6 +537,8 @@ class VaultItemView(Vertical):
         if (bssid, ssid, state) == (self._bssid, self._ssid, self._state):
             return
         same_ap, same_state = bssid == self._bssid, state == self._state
+        if not same_ap:
+            self.history_expanded_by_user.clear()
         self._bssid, self._ssid, self._state = bssid, ssid, state
         if state is None or not self.query_children(_ApStatePanel):
             self.refresh(recompose=True)
@@ -547,11 +557,12 @@ class VaultItemView(Vertical):
 
     def history_expanded(self, key: Key) -> bool:
         """The user's choice for this key's history, else expanded only in a tall, wide drawer."""
-        chosen = self.history_expanded_by_user.get(_key_id(key))
+        chosen = self.history_expanded_by_user.get(key.id)
         return chosen if chosen is not None else self.screen.has_class(TALL) and self.screen.has_class(WIDE)
 
-    def _panel_choices(self, state: ApState) -> tuple[frozenset[_KeyId], frozenset[str], Optional[Key]]:
-        expanded = frozenset(_key_id(key) for key in state.keys if self.history_expanded(key))
+    def _panel_choices(self, state: ApState
+                       ) -> tuple[frozenset[tuple[CaptureType, str]], frozenset[str], Optional[_VerifyingKey]]:
+        expanded = frozenset(key.id for key in state.keys if self.history_expanded(key))
         return expanded, frozenset(self.unticked_hashline_ids), self.verifying
 
     def _set_title(self) -> None:
@@ -574,13 +585,13 @@ class VaultItemView(Vertical):
         for row in self.query(_KeyRow).results(_KeyRow):
             row.expanded = self.history_expanded(row.key)
 
-    def watch_verifying(self, verifying: Optional[Key]) -> None:
+    def watch_verifying(self, verifying: Optional[_VerifyingKey]) -> None:
         for row in self.query(_KeyRow).results(_KeyRow):
             row.show_verifying(verifying)
 
     @on(_KeyRow.Toggled)
     def _key_toggled(self, event: _KeyRow.Toggled) -> None:
-        self.history_expanded_by_user[_key_id(event.key)] = event.expanded
+        self.history_expanded_by_user[event.key.id] = event.expanded
 
     @on(Checkbox.Changed)
     def _hashline_tick_changed(self, event: Checkbox.Changed) -> None:
@@ -594,9 +605,9 @@ class VaultItemView(Vertical):
 
     @on(_KeyRow.VerifyPressed)
     def _verify_pressed(self, event: _KeyRow.VerifyPressed) -> None:
-        if self.verifying is not None:
+        if self.verifying is not None or not self._bssid:
             return
-        self.verifying = event.key
+        self.verifying = self._bssid, event.key.id
         self._verify(event.key)
 
     @work

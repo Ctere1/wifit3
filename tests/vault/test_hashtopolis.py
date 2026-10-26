@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from wifit3.crack.hc22000_format import parse_hc22000
 from wifit3.models import CaptureType, JobAction, JobState, PersistedCapture, ToolStatus
 from wifit3.persist.config import Config
 from wifit3.vault.manager import JobManager
@@ -237,9 +238,9 @@ def test_only_wpa01_and_wpa02_lines_are_uploaded(server, tmp_path):
     assert server.uploaded == [_PMKID, _EAPOL]
 
 
-def test_ft_only_capture_is_not_crackable(server, tmp_path):
-    assert not ht.HashtopolisTool().can_crack(_capture(tmp_path, _FT_PMKID))
-    assert ht.HashtopolisTool().can_crack(_capture(tmp_path, _EAPOL))
+def test_ft_only_hashlines_are_not_crackable(server):
+    assert not ht.HashtopolisTool().can_crack([parse_hc22000(_FT_PMKID)])
+    assert ht.HashtopolisTool().can_crack([parse_hc22000(_FT_PMKID), parse_hc22000(_EAPOL)])
 
 
 def test_auto_crack_config_needs_server_wordlist_and_group(server, monkeypatch):

@@ -352,7 +352,7 @@ async def test_password_source_labels_count_the_chosen_hashlines_ssids_or_one_ss
     app = _Host()
     async with app.run_test() as pilot:
         for modal, ssid_label in (
-                (CpuCrackConfigModal(capture=persisted, probed_ssids=["CafeGuest"], hashlines=[_dated(chosen)]),
+                (CpuCrackConfigModal(bssid=persisted.bssid, probed_ssids=["CafeGuest"], hashlines=[_dated(chosen)]),
                  f"This AP's SSID variants ({len(ssid_variants('ab'))})"),
                 (HashcatConfigModal(confirm_label="Save", probed_ssids=["CafeGuest"]),
                  f"This AP's SSID variants (about {len(ssid_variants('HomeWifi')):,} per SSID)")):
@@ -384,7 +384,7 @@ async def test_exhausted_wordlists_and_sources_are_marked_with_when_and_on_how_m
     date = datetime.fromtimestamp(when).strftime("%Y-%m-%d")
     app = _Host()
     async with app.run_test() as pilot:
-        modal = CpuCrackConfigModal(capture=persisted, hashlines=[_dated(line) for line in lines])
+        modal = CpuCrackConfigModal(bssid=persisted.bssid, hashlines=[_dated(line) for line in lines])
         await app.push_screen(modal)
         await app.workers.wait_for_complete()
         await pilot.pause()
@@ -412,7 +412,7 @@ async def test_exhausted_rows_start_unchecked_and_one_click_restores_them(tmp_pa
         wordlist_identity(exhausted_list): {hashline_id(line): int(time.time())}})
     app = _Host()
     async with app.run_test() as pilot:
-        modal = CpuCrackConfigModal(capture=persisted, hashlines=[_dated(line)])
+        modal = CpuCrackConfigModal(bssid=persisted.bssid, hashlines=[_dated(line)])
         await app.push_screen(modal)
         await app.workers.wait_for_complete()
         await pilot.pause()

@@ -2,11 +2,11 @@ import logging
 from abc import abstractmethod
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Generic, Optional, Self, TypeVar
+from typing import Generic, Optional, Self, Sequence, TypeVar
 
-from wifit3.crack.hc22000_format import read_hc22000
+from wifit3.crack.hc22000_format import Hc22000Line, read_hc22000
 from wifit3.crack.passwords import all_ssid_variants
-from wifit3.models import PersistedCapture, ToolResult, ToolStatus
+from wifit3.models import ToolResult, ToolStatus
 from wifit3.models.jobs import JobAction, JobState
 from wifit3.persist.exhaustion import SSID_VARIANTS_IDENTITY, SSID_VARIANTS_NAME, record_exhausted
 from wifit3.vault.tools.base import VaultTool
@@ -99,8 +99,8 @@ class CrackerTool(VaultTool, Generic[QueueT]):
     def _running_actions(self, queue: QueueT, progress_msg: str) -> JobAction:
         """What the running job accepts, given its latest progress."""
 
-    def can_crack(self, capture: PersistedCapture) -> bool:
-        return capture.path.endswith(".hc22000")
+    def can_crack(self, lines: Sequence[Hc22000Line]) -> bool:
+        return bool(lines)
 
     def apply(self, action: JobAction, job: JobState) -> bool:
         queue = self.queue_type.from_job(job)

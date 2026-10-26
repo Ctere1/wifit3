@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from wifit3.crack.hc22000_format import Hc22000Line, read_hc22000
 from wifit3.models import PersistedCapture, ToolCapability, ToolName, ToolResult
@@ -31,8 +31,8 @@ class VaultTool(ABC):
     capabilities: ToolCapability
 
     @abstractmethod
-    def can_crack(self, capture: PersistedCapture) -> bool:
-        """Return True if this tool can attempt to crack the given capture."""
+    def can_crack(self, lines: Sequence[Hc22000Line]) -> bool:
+        """Whether this tool can attempt to crack these hashlines."""
         pass
 
     @abstractmethod

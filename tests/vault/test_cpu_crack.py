@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from wifit3.crack import wpa_psk
-from wifit3.crack.hc22000_format import pmkid_hashline
+from wifit3.crack.hc22000_format import parse_hc22000, pmkid_hashline
 from wifit3.crack.passwords import ssid_passwords, ssid_variants
 from wifit3.dot11 import wpa
 from wifit3.dot11.eapol import eapol_key
@@ -88,11 +88,9 @@ def _gate_pmk(mocker) -> tuple[threading.Event, threading.Event]:
     return entered, release
 
 
-def test_cpu_crack_can_crack_only_hc22000(tool):
-    assert tool.can_crack(PersistedCapture(type=CaptureType.PMKID, timestamp=0, path="a.hc22000",
-                                           bssid="fc:69:0c:15:82:64"))
-    assert not tool.can_crack(PersistedCapture(type=CaptureType.HS, timestamp=0, path="a.pcap",
-                                               bssid="fc:69:0c:15:82:64"))
+def test_cpu_crack_can_crack_any_hashlines_but_not_none(tool):
+    assert tool.can_crack([parse_hc22000(_HASHCAT_PMKID_LINE)])
+    assert not tool.can_crack([])
 
 
 @pytest.mark.parametrize("key_descriptor_version", [1, 2, 3])

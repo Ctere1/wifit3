@@ -17,19 +17,11 @@ from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional
 from wifit3.crack.hc22000_format import Hc22000Line
 from wifit3.crack.wpa_psk import psk_verdict
 from wifit3.models import WPS_CAPTURE_TYPES, CaptureType, PersistedCapture
-from wifit3.persist import save
+from wifit3.persist import ap_state, save
+from wifit3.persist.ap_state import ApState, Key, PasswordStatus, read_hashlines
 from wifit3.persist.capture_history import load_capture_index, summarize
 from wifit3.persist.common import LEGACY_CAPTURE_RE, bssid_to_dashed, safe_ssid
 from wifit3.persist.config import Config
-from wifit3.persist.ap_state import (
-    ApState,
-    Key,
-    PasswordStatus,
-    load_ap_state,
-    read_hashlines,
-    record_hashlines_captured,
-    record_live_verification,
-)
 from wifit3.persist.meta import meta_path, update_meta
 from wifit3.persist.save import SaveResult
 from wifit3.vault.manager import JobManager
@@ -178,10 +170,25 @@ class Vault:
         state = self._ap_states.get(bssid)
         if state is None:
             revision = self.revision
-            state = self._ap_states[bssid] = load_ap_state(bssid, self.persisted(bssid))
+            state = self._ap_states[bssid] = ap_state.load_ap_state(bssid, self.persisted(bssid))
             if self.revision != revision:       # changed by another thread meanwhile
                 self._ap_states.pop(bssid, None)
+            self._record_pcap_dates(state)
         return state
+
+    @staticmethod
+    def _record_pcap_dates(state: ApState) -> None:
+        """Save the dates read from pcaps to the .meta, so they are read once; the state already
+        holds them, so nothing is invalidated."""
+        by_ssid: Dict[str, Dict[str, tuple[int, ...]]] = {}
+        for hashline in state.hashlines:
+            if hashline.dated_from_pcaps:
+                by_ssid.setdefault(hashline.line.ssid, {})[hashline.id] = hashline.captured
+        for ssid, dates in by_ssid.items():
+            try:
+                ap_state.record_hashline_dates(ssid, state.bssid, dates)
+            except OSError:
+                logger.warning(f"Could not save hashline dates for {state.bssid}", exc_info=True)
 
     def ssid(self, bssid: str) -> Optional[str]:
         """The AP's SSID; a .pcap only knows the filename-safe form, so any other capture wins."""
@@ -318,40 +325,36 @@ class Vault:
         new_lines = {hid: raw_and_line for hid, raw_and_line in after.items() if hid not in before}
         matches_saved_psk = None
         if new_lines:
-            record_hashlines_captured(ap.ssid, ap.bssid, [raw for raw, _ in new_lines.values()])
+            ap_state.record_hashlines_captured(ap.ssid, ap.bssid, [raw for raw, _ in new_lines.values()])
             psks = {k.value for k in state.keys if k.type == CaptureType.WPA_PSK}
             psks |= {psk for psk in (ap.wps_pbc_psk, ap.wps_pin_psk) if psk}
             matches_saved_psk = psk_verdict(psks, [line for _, line in new_lines.values()])
         self._insert_capture(capture)
         if not matches_saved_psk:
-            self._auto_crack(ap, capture, list(before.values()), [line for _, line in after.values()],
+            self._auto_crack(ap, list(before.values()), [line for _, line in after.values()],
                              state.status is PasswordStatus.CURRENT)
         return HashlineSaveResult(result.path, was_new=True, matches_saved_psk=matches_saved_psk)
 
-    def _auto_crack(self, ap: "AccessPoint", capture: PersistedCapture, before: List[Hc22000Line],
-                    after: List[Hc22000Line], was_current: bool) -> None:
+    def _auto_crack(self, ap: "AccessPoint", before: List[Hc22000Line], after: List[Hc22000Line],
+                    was_current: bool) -> None:
         """Crack the AP's uncracked hashlines when no PSK is held (see ``_saved_psk``) and the save
         crossed the auto-crack threshold or turned a current password stale."""
         tool = self.manager.tools.get(Config.auto_crack) if Config.auto_crack else None
-        if tool is None or not tool.can_crack(capture):
-            return
-        config = tool.auto_crack_config()
-        if config is None:
-            return
-        if self._saved_psk(ap.bssid) is not None:
+        config = tool.auto_crack_config() if tool is not None else None
+        if tool is None or config is None or self._saved_psk(ap.bssid) is not None:
             return
         state = self.ap_state(ap.bssid)
         became_stale = was_current and state.status is PasswordStatus.STALE
         if not (crosses_auto_crack_threshold(before, after) or became_stale):
             return
-        uncracked = [h.raw for h in state.uncracked]
-        if uncracked:
-            self.manager.submit_job(tool.name, capture, self.add_probed_ssids(config),
-                                    auto_crack=True, hashlines=uncracked)
+        uncracked = [h.line for h in state.uncracked]
+        if state.hashline_capture is not None and tool.can_crack(uncracked):
+            self.manager.submit_job(tool.name, state.hashline_capture, self.add_probed_ssids(config),
+                                    auto_crack=True, hashlines=[h.raw for h in state.uncracked])
 
     def record_live_verification(self, key: Key, correct: bool) -> None:
         """Note that a live check against the AP accepted or rejected the key."""
-        record_live_verification(key, correct)
+        ap_state.record_live_verification(key, correct)
         self.notify_changed(key.newest_capture.bssid)
 
     def save_wep_key(self, ap: "AccessPoint", key: bytes) -> Optional[SaveResult]:

@@ -75,15 +75,13 @@ def _parse_aggregate_hc(path: Path, bssid: str) -> List[PersistedCapture]:
         mtime = 0
     m = AGGREGATED_HC22000_RE.match(path.name)
     ssid = _essid(lines, m.group("ssid")) if m else None
-    pmkid = sum(1 for _, line in lines if line.is_pmkid)
-    hs = len(lines) - pmkid
     out: List[PersistedCapture] = []
-    if pmkid:
+    if any(line.is_pmkid for _, line in lines):
         out.append(PersistedCapture(type=CaptureType.PMKID, timestamp=mtime, path=str(path),
-                                    bssid=bssid, ssid=ssid, record_count=pmkid))
-    if hs:
+                                    bssid=bssid, ssid=ssid))
+    if any(not line.is_pmkid for _, line in lines):
         out.append(PersistedCapture(type=CaptureType.HS, timestamp=mtime, path=str(path),
-                                    bssid=bssid, ssid=ssid, record_count=hs))
+                                    bssid=bssid, ssid=ssid))
     return out
 
 
@@ -127,13 +125,11 @@ def _parse_file(path: Path, bssid: str) -> List[PersistedCapture]:
         return [PersistedCapture(type=CaptureType.WPA_PSK, timestamp=epoch, path=str(path),
                                  bssid=bssid, value=psk, ssid=ssid)]
     if kind == "handshake" and ext in ("hc22000", "pcap"):
-        count = sum(1 for _, line in lines if not line.is_pmkid)
         return [PersistedCapture(type=CaptureType.HS, timestamp=epoch, path=str(path),
-                                 bssid=bssid, ssid=ssid, record_count=count)]
+                                 bssid=bssid, ssid=ssid)]
     if kind == "pmkid" and ext in ("hc22000", "pcap"):
-        count = sum(1 for _, line in lines if line.is_pmkid)
         return [PersistedCapture(type=CaptureType.PMKID, timestamp=epoch, path=str(path),
-                                 bssid=bssid, ssid=ssid, record_count=count)]
+                                 bssid=bssid, ssid=ssid)]
     return []
 
 
