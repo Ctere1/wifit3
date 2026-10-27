@@ -422,7 +422,8 @@ class DeviceManager:
         try:
             await self._connect_and_attach(device_id)
             return BringupResult.ready()
-        except BringUpPermissionsError:
+        except BringUpPermissionsError as e:
+            logger.warning("%s: bring-up needs setup (%s): %s", device_id.chipset, e.stage, e.detail)
             if bail_at_permissions:
                 return BringupResult.failed("Installation required. START it from the main menu.")
             # else fixable: fall through to setup
