@@ -9,6 +9,7 @@ import wifit3.ui.vault.modals.hashtopolis as mod
 from wifit3.persist.config import Config
 from wifit3.ui.vault.modals.hashtopolis import HashtopolisConfigModal
 from wifit3.vault.tools.hashtopolis_api import AccessGroup, HashtopolisError, ServerFile
+from tests.ui.wait_until import wait_until
 
 
 class _Host(App):
@@ -20,7 +21,7 @@ async def test_modal_fits_viewport_and_scrolls_fields_inside():
     app = _Host()
     async with app.run_test(size=(40, 12)) as pilot:
         app.push_screen(HashtopolisConfigModal())
-        await pilot.pause()
+        await pilot.pause(0)
 
         dialog = app.screen.query_one("#hashtopolis-dialog")
         body = app.screen.query_one("#hashtopolis-body", VerticalScroll)
@@ -32,7 +33,7 @@ async def test_modal_fits_viewport_and_scrolls_fields_inside():
         assert body.parent is dialog
         assert title.parent is body and buttons.parent is body
         body.scroll_end(animate=False)
-        await pilot.pause()
+        await pilot.pause(0)
         assert buttons.region.bottom <= body.content_region.bottom
 
 
@@ -65,8 +66,10 @@ def server(monkeypatch):
 async def _test_connection(app, pilot) -> None:
     app.screen.query_one("#hashtopolis-url", Input).value = "http://server:8080"
     app.screen.query_one("#hashtopolis-access-key", Input).value = "key"
+    result = app.screen.query_one("#hashtopolis-test-result", Label)
+    before = str(result.render())
     app.screen.query_one("#hashtopolis-test", Button).press()
-    await pilot.pause()
+    await wait_until(pilot, lambda: str(result.render()) != before)     # the worker has started
     await app.workers.wait_for_complete()
     await pilot.pause(0)
 
@@ -147,14 +150,14 @@ async def test_test_finishing_after_cancel_leaves_the_app_running(server, monkey
     app = _Host()
     async with app.run_test() as pilot:
         app.push_screen(HashtopolisConfigModal())
-        await pilot.pause()
+        await pilot.pause(0)
         app.screen.query_one("#hashtopolis-test", Button).press()
-        await pilot.pause()
+        await pilot.pause(0)
         app.screen.query_one("#hashtopolis-cancel", Button).press()
-        await pilot.pause()
+        await wait_until(pilot, lambda: not isinstance(app.screen, HashtopolisConfigModal))
         release.set()
         await app.workers.wait_for_complete()
-        await pilot.pause()
+        await pilot.pause(0)
 
         assert not isinstance(app.screen, HashtopolisConfigModal)
 
@@ -166,7 +169,7 @@ async def test_saved_wordlist_and_group_show_by_name_before_a_refresh(server):
     app = _Host()
     async with app.run_test() as pilot:
         app.push_screen(HashtopolisConfigModal())
-        await pilot.pause()
+        await pilot.pause(0)
 
         assert app.screen.query_one("#hashtopolis-wordlist", Select).value == 2
         group = app.screen.query_one("#hashtopolis-access-group", Select)
@@ -178,7 +181,7 @@ async def test_status_asks_for_a_refresh_until_wordlists_are_known(server):
     app = _Host()
     async with app.run_test() as pilot:
         app.push_screen(HashtopolisConfigModal())
-        await pilot.pause()
+        await pilot.pause(0)
 
         assert "Refresh to list wordlists" in str(
             app.screen.query_one("#hashtopolis-test-result", Label).render())
@@ -199,15 +202,15 @@ async def test_reveal_toggles_the_access_key(server):
     app = _Host()
     async with app.run_test() as pilot:
         app.push_screen(HashtopolisConfigModal())
-        await pilot.pause()
+        await pilot.pause(0)
         access_key = app.screen.query_one("#hashtopolis-access-key", Input)
         reveal = app.screen.query_one("#hashtopolis-reveal", Button)
 
         reveal.press()
-        await pilot.pause()
+        await pilot.pause(0)
         assert not access_key.password and str(reveal.label) == "hide"
         reveal.press()
-        await pilot.pause()
+        await pilot.pause(0)
         assert access_key.password and str(reveal.label) == "reveal"
 
 

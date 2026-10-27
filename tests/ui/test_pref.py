@@ -11,6 +11,7 @@ from wifit3.persist.vault import Vault
 from wifit3.ui.pref import PreferencesModal
 from wifit3.ui.vault.modals.cpu_crack import CpuCrackConfigModal
 from wifit3.ui.vault.modals.hashcat import HashcatConfigModal
+from tests.ui.wait_until import wait_until
 
 
 class _Host(App):
@@ -111,7 +112,7 @@ async def test_choosing_an_unconfigured_tool_opens_its_modal_in_save_mode(monkey
     async with app.run_test() as pilot:
         await _open_prefs(app, pilot)
         app.screen.query_one("#auto_crack", Select).value = "hashcat"
-        await pilot.pause()
+        await wait_until(pilot, lambda: bool(app.screen.query("#wordlist-launch")))
 
         assert isinstance(app.screen, HashcatConfigModal)
         assert str(app.screen.query_one("#wordlist-launch", Button).label) == "Save"
@@ -125,14 +126,15 @@ async def test_cancelling_an_unconfigured_tools_modal_restores_the_previous_choi
     async with app.run_test() as pilot:
         await _open_prefs(app, pilot)
         app.screen.query_one("#auto_crack", Select).value = "hashcat"
-        await pilot.pause()
+        await wait_until(pilot, lambda: bool(app.screen.query("#wordlist-cancel")))
         app.screen.query_one("#wordlist-cancel", Button).press()
-        await pilot.pause()
+        await wait_until(pilot, lambda: isinstance(app.screen, PreferencesModal))
+        await pilot.pause(0)    # the dismiss callback runs after the pop
 
         assert isinstance(app.screen, PreferencesModal)
         assert app.screen.query_one("#auto_crack", Select).value == "cpu_crack"
         app.screen.query_one("#save", Button).press()
-        await pilot.pause()
+        await wait_until(pilot, lambda: not isinstance(app.screen, PreferencesModal))
 
     assert Config.auto_crack is ToolName.CPU_CRACK
 
@@ -143,7 +145,7 @@ async def test_configure_button_opens_the_chosen_tools_modal():
     async with app.run_test() as pilot:
         await _open_prefs(app, pilot)
         app.screen.query_one("#auto_crack_configure", Button).press()
-        await pilot.pause()
+        await wait_until(pilot, lambda: bool(app.screen.query("#wordlist-launch")))
 
         assert isinstance(app.screen, CpuCrackConfigModal)
         assert str(app.screen.query_one("#wordlist-launch", Button).label) == "Save"

@@ -16,6 +16,7 @@ from wifit3.ui.ap_table import APTable
 from wifit3.ui.app import WifiteApp
 from wifit3.ui.screens.filter import EncryptionFilter, FilterBar, ScanFilter
 from wifit3.ui.screens.scanner import ScannerView
+from tests.ui.wait_until import wait_until
 
 
 class _FakeIface:
@@ -253,8 +254,7 @@ async def test_only_the_checkbox_writes_config_not_every_keystroke():
         assert app.persist_calls == 0
 
         scanner.query_one("#filter-hide-silenced", Checkbox).value = True
-        await pilot.pause()
-        assert app.persist_calls == 1
+        await wait_until(pilot, lambda: app.persist_calls == 1)
         assert Config.hide_silenced is True
 
         scanner.query_one("#filter-text", Input).value = "netg"
@@ -262,8 +262,7 @@ async def test_only_the_checkbox_writes_config_not_every_keystroke():
         assert app.persist_calls == 1       # text edits leave the stored setting alone
 
         scanner.query_one("#filter-hide-silenced", Checkbox).value = False
-        await pilot.pause()
-        assert app.persist_calls == 2
+        await wait_until(pilot, lambda: app.persist_calls == 2)
         assert Config.hide_silenced is False
 
 
