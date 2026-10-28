@@ -10,16 +10,21 @@ than the host doing byte-by-byte register I/O. The host primitives are:
   REG_HMEBOX_E0 (0x88), poll until they clear, then check the matching error bit.
 
 ``iol_efuse_patch`` (the HAL_INIT_STAGES_EFUSE_PATCH stage) runs READ_EFUSE_MAP
-then EFUSE_PATCH. The probe-phase efuse map read (which recovers crystal_cap /
-tx-power / MAC) additionally reads the map back from the TX packet buffer — that
-is a later milestone; this module ports the IOL core + patch first.
+then EFUSE_PATCH. The probe-phase efuse map read (crystal_cap / tx-power / MAC)
+reads the map back from the TX packet buffer, falling back to byte-by-byte efuse
+reads when the IOL command fails.
 """
 from __future__ import annotations
 
 import secrets
+import time
 from typing import NamedTuple
 
 from .constants import (
+    Array_MP_8188E_MUSB,
+    CHIP_VER_RTL_MASK,
+    CHIP_VER_RTL_SHIFT,
+    I_CUT_VERSION,
     ANA8M,
     CMD_EFUSE_PATCH,
     CMD_READ_EFUSE_MAP,
@@ -49,6 +54,7 @@ from .constants import (
     REG_PKTBUF_DBG_DATA_H,
     REG_PKTBUF_DBG_DATA_L,
     REG_EFUSE_ACCESS,
+    REG_EFUSE_CTRL,
     REG_SYS_CFG,
     REG_SYS_CLKR,
     REG_SYS_FUNC_EN,
@@ -59,33 +65,42 @@ from .constants import (
     TXPKT_BUF_SELECT,
 )
 from .firmware import _8051_reset
+from .pwrseq import power_on
 
 
-def read_adapter_info(t) -> bool:
-    """Probe-time chip-info read, before power-on [SRC] read_adapter_info_8188eu (USB).
+class AdapterInfo(NamedTuple):
+    autoload_failed: bool
+    cut_version: int   # HAL_CUT_VERSION_E, REG_SYS_CFG[15:12]
 
-    Three steps the kernel runs at USB probe, ahead of ``_InitPowerOn``:
-      * ``read_chip_version_8188e`` — read REG_SYS_CFG (cut/vendor/IC type) [rtl8188e_hal_init.c:2451]
-      * ``GetEEPROMSize8188E`` + ``_ReadPROMContent`` — read REG_9346CR (boot-from-EEPROM vs
-        E-Fuse, autoload OK) [rtl8188e_hal_init.c:2800, usb_halinit.c:2089]
-      * ``hal_EfusePowerSwitch_RTL8188E(bWrite=_FALSE, PwrState=_TRUE)`` — REG_EFUSE_ACCESS=ON,
-        then make the e-fuse loader reset + clock valid [rtl8188e_hal_init.c:1080]
+    @property
+    def i_cut_series(self) -> bool:
+        """IS_VENDOR_8188E_I_CUT_SERIES [SRC] HalVerDef.h:176."""
+        return self.cut_version >= I_CUT_VERSION
 
-    The SYS_FUNC_EN / SYS_CLKR steps are read-modify-write that only write when a required bit
-    is clear; on this card those bits are already set, so the wire shows reads only. All reads
-    feed software state (version/autoload); nothing here gates on hardware we don't have."""
-    t.read32(REG_SYS_CFG)                       # read_chip_version_8188e
+
+def read_adapter_info(t) -> AdapterInfo:
+    """Probe-time chip-info read, before the efuse map read [SRC] read_adapter_info_8188eu (USB):
+    ``read_chip_version_8188e`` [rtl8188e_hal_init.c:2451], then ``GetEEPROMSize8188E`` +
+    ``_ReadPROMContent`` (REG_9346CR autoload status) [rtl8188e_hal_init.c:2800, usb_halinit.c:2089]."""
+    sys_cfg = t.read32(REG_SYS_CFG)             # read_chip_version_8188e
+    cut_version = (sys_cfg & CHIP_VER_RTL_MASK) >> CHIP_VER_RTL_SHIFT
     t.read16(REG_9346CR)                        # GetEEPROMSize8188E: BOOT_FROM_EEPROM?
     autoload_failed = not bool(t.read8(REG_9346CR) & EEPROM_EN)
-    # hal_EfusePowerSwitch_RTL8188E(_FALSE, _TRUE)
-    t.write8(REG_EFUSE_ACCESS, EFUSE_ACCESS_ON)
-    fn = t.read16(REG_SYS_FUNC_EN)
-    if not (fn & FEN_ELDR):
-        t.write16(REG_SYS_FUNC_EN, fn | FEN_ELDR)
-    clk = t.read16(REG_SYS_CLKR)
-    if (not (clk & LOADER_CLK_EN)) or (not (clk & ANA8M)):
-        t.write16(REG_SYS_CLKR, clk | LOADER_CLK_EN | ANA8M)
-    return autoload_failed
+    return AdapterInfo(autoload_failed, cut_version)
+
+
+def hal_efuse_power_switch(t, pwr_state: bool) -> None:
+    """``hal_EfusePowerSwitch_RTL8188E`` with bWrite=_FALSE [SRC] rtl8188e_hal_init.c:1080."""
+    if pwr_state:
+        t.write8(REG_EFUSE_ACCESS, EFUSE_ACCESS_ON)
+        fn = t.read16(REG_SYS_FUNC_EN)
+        if not (fn & FEN_ELDR):
+            t.write16(REG_SYS_FUNC_EN, fn | FEN_ELDR)
+        clk = t.read16(REG_SYS_CLKR)
+        if (not (clk & LOADER_CLK_EN)) or (not (clk & ANA8M)):
+            t.write16(REG_SYS_CLKR, clk | LOADER_CLK_EN | ANA8M)
+    else:
+        t.write8(REG_EFUSE_ACCESS, EFUSE_ACCESS_OFF)
 
 _IOL_POLL_CAP = 100000   # generous bound; the captured poll always converges
 
@@ -206,11 +221,11 @@ def _read_phymap_from_txpktbuf(t, bcnhead: int = 0) -> bytes:
     return bytes(out)
 
 
-def _phymap_to_logical(phymap: bytes) -> bytes:
+def _phymap_to_logical(phymap: bytes, pbuf: bytes) -> bytes:
     """``efuse_phymap_to_logical`` [SRC] rtl8188e_hal_init.c:97 — walk PG headers
     (section offset + 4-bit word-enable; EXT_HEADER for offsets >= 16) into the
-    512-byte logical map (`section*8 + word*2`)."""
-    table = bytearray(b"\xFF" * EFUSE_MAP_LEN_88E)
+    512-byte logical map (`section*8 + word*2`). An empty efuse returns ``pbuf`` unchanged."""
+    table = bytearray(EFUSE_MAP_LEN_88E)
     words = [[0xFFFF] * EFUSE_MAX_WORD_UNIT for _ in range(EFUSE_MAX_SECTION_88E)]
 
     def rd(addr):
@@ -218,7 +233,7 @@ def _phymap_to_logical(phymap: bytes) -> bytes:
 
     addr = 0
     if rd(addr) == 0xFF:
-        return bytes(table)
+        return pbuf
     addr += 1
     cur = rd(0)
     while cur != 0xFF and addr < EFUSE_REAL_CONTENT_LEN_88E:
@@ -249,11 +264,6 @@ def _phymap_to_logical(phymap: bytes) -> bytes:
                     if addr >= EFUSE_REAL_CONTENT_LEN_88E:
                         break
                 wren >>= 1
-        else:                                            # bad offset: skip its data
-            for w in range(EFUSE_MAX_WORD_UNIT):
-                if not (wren & 0x01):
-                    addr += 2
-                wren >>= 1
         cur = rd(addr)
         if cur != 0xFF and addr < EFUSE_REAL_CONTENT_LEN_88E:
             addr += 1
@@ -263,6 +273,114 @@ def _phymap_to_logical(phymap: bytes) -> bytes:
             table[s * 8 + w * 2] = words[s][w] & 0xFF
             table[s * 8 + w * 2 + 1] = (words[s][w] >> 8) & 0xFF
     return bytes(table)
+
+
+def iol_read_efuse(t, txpktbuf_bndy: int, logical_map: bytes) -> tuple[bool, bytes]:
+    """``iol_read_efuse`` [SRC] rtl8188e_hal_init.c:368 -> (status, logical_map). On failure
+    nothing is read back, so decoding the blank physical map leaves ``logical_map`` as is."""
+    t.write8(REG_TDECTRL + 1, txpktbuf_bndy)
+    physical_map = b"\xFF" * EFUSE_MAP_LEN_88E
+    t.write8(REG_PKT_BUFF_ACCESS_CTRL, TXPKT_BUF_SELECT)
+    status = iol_execute(t, CMD_READ_EFUSE_MAP)
+    if status:
+        physical_map = _read_phymap_from_txpktbuf(t, txpktbuf_bndy)
+    return status, _phymap_to_logical(physical_map, logical_map)
+
+
+def read_efuse_byte(t, _offset: int) -> int:
+    """``ReadEFuseByte`` [SRC] rtw_efuse.c:897 (its 0x34[11] clear is 8723B-only)."""
+    t.write8(REG_EFUSE_CTRL + 1, _offset & 0xFF)
+    readbyte = t.read8(REG_EFUSE_CTRL + 2)
+    t.write8(REG_EFUSE_CTRL + 2, ((_offset >> 8) & 0x03) | (readbyte & 0xFC))
+    readbyte = t.read8(REG_EFUSE_CTRL + 3)
+    t.write8(REG_EFUSE_CTRL + 3, readbyte & 0x7F)
+    retry = 0
+    value32 = t.read32(REG_EFUSE_CTRL)
+    while not ((value32 >> 24) & 0x80) and retry < 10000:
+        value32 = t.read32(REG_EFUSE_CTRL)
+        retry += 1
+    time.sleep(50e-6)
+    value32 = t.read32(REG_EFUSE_CTRL)
+    return value32 & 0xFF
+
+
+def hal_efuse_read_efuse_88e(t, pbuf: bytes) -> bytes:
+    """``Hal_EfuseReadEFuse88E`` [SRC] rtl8188e_hal_init.c:1184 for the whole map; an empty
+    efuse returns ``pbuf`` unchanged. Each byte is read as the PG walk reaches it, so this
+    cannot read-then-``_phymap_to_logical``."""
+    words = [[0xFFFF] * EFUSE_MAX_WORD_UNIT for _ in range(EFUSE_MAX_SECTION_88E)]
+    efuse_addr = 0
+    rtemp8 = read_efuse_byte(t, efuse_addr)
+    if rtemp8 == 0xFF:
+        return pbuf
+    efuse_addr += 1
+    while rtemp8 != 0xFF and efuse_addr < EFUSE_REAL_CONTENT_LEN_88E:
+        if (rtemp8 & 0x1F) == 0x0F:                      # extended header
+            u1temp = (rtemp8 & 0xE0) >> 5
+            rtemp8 = read_efuse_byte(t, efuse_addr)
+            if (rtemp8 & 0x0F) == 0x0F:
+                efuse_addr += 1
+                rtemp8 = read_efuse_byte(t, efuse_addr)
+                if rtemp8 != 0xFF and efuse_addr < EFUSE_REAL_CONTENT_LEN_88E:
+                    efuse_addr += 1
+                continue
+            offset = ((rtemp8 & 0xF0) >> 1) | u1temp
+            wren = rtemp8 & 0x0F
+            efuse_addr += 1
+        else:
+            offset = (rtemp8 >> 4) & 0x0F
+            wren = rtemp8 & 0x0F
+        if offset < EFUSE_MAX_SECTION_88E:
+            for i in range(EFUSE_MAX_WORD_UNIT):
+                if not (wren & 0x01):
+                    rtemp8 = read_efuse_byte(t, efuse_addr)
+                    efuse_addr += 1
+                    words[offset][i] = rtemp8
+                    if efuse_addr >= EFUSE_REAL_CONTENT_LEN_88E:
+                        break
+                    rtemp8 = read_efuse_byte(t, efuse_addr)
+                    efuse_addr += 1
+                    words[offset][i] |= rtemp8 << 8
+                    if efuse_addr >= EFUSE_REAL_CONTENT_LEN_88E:
+                        break
+                wren >>= 1
+        else:                                            # bad offset; the C never shifts wren here
+            for _ in range(EFUSE_MAX_WORD_UNIT):
+                if not (wren & 0x01):
+                    efuse_addr += 1
+                    if efuse_addr >= EFUSE_REAL_CONTENT_LEN_88E:
+                        break
+                    efuse_addr += 1
+                    if efuse_addr >= EFUSE_REAL_CONTENT_LEN_88E:
+                        break
+        rtemp8 = read_efuse_byte(t, efuse_addr)
+        if rtemp8 != 0xFF and efuse_addr < EFUSE_REAL_CONTENT_LEN_88E:
+            efuse_addr += 1
+
+    table = bytearray(EFUSE_MAP_LEN_88E)
+    for s in range(EFUSE_MAX_SECTION_88E):
+        for w in range(EFUSE_MAX_WORD_UNIT):
+            table[s * 8 + w * 2] = words[s][w] & 0xFF
+            table[s * 8 + w * 2 + 1] = (words[s][w] >> 8) & 0xFF
+    return bytes(table)
+
+
+def efuse_is_masked(offset: int) -> bool:
+    """``efuse_IsMasked`` [SRC] rtw_efuse.c:58 -> ``EFUSE_IsAddressMasked_MP_8188E_MUSB``
+    HalEfuseMask8188E_USB.c:81."""
+    r = offset // 16
+    c = (offset % 16) // 2
+    if c < 4:
+        result = Array_MP_8188E_MUSB[r] & (0x10 << c)
+    else:
+        result = Array_MP_8188E_MUSB[r] & (0x01 << (c - 4))
+    return not result
+
+
+def rtw_mask_map_read(data: bytes) -> bytes:
+    """``rtw_mask_map_read`` [SRC] rtw_efuse.c:413 at the module defaults rtw_OffEfuseMask = 0,
+    rtw_FileMaskEfuse = 0 (os_intfs.c:568,572): masked bytes read 0xFF."""
+    return bytes(0xFF if efuse_is_masked(i) else b for i, b in enumerate(data))
 
 
 # 0xCA[3:2] PA/LNA select -> (ExternalPA_2G, ExternalLNA_2G) [SRC] Hal_ReadPAType_8188E
@@ -281,8 +399,8 @@ def read_board_options(m: bytes, autoload_failed: bool = False) -> BoardOptions:
     Wire effect: ExternalPA_2G/ExternalLNA_2G set the phydm board_type (GPA/GLNA) and
     type_glna words that gate board-conditional rows in the MAC/PHY_REG/AGC/RADIO_A
     init tables [SRC] hal_dm.c:224-260, and arm PHY_SetRFEReg_8188E (bb.phy_set_rfe_reg).
-    A blank 0xCA (0xFF, this dev card) decodes to internal PA+LNA (bits[3:2]=3) with
-    TypeGLNA 0 -> the reference walk. Of the other 0xCA/board bytes none reaches the
+    ``rtw_mask_map_read`` hides 0xCA, so it arrives as 0xFF: internal PA+LNA (bits[3:2]=3)
+    with TypeGLNA 0 -> the reference walk. Of the other 0xCA/board bytes none reaches the
     wire in this build: ``CONFIG_ANTENNA_DIVERSITY`` off (0xC9 [SRC] autoconf.h:94),
     ``CONFIG_TXPWR_LIMIT_EN`` off (0xC1 [SRC] Makefile), 0xB8 only picks the SW channel
     list, and rfe_type (0xCA[1:0]) never gates a table row nor changes PHY_SetRFEReg's
@@ -379,19 +497,24 @@ def _invalid_mac(mac: bytes) -> bool:
 
 
 def read_chip_params(t, autoload_failed: bool = False, bcnhead: int = 0) -> ChipParams:
-    """Probe-phase efuse read [SRC] ReadEFuseByIC -> iol_read_efuse: power-on (done
-    by the caller) then IOL READ_EFUSE_MAP, read the physical map out of the packet
-    buffer, decode it, and extract crystal_cap + MAC. Returns the logical map too."""
-    iol_mode_enable(t, True, fw_ready=False)
-    t.write8(REG_TDECTRL + 1, bcnhead)                   # iol_read_efuse: bndy
-    t.write8(REG_PKT_BUFF_ACCESS_CTRL, TXPKT_BUF_SELECT)
-    iol_execute(t, CMD_READ_EFUSE_MAP)
-    phymap = _read_phymap_from_txpktbuf(t, bcnhead)
-    iol_mode_enable(t, False)
-    # hal_EfusePowerSwitch(OFF) tail: disable efuse access (bWrite=FALSE -> just 0xCF).
-    t.write8(REG_EFUSE_ACCESS, EFUSE_ACCESS_OFF)
+    """``EFUSE_ShadowMapUpdate`` [SRC] rtw_efuse.c:1890, then extract crystal_cap + MAC.
+    Autoload OK runs ``Efuse_ReadAllMap`` (rtw_efuse.c:1579), whose ``ReadEFuseByIC``
+    (rtl8188e_hal_init.c:1395) powers the MAC on; rtw_IOL_applied is always true here
+    (rtw_fw_iol = 1 [SRC] os_intfs.c:464). Autoload failed: no wire ops, map all 0xFF."""
+    logical = bytes(EFUSE_MAP_LEN_88E)               # efuse_eeprom_data: zeroed HalData [SRC] hal_intf.c:102
+    if autoload_failed:
+        logical = b"\xFF" * EFUSE_MAP_LEN_88E
+    else:
+        hal_efuse_power_switch(t, True)
+        power_on(t)                                  # ReadEFuseByIC: rtw_hal_power_on
+        iol_mode_enable(t, True, fw_ready=False)
+        ok, logical = iol_read_efuse(t, bcnhead, logical)
+        iol_mode_enable(t, False)
+        if not ok:
+            logical = hal_efuse_read_efuse_88e(t, logical)
+        hal_efuse_power_switch(t, False)
+    logical = rtw_mask_map_read(logical)             # rtw_efuse.c:1914
 
-    logical = _phymap_to_logical(phymap)
     eeprom_id_valid = int.from_bytes(logical[:2], "little") == RTL_EEPROM_ID
     autoload_failed = autoload_failed or not eeprom_id_valid
     cap = logical[EEPROM_XTAL_88E]

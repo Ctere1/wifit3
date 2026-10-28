@@ -42,7 +42,7 @@ def _vals(walk, addr):
 
 # The six board driver-word sets under test (build_driver_words(external_lna, external_pa, type_glna)).
 def _dw(lna, pa, glna):
-    return phy_cond.build_driver_words(lna, pa, glna)
+    return phy_cond.build_driver_words(lna, pa, glna, phy_cond.ODM_CUT_A)
 
 
 class RegTx:

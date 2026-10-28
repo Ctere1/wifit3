@@ -26,6 +26,12 @@ hopping sweep** (7/6 same-session Kali A/B: 5.3 vs 7.0 on the reference AP, conc
 APs) — and mainline had a *smaller* sweep gap than dkms there. Untested/un-walked: uncaptured TX-desc variants, 40 MHz, power-save, sreset recovery, and
 the runtime IQK/LCK/power-track triggers — no wire ground-truth exists for any of these.
 
+**Driver rate adaptation is not ported.** This build runs RA in the driver (`fw_ractrl=False`):
+TX_REPORT2 packets drive `odm_ra_tx_rpt2_handle_8188e` and the per-macid rate decision (with
+I-cut tables, hal8188erateadaptive.c:950), which reprograms `REG_TX_RPT_TIME`. The port drops TX
+reports and never writes it after init. Injected frames use fixed rates, so frame content and
+rate are unaffected, but heavy TX (e.g. ARP replay) runs without the vendor's report timing.
+
 ## Gotchas
 
 **`verify_pcap` green + `beacon_watch` healthy do NOT mean this matches the kernel line-by-line.**
@@ -48,7 +54,9 @@ comment as a hypothesis to falsify.
 uses the real 512 B logical map for MAC, TX-power, crystal cap, thermal baseline, PA/LNA, GLNA,
 RFE classification, and channel-plan metadata. `REG_9346CR` autoload failure or an invalid logical-map
 ID (`0x8129`) selects the source defaults; blank TX-power bases use the RTL8188E IC default table.
-The country code takes precedence over `0xB8` when recording the vendor plan. Wifit3 does not
+`rtw_mask_map_read` (default `rtw_OffEfuseMask=0`) then sets every byte hidden by
+`Array_MP_8188E_MUSB` to `0xFF`: `0x1C-0xB7`, `0xCA-0xCF`, `0x100-0x12F`, `0x13E-0x1FF`. So the
+country code (`0xCB`) never overrides `0xB8`, and `0xCA` always decodes as 0xFF. Wifit3 does not
 restrict monitor tuning to that policy: the 2.4 GHz radio advertises its physical channels 1–14. The
 attached reference card resolved to plan `0x21` (ETSI1-null) during the 2026-10-23 live bring-up.
 
@@ -57,8 +65,8 @@ RF-power trim are disabled in `include/autoconf.h`; rate/regulatory power limits
 disabled by `CONFIG_TXPWR_LIMIT_EN=n`; VID/PID, customer ID, EEPROM version, power-save, and LED
 settings do not affect monitor-mode hardware initialization. `rfe_type` is retained for source
 parity but `PHY_SetRFEReg_8188E` has only its common case-0/default write sequence. The PA/LNA
-select `0xCA[3:2]` and GLNA select `0xCA[6:4]` do affect table walks: the reference card's blank
-`0xCA` selects internal PA+LNA; external variants are source-ported but hardware-untested.
+select `0xCA[3:2]` and GLNA select `0xCA[6:4]` gate table rows, but the mask forces `0xCA` to
+`0xFF` (internal PA+LNA) on every card; the external decode is kept for source parity.
 
 **Claim interface 0 before the first EP0 transfer (Windows).** Unclaimed, libusb/WinUSB claims and
 releases it around every control transfer; that churn intermittently fails with `[170] The
@@ -66,11 +74,13 @@ requested resource is in use` (pyusb: `Entity not found`), the old "EFUSE-read E
 Measured on one Windows host, two cards: 17/300 bring-ups failed unclaimed, 0/600 claimed. The
 `_POST_RESET_SETTLE_S` pause in `firmware.py` was added for the same error; 0/200 with it at 0.
 
-**Two more deferred items, non-default but real:** the receiver-blocking NBI notch arms only with
-`rtw_adaptivity_en=1` (e.g. ETSI), and powertrack IQK/LCK only fires on ≥8 °C thermal drift.
+**The receiver-blocking NBI notch** (`dig._receiver_blocking`) arms only with
+`rtw_adaptivity_en=1` (e.g. ETSI). This build's default (`disable`, Makefile:74) keeps
+`adaptivity_enable` false, so no capture arms or disarms it; the branches are unit-tested only.
 
-**The kernel never runs IQK in monitor mode.** Init-time IQK only flags `neediqk_24g` (no
-calibration); the deferred IQK fires from link / AP-start / join / sreset — never a monitor-mode
+**In monitor mode the kernel runs IQK only from power tracking** (`iqk.py`, |Δthermal| ≥ 8 °C;
+the I-cut captures hit it on tick 1). Init-time IQK only flags `neediqk_24g` (no
+calibration); the other IQK triggers are link / AP-start / join / sreset — never a monitor-mode
 channel hop. The one-shot trigger value (`0xf9000000`/`0xf8000000`) appears as a write zero times in
 the whole capture. So `chan.set_channel` skipping IQK is correct, and the `0xe30–0xe8c` writes that
 look IQK-adjacent are the BB-config table verbatim.
@@ -203,7 +213,7 @@ Autonomous RX-gap + verify-audit pass (4 captures incl. the new `driver_captures
 - **verify_pcap waiver audit (all 4 PASS):** the only waived ops are aireplay-ng's injected TX —
   all bulk-OUT sits in the capture tail (82–91% in), zero bulk-OUT between init-end and the first
   injected frame (the vendor driver TX's nothing in NOLINK monitor), and the waived `REG_TX_RPT_TIME`
-  writes are the firmware RA's timestamp-derived values that aireplay's TX triggers (the init
+  writes are the driver RA's `dynamic_tx_rpt_timing` values that aireplay's TX triggers (the init
   `0xCDF0`/`0x3DF0` writes are *matched*, not waived). Nothing vendor-bring-up is wrongly waived. A
   true zero-waiver gate would need a *passive* cold-boot capture (no aireplay) — none of the 4 are.
   Open idea: byte-check the vendor 32 B TX-descriptor prefix of each injected frame (waive only the

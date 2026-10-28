@@ -27,6 +27,7 @@ VENDOR_ID = BIT(19)
 RTL_ID = BIT(23)            # 1: Test chip, 0: MP chip
 CHIP_VER_RTL_MASK = 0xF000  # cut version, bits 12..15
 CHIP_VER_RTL_SHIFT = 12
+I_CUT_VERSION = 8           # HAL_CUT_VERSION_E, HalVerDef.h:58
 
 # --- probe-time adapter-info read (before power-on) [SRC] read_adapter_info_8188eu ---
 REG_9346CR = 0x000A          # EEPROM/efuse ctrl: boot-from + autoload status
@@ -212,9 +213,10 @@ ACKTO_VAL = 0x40
 TDECTRL_TXAGG = 0x0000A810    # usb_AggSettingTxUpdate result (BLK_DESC_NUM)
 RXDMA_AGG_EN = BIT(2)         # in REG_TRXDMA_CTRL low byte
 USB_AGG_EN = BIT(3)          # in REG_USB_SPECIAL_OPTION
-REG_RXDMA_AGG_PG_TH = 0xFE5C  # USB-mode RX-agg size/timeout (size, +1=timeout)
-RXAGG_USB_SIZE = 0x06
-RXAGG_USB_TIMEOUT = 0x10
+REG_USB_AGG_TO = 0xFE5C       # hal_com_reg.h:517
+REG_USB_AGG_TH = 0xFE5D       # hal_com_reg.h:518
+RXAGG_USB_SIZE = 0x10         # rxagg_usb_size
+RXAGG_USB_TIMEOUT = 0x06      # rxagg_usb_timeout
 # beacon params (InitBeaconParameters_8188e)
 REG_BCN_CTRL = 0x0550
 REG_TBTT_PROHIBIT = 0x0540
@@ -286,6 +288,13 @@ bRFMOD = 0x1                 # rFPGA0/1_RFMOD[0]
 RF_CHNL_MASK = 0xFFFFFC00    # RfRegChnlVal channel field [9:0] (keep upper bits)
 RF_BW_MASK = 0xFFFFF3FF      # RfRegChnlVal bandwidth field [11:10]
 RF_BW_20M = BIT(10) | BIT(11)  # 20 MHz
+# phy_SpurCalibration_8188E (I-cut only) [SRC] Hal8188EPhyReg.h, autoconf.h
+rOFDM0_RxDSP = 0x0C40
+rOFDM1_IntfDet = 0x0D3C
+NOTCH_FILTER_EN = BIT(9)     # rOFDM0_RxDSP
+NOTCH_INTF_TH = BIT(8) | BIT(7) | BIT(6)   # rOFDM1_IntfDet
+NOTCH_RXDSP_TH = 0x1F000000  # rOFDM0_RxDSP[28:24]
+RTW_NOTCH_FILTER = 0         # registrypriv.notch_filter default
 
 # --- RF config [SRC] Hal8188EPhyReg.h, rtl8188e_rf6052.c, phy_RFWrite -----
 # Path-A BB register-definition offsets (phy_InitBBRFRegisterDefinition).
@@ -332,10 +341,16 @@ REG_PKTBUF_DBG_ADDR = 0x0140       # REG_PKTBUF_DBG_CTRL
 REG_TXPKTBUF_DBG = 0x0143          # REG_PKTBUF_DBG_CTRL + 3
 REG_PKTBUF_DBG_DATA_L = 0x0144
 REG_PKTBUF_DBG_DATA_H = 0x0148
+REG_EFUSE_CTRL = 0x0030           # EFUSE_CTRL [SRC] hal_com_reg.h:62,561
 EFUSE_MAP_LEN_88E = 512
 EFUSE_REAL_CONTENT_LEN_88E = 256
 EFUSE_MAX_SECTION_88E = 64
 EFUSE_MAX_WORD_UNIT = 4
+# [SRC] hal/efuse/rtl8188e/HalEfuseMask8188E_USB.c:28 — one byte per 16 B row, a set bit keeps a word
+Array_MP_8188E_MUSB = (
+    0xFF, 0xF3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0xF1, 0xFF, 0xFF, 0xFF,
+    0x00, 0x00, 0x00, 0xF7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+)
 # logical-map offsets [SRC] include/hal_pg.h
 EEPROM_ChannelPlan_88E = 0xB8      # SW channel/regulatory plan
 EEPROM_XTAL_88E = 0xB9             # crystal cap (AFE trim)
