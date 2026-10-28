@@ -249,7 +249,7 @@ def test_each_uncracked_row_counts_and_names_its_exhausted_wordlists(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_add_key_refuses_a_psk_that_cracks_no_saved_capture_and_adds_one_that_does(tmp_path):
+async def test_add_key_adds_a_psk_no_saved_capture_confirms_as_not_verified(tmp_path):
     right = _pmkid_line("rightpass", "aabbccddeeff")
     _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", right)
     _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-fe.hc22000", _pmkid_line("rightpass", "aabbccddeefe"))
@@ -260,8 +260,11 @@ async def test_add_key_refuses_a_psk_that_cracks_no_saved_capture_and_adds_one_t
         await app.push_screen(drawer)
 
         drawer._credential_added(ManualCredential(CaptureType.WPA_PSK, "HomeNet", "aa:bb:cc:dd:ee:ff", "wrongpass"))
-        assert app.notified[-1] == "PSK doesn't crack any saved capture"
-        assert not [c for c in app.vault.persisted("aa:bb:cc:dd:ee:ff") if c.type == CaptureType.WPA_PSK]
+        await app.workers.wait_for_complete()
+        assert app.notified[-1] == "Credential added, not verified"
+        state = app.vault.ap_state("aa:bb:cc:dd:ee:ff")
+        assert [k.value for k in state.keys] == ["wrongpass"]
+        assert state.keys[0].manual_capture_names
 
         drawer._credential_added(ManualCredential(CaptureType.WPA_PSK, "HomeNet", "aa:bb:cc:dd:ee:ff", "rightpass"))
         await app.workers.wait_for_complete()
@@ -298,7 +301,8 @@ async def test_add_key_adds_a_psk_only_an_m1m2_line_confirms_as_not_verified(tmp
         await app.push_screen(drawer)
 
         drawer._credential_added(ManualCredential(CaptureType.WPA_PSK, "HomeNet", "aa:bb:cc:dd:ee:ff", "wrongpass"))
-        assert app.notified[-1] == "PSK doesn't crack any saved capture"
+        await app.workers.wait_for_complete()
+        assert app.notified[-1] == "Credential added, not verified"
         drawer._credential_added(ManualCredential(CaptureType.WPA_PSK, "HomeNet", "aa:bb:cc:dd:ee:ff", "rightpass"))
         await app.workers.wait_for_complete()
 

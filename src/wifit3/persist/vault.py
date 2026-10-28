@@ -398,11 +398,14 @@ class Vault:
                 bssid=ap.bssid, value=psk, ssid=ap.ssid))
         return result
 
-    def save_wpa_psk(self, ssid: Optional[str], bssid: str, psk: str) -> Optional[SaveResult]:
+    def save_wpa_psk(self, ssid: Optional[str], bssid: str, psk: str, manual: bool = False) -> Optional[SaveResult]:
+        """``manual``: typed in, not cracked or recovered from the AP."""
         result = save.save_wpa_psk(ssid, bssid, psk)
         if result:
             update_meta(ssid, bssid)
         if result and result.was_new:
+            if manual:
+                ap_state.record_manual_capture(ssid, bssid, result.path)
             self._insert_capture(PersistedCapture(
                 type=CaptureType.WPA_PSK, timestamp=int(time.time()), path=str(result.path),
                 bssid=bssid, value=psk, ssid=ssid))

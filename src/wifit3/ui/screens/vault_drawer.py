@@ -11,9 +11,8 @@ from textual.binding import Binding
 from .vault_breakpoints import COMPACT, NARROW, SHORT, TALL, TINY, WIDE
 from .vault_table import VaultTable
 from .vault_item import AddKeyPressed, DeleteKeyPressed, VaultItemView, key_description
-from wifit3.crack.wpa_psk import psk_matches
 from wifit3.models import AccessPoint, CaptureType, PersistedCapture
-from wifit3.persist.ap_state import ApState
+from wifit3.persist.ap_state import ApState, is_confirmed
 from wifit3.persist.meta import meta_path, read_meta, update_meta
 from wifit3.ui.vault.job_pane import JobTrackerPane
 from wifit3.ui.vault.modals.add_credential import AddCredentialModal, ManualCredential
@@ -300,14 +299,11 @@ class VaultDrawer(ModalScreen):
         verified = False
         try:
             if credential.kind == CaptureType.WPA_PSK:
-                hashlines = vault.ap_state(ap.bssid).hashlines
-                cracked = [h for h in hashlines if psk_matches(credential.value, h.line)]
-                if hashlines and not cracked:
-                    self.notify("PSK doesn't crack any saved capture", severity="error")
-                    return
-                verified = any(h.line.authorized for h in cracked)
-                result = vault.save_wpa_psk(ap.ssid, ap.bssid, credential.value)
+                result = vault.save_wpa_psk(ap.ssid, ap.bssid, credential.value, manual=True)
                 if result is not None:
+                    state = vault.ap_state(ap.bssid)
+                    key = next(k for k in state.keys if k.id == (CaptureType.WPA_PSK, credential.value))
+                    verified = is_confirmed(key, state.hashlines)
                     self._propagate_psk(ap.bssid, ap.ssid, credential.value)
             elif credential.kind == CaptureType.WPS_PIN:
                 result = vault.save_wps_pin(ap, credential.value, None, manual=True)

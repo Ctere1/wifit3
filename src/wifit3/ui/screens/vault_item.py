@@ -92,7 +92,7 @@ def _status_reason(key: Key, status: PasswordStatus) -> str:
     if status is PasswordStatus.STALE:
         return "stale"
     if key.manual_capture_names:
-        return "manually added, not verified yet"
+        return "added, unverified"
     return "not verified yet"
 
 
