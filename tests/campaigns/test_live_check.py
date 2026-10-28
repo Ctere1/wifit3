@@ -33,6 +33,48 @@ def _make_ap(bssid: str, channel: int = 6) -> AccessPoint:
     return AccessPoint(bssid=bssid, ssid="TestNet", channel=channel)
 
 
+class _FakeLease:
+    def __init__(self, mac):
+        self.mac = mac
+
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, *args):
+        return False
+
+
+def _eapol_from_ap(bssid: str, msg_num: int, replay: int) -> EapolPacket:
+    return EapolPacket(type="eapol", type_id=2, subtype_id=0, bssid=bssid, source=bssid,
+                       dest="00:aa:bb:cc:dd:ee", to_ds=False, from_ds=True, rssi=-50, raw=b"\x00" * 30,
+                       msg_num=msg_num, nonce=b"\x11" * 32, replay_counter=replay.to_bytes(8, "big"))
+
+
+def _psk_array(bssid: str, iface, lease_mac="00:aa:bb:cc:dd:ee"):
+    class FakeClaim:
+        async def __aenter__(self):
+            return iface
+
+        async def __aexit__(self, *args):
+            pass
+
+    array = MagicMock()
+    array.members = [iface]
+    array.access_points = {bssid: _make_ap(bssid, channel=1)}
+    array.select_iface.return_value = iface
+    array.claim.return_value = FakeClaim()
+    array.lease.return_value = _FakeLease(lease_mac)
+    return array
+
+
+def _psk_iface(acked: bool = True):
+    iface = MagicMock()
+    iface.set_channel = AsyncMock()
+    iface.send_no_wait = AsyncMock()
+    iface.send_until_ack = AsyncMock(return_value=acked)
+    return iface
+
+
 async def test_verify_blocked_when_campaign_active():
     verifier = LiveKeyVerifier()
     cap = _make_capture(CaptureType.WPA_PSK, "00:11:22:33:44:55", value="secret123")
@@ -80,9 +122,8 @@ async def test_verify_wpa_psk_success(monkeypatch):
 
     iface = MagicMock()
     iface.set_channel = AsyncMock()
-    iface.set_fake_mac = AsyncMock()
-    iface.clear_fake_mac = AsyncMock()
     iface.send_no_wait = AsyncMock()
+    iface.send_until_ack = AsyncMock(return_value=True)
 
     class FakeClaim:
         async def __aenter__(self):
@@ -95,8 +136,7 @@ async def test_verify_wpa_psk_success(monkeypatch):
     array.access_points = {bssid.lower(): ap}
     array.select_iface.return_value = iface
     array.claim.return_value = FakeClaim()
-    array.register_own_mac.return_value = "00:aa:bb:cc:dd:ee"
-    array.unregister_own_mac = MagicMock()
+    array.lease.return_value = _FakeLease("00:aa:bb:cc:dd:ee")
 
     m1_pkt = EapolPacket(
         type="eapol",
@@ -137,55 +177,63 @@ async def test_verify_wpa_psk_success(monkeypatch):
     assert 'Key "password" still works' in res.body
 
 
-async def test_verify_wpa_psk_no_m3(monkeypatch):
-    verifier = LiveKeyVerifier()
+async def test_verify_wpa_psk_no_reply_after_m2_is_inconclusive(monkeypatch):
     bssid = "00:11:22:33:44:55"
-    cap = _make_capture(CaptureType.WPA_PSK, bssid, value="wrongpassword")
-    ap = _make_ap(bssid, channel=1)
-
-    iface = MagicMock()
-    iface.set_channel = AsyncMock()
-    iface.set_fake_mac = AsyncMock()
-    iface.clear_fake_mac = AsyncMock()
-    iface.send_no_wait = AsyncMock()
-
-    class FakeClaim:
-        async def __aenter__(self):
-            return iface
-        async def __aexit__(self, *args):
-            pass
-
-    array = MagicMock()
-    array.members = [iface]
-    array.access_points = {bssid.lower(): ap}
-    array.select_iface.return_value = iface
-    array.claim.return_value = FakeClaim()
-    array.register_own_mac.return_value = "00:aa:bb:cc:dd:ee"
-    array.unregister_own_mac = MagicMock()
-
-    m1_pkt = EapolPacket(
-        type="eapol",
-        type_id=2,
-        subtype_id=0,
-        bssid=bssid.lower(),
-        source=bssid.lower(),
-        dest="00:aa:bb:cc:dd:ee",
-        to_ds=False,
-        from_ds=True,
-        rssi=-50,
-        raw=b"\x00" * 30,
-        msg_num=1,
-        nonce=b"\x11" * 32,
-        replay_counter=b"\x00\x00\x00\x00\x00\x00\x00\x01",
-    )
-
-    array.next_frame = AsyncMock(side_effect=[m1_pkt, None])
-
+    array = _psk_array(bssid, _psk_iface())
+    array.next_frame = AsyncMock(side_effect=[_eapol_from_ap(bssid, 1, 1), None])
     monkeypatch.setattr("wifit3.campaigns.live_check.Association.associate", AsyncMock(return_value=True))
 
-    res = await verifier.verify_credential(cap, array)
+    res = await LiveKeyVerifier().verify_credential(_make_capture(CaptureType.WPA_PSK, bssid, value="pw"), array)
+
+    assert res.status == VerifyStatus.ERROR
+    assert "no reply from the AP after EAPOL M2" in res.body
+
+
+async def test_verify_wpa_psk_m1_resent_after_each_m2_is_incorrect(monkeypatch):
+    bssid = "00:11:22:33:44:55"
+    iface = _psk_iface()
+    array = _psk_array(bssid, iface)
+    array.next_frame = AsyncMock(side_effect=[_eapol_from_ap(bssid, 1, replay) for replay in (1, 2, 3, 4)])
+    monkeypatch.setattr("wifit3.campaigns.live_check.Association.associate", AsyncMock(return_value=True))
+
+    res = await LiveKeyVerifier().verify_credential(_make_capture(CaptureType.WPA_PSK, bssid, value="pw"), array)
+
     assert res.status == VerifyStatus.INCORRECT
-    assert 'Key "wrongpassword" is incorrect (no M3)' in res.body
+    assert iface.send_until_ack.await_count == 3
+
+
+async def test_verify_wpa_psk_m3_after_a_resent_m1_is_success(monkeypatch):
+    bssid = "00:11:22:33:44:55"
+    array = _psk_array(bssid, _psk_iface())
+    array.next_frame = AsyncMock(side_effect=[_eapol_from_ap(bssid, 1, 1), _eapol_from_ap(bssid, 1, 2),
+                                              _eapol_from_ap(bssid, 3, 3)])
+    monkeypatch.setattr("wifit3.campaigns.live_check.Association.associate", AsyncMock(return_value=True))
+
+    res = await LiveKeyVerifier().verify_credential(_make_capture(CaptureType.WPA_PSK, bssid, value="pw"), array)
+
+    assert res.status == VerifyStatus.SUCCESS
+
+
+async def test_verify_wpa_psk_unacked_m2_is_inconclusive(monkeypatch):
+    bssid = "00:11:22:33:44:55"
+    array = _psk_array(bssid, _psk_iface(acked=False))
+    array.next_frame = AsyncMock(side_effect=[_eapol_from_ap(bssid, 1, 1)])
+    monkeypatch.setattr("wifit3.campaigns.live_check.Association.associate", AsyncMock(return_value=True))
+
+    res = await LiveKeyVerifier().verify_credential(_make_capture(CaptureType.WPA_PSK, bssid, value="pw"), array)
+
+    assert res.status == VerifyStatus.ERROR
+    assert "never ACKed EAPOL M2" in res.body
+
+
+async def test_verify_errors_when_the_card_cannot_ack_as_a_client():
+    bssid = "00:11:22:33:44:55"
+    array = _psk_array(bssid, _psk_iface(), lease_mac=None)
+
+    res = await LiveKeyVerifier().verify_credential(_make_capture(CaptureType.WPA_PSK, bssid, value="pw"), array)
+
+    assert res.status == VerifyStatus.ERROR
+    assert "can't ACK as a client" in res.body
 
 
 async def test_verify_wps_pin_success(monkeypatch):
@@ -196,9 +244,8 @@ async def test_verify_wps_pin_success(monkeypatch):
 
     iface = MagicMock()
     iface.set_channel = AsyncMock()
-    iface.set_fake_mac = AsyncMock()
-    iface.clear_fake_mac = AsyncMock()
     iface.send_no_wait = AsyncMock()
+    iface.send_until_ack = AsyncMock(return_value=True)
 
     class FakeClaim:
         async def __aenter__(self):
@@ -211,8 +258,7 @@ async def test_verify_wps_pin_success(monkeypatch):
     array.access_points = {bssid.lower(): ap}
     array.select_iface.return_value = iface
     array.claim.return_value = FakeClaim()
-    array.register_own_mac.return_value = "00:aa:bb:cc:dd:ee"
-    array.unregister_own_mac = MagicMock()
+    array.lease.return_value = _FakeLease("00:aa:bb:cc:dd:ee")
 
     monkeypatch.setattr("wifit3.campaigns.live_check.Association.associate", AsyncMock(return_value=True))
     monkeypatch.setattr(
@@ -236,9 +282,8 @@ async def test_empty_wps_pin_survives_save_reload_and_verification(monkeypatch):
 
     iface = MagicMock()
     iface.set_channel = AsyncMock()
-    iface.set_fake_mac = AsyncMock()
-    iface.clear_fake_mac = AsyncMock()
     iface.send_no_wait = AsyncMock()
+    iface.send_until_ack = AsyncMock(return_value=True)
 
     class FakeClaim:
         async def __aenter__(self):
@@ -252,8 +297,7 @@ async def test_empty_wps_pin_survives_save_reload_and_verification(monkeypatch):
     array.access_points = {bssid: ap}
     array.select_iface.return_value = iface
     array.claim.return_value = FakeClaim()
-    array.register_own_mac.return_value = "00:aa:bb:cc:dd:ee"
-    array.unregister_own_mac = MagicMock()
+    array.lease.return_value = _FakeLease("00:aa:bb:cc:dd:ee")
 
     monkeypatch.setattr("wifit3.campaigns.live_check.Association.associate", AsyncMock(return_value=True))
     try_pin = AsyncMock(return_value=AttemptOutcome(PinResult.SUCCESS, pin=""))
@@ -273,9 +317,8 @@ async def test_missing_wps_pin_does_not_fall_back_to_psk():
     ap = _make_ap(bssid, channel=1)
     iface = MagicMock()
     iface.set_channel = AsyncMock()
-    iface.set_fake_mac = AsyncMock()
-    iface.clear_fake_mac = AsyncMock()
     iface.send_no_wait = AsyncMock()
+    iface.send_until_ack = AsyncMock(return_value=True)
 
     class FakeClaim:
         async def __aenter__(self):
@@ -289,8 +332,7 @@ async def test_missing_wps_pin_does_not_fall_back_to_psk():
     array.access_points = {bssid: ap}
     array.select_iface.return_value = iface
     array.claim.return_value = FakeClaim()
-    array.register_own_mac.return_value = "00:aa:bb:cc:dd:ee"
-    array.unregister_own_mac = MagicMock()
+    array.lease.return_value = _FakeLease("00:aa:bb:cc:dd:ee")
 
     res = await verifier.verify_credential(cap, array)
 
@@ -306,9 +348,8 @@ async def test_verify_wps_pin_invalid(monkeypatch):
 
     iface = MagicMock()
     iface.set_channel = AsyncMock()
-    iface.set_fake_mac = AsyncMock()
-    iface.clear_fake_mac = AsyncMock()
     iface.send_no_wait = AsyncMock()
+    iface.send_until_ack = AsyncMock(return_value=True)
 
     class FakeClaim:
         async def __aenter__(self):
@@ -321,8 +362,7 @@ async def test_verify_wps_pin_invalid(monkeypatch):
     array.access_points = {bssid.lower(): ap}
     array.select_iface.return_value = iface
     array.claim.return_value = FakeClaim()
-    array.register_own_mac.return_value = "00:aa:bb:cc:dd:ee"
-    array.unregister_own_mac = MagicMock()
+    array.lease.return_value = _FakeLease("00:aa:bb:cc:dd:ee")
 
     monkeypatch.setattr("wifit3.campaigns.live_check.Association.associate", AsyncMock(return_value=True))
     monkeypatch.setattr(
@@ -344,9 +384,8 @@ async def test_verify_wep_key_passive(monkeypatch):
 
     iface = MagicMock()
     iface.set_channel = AsyncMock()
-    iface.set_fake_mac = AsyncMock()
-    iface.clear_fake_mac = AsyncMock()
     iface.send_no_wait = AsyncMock()
+    iface.send_until_ack = AsyncMock(return_value=True)
 
     class FakeClaim:
         async def __aenter__(self):
@@ -359,8 +398,7 @@ async def test_verify_wep_key_passive(monkeypatch):
     array.access_points = {bssid.lower(): ap}
     array.select_iface.return_value = iface
     array.claim.return_value = FakeClaim()
-    array.register_own_mac.return_value = "00:aa:bb:cc:dd:ee"
-    array.unregister_own_mac = MagicMock()
+    array.lease.return_value = _FakeLease("00:aa:bb:cc:dd:ee")
 
     key_bytes = bytes.fromhex(hex_key)
     iv_bytes = b"\x01\x02\x03"

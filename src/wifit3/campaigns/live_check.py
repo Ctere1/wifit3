@@ -17,7 +17,7 @@ from wifit3.campaigns.campaign import Campaign
 from wifit3.campaigns.pin import EMPTY_PIN_LABEL
 from wifit3.campaigns.wps.registrar import PinResult, WpsRegistrar
 from wifit3.crack.wep import rc4_keystream
-from wifit3.dot11 import build_deauth, random_client_mac, str_to_mac
+from wifit3.dot11 import build_deauth, str_to_mac
 from wifit3.dot11.ie import GENERIC_RSN_IE, force_psk_akm
 from wifit3.dot11.mac import mac_header
 from wifit3.dot11.packet import EapolPacket, WepDataPacket
@@ -25,12 +25,17 @@ from wifit3.dot11.wep.crypto import arp_request_plaintext, wep_encrypt
 from wifit3.dot11.wpa import KCK_LEN, build_eapol_m2, derive_pmk, derive_ptk, random_nonce
 from wifit3.dot11.wsc.assoc_ie import WPS_REQ_REGISTRAR, wps_assoc_ie
 from wifit3.models import WPS_CAPTURE_TYPES, AccessPoint, CaptureType, PersistedCapture
+from wifit3.wlan.lease import SPOOFABLE
 
 if TYPE_CHECKING:
     from wifit3.wlan.array import WlanArray
     from wifit3.wlan.interface import WlanInterface
 
 logger = logging.getLogger(__name__)
+
+_M2_ATTEMPTS = 3            # M1s answered before an AP that keeps re-sending M1 means a wrong PSK
+_M2_RESENDS = 3             # M2 resends while the AP hasn't ACKed it
+_EAPOL_REPLY_TIMEOUT = 3.0  # hostapd re-sends M1 or M3 about once a second
 
 
 class VerifyStatus(Enum):
@@ -50,6 +55,10 @@ class VerifyResult:
     @property
     def is_success(self) -> bool:
         return self.status == VerifyStatus.SUCCESS
+
+
+def _replay_counter(packet: EapolPacket) -> int:
+    return int.from_bytes(packet.replay_counter, "big") if packet.replay_counter else 0
 
 
 class LiveKeyVerifier:
@@ -110,44 +119,56 @@ class LiveKeyVerifier:
                         f"Error: AP not in range on channel {ap.channel}",
                     )
 
-            our_mac = random_client_mac()
-            our_mac_str = array.register_own_mac(our_mac)
-            await iface.set_fake_mac(our_mac, str_to_mac(ap.bssid))
+            lease = array.lease(fake_mac=SPOOFABLE, bssid=str_to_mac(ap.bssid), ack_tally=True, iface=iface)
+            async with lease:
+                if lease.mac is None:
+                    return VerifyResult(
+                        VerifyStatus.ERROR,
+                        f"Unable to verify with {ssid}",
+                        "Error: this card can't ACK as a client",
+                    )
+                return await self._verify_as(iface, array, ap, capture, target_type, lease.mac)
+
+    async def _verify_as(
+        self,
+        iface: WlanInterface,
+        array: WlanArray,
+        ap: AccessPoint,
+        capture: PersistedCapture,
+        target_type: Optional[CaptureType],
+        our_mac_str: str,
+    ) -> VerifyResult:
+        ssid = capture.ssid or capture.bssid
+        our_mac = str_to_mac(our_mac_str)
+        try:
+            mode = target_type or capture.type
+            if mode in (CaptureType.WPA_PSK, CaptureType.WPS_PBC):
+                psk = capture.value or ""
+                is_wps_psk = capture.type in WPS_CAPTURE_TYPES
+                return await self._verify_wpa_psk(iface, array, ap, psk, our_mac, our_mac_str, is_wps=is_wps_psk)
+            if mode == CaptureType.WPS_PIN:
+                if capture.pin is None:
+                    return VerifyResult(
+                        VerifyStatus.ERROR,
+                        f"Unable to verify with {ssid}",
+                        "Error: Stored WPS PIN is missing",
+                    )
+                return await self._verify_wps_pin(iface, ap, capture.pin, our_mac)
+            if mode == CaptureType.WEP:
+                key = capture.value or ""
+                return await self._verify_wep_key(iface, array, ap, key, our_mac)
+            return VerifyResult(
+                VerifyStatus.ERROR,
+                f"Unable to verify with {ssid}",
+                f"Error: Unsupported credential type {mode}",
+            )
+        finally:
             try:
-                mode = target_type or capture.type
-                if mode in (CaptureType.WPA_PSK, CaptureType.WPS_PBC):
-                    psk = capture.value or ""
-                    is_wps_psk = capture.type in WPS_CAPTURE_TYPES
-                    return await self._verify_wpa_psk(iface, array, ap, psk, our_mac, our_mac_str, is_wps=is_wps_psk)
-                if mode == CaptureType.WPS_PIN:
-                    if capture.pin is None:
-                        return VerifyResult(
-                            VerifyStatus.ERROR,
-                            f"Unable to verify with {ssid}",
-                            "Error: Stored WPS PIN is missing",
-                        )
-                    return await self._verify_wps_pin(iface, ap, capture.pin, our_mac)
-                if mode == CaptureType.WEP:
-                    key = capture.value or ""
-                    return await self._verify_wep_key(iface, array, ap, key, our_mac)
-                return VerifyResult(
-                    VerifyStatus.ERROR,
-                    f"Unable to verify with {ssid}",
-                    f"Error: Unsupported credential type {mode}",
-                )
-            finally:
-                try:
-                    deauth = build_deauth(str_to_mac(ap.bssid), our_mac, str_to_mac(ap.bssid), 3)
-                    await iface.send_no_wait(deauth)
-                    await asyncio.sleep(0.5)
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        await iface.clear_fake_mac()
-                    except Exception:
-                        pass
-                    array.unregister_own_mac(our_mac_str)
+                deauth = build_deauth(str_to_mac(ap.bssid), our_mac, str_to_mac(ap.bssid), 3)
+                await iface.send_no_wait(deauth)
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
 
     async def _verify_wpa_psk(
         self,
@@ -204,40 +225,55 @@ class LiveKeyVerifier:
                 "Error: AP never sent EAPOL M1",
             )
 
-        replay = int.from_bytes(m1_pkt.replay_counter, "big") if m1_pkt.replay_counter else 1
+        replay = _replay_counter(m1_pkt)
         logger.info("[%s] <- Received EAPOL M1 (replay %d) from %s", ssid, replay, ap.bssid)
-
         pmk = derive_pmk(psk, (ap.ssid or "").encode())
-        snonce = random_nonce()
-        kck = derive_ptk(pmk, str_to_mac(ap.bssid), our_mac, m1_pkt.nonce, snonce, KCK_LEN)
-        m2 = build_eapol_m2(
-            str_to_mac(ap.bssid), our_mac, snonce, kck, replay=replay, rsn_ie=trailer
-        )
-        logger.info("[%s] -> Sending EAPOL M2 with derived KCK MIC to %s", ssid, ap.bssid)
-        await iface.send_no_wait(m2)
-
-        m3_pkt = await array.next_frame(
-            lambda p: (
-                isinstance(p, EapolPacket)
-                and p.dest == our_mac_str
-                and p.bssid == ap.bssid.lower()
-                and p.msg_num == 3
-            ),
-            timeout=2.0,
-        )
-        if m3_pkt is not None:
-            logger.info("[%s] <- Received EAPOL M3 from %s: PSK is correct!", ssid, ap.bssid)
-            return VerifyResult(
-                VerifyStatus.SUCCESS,
-                f"{noun} verified for {ssid}",
-                f'{val_name} "{psk}" still works',
+        bssid_mac = str_to_mac(ap.bssid)
+        for _ in range(_M2_ATTEMPTS):
+            snonce = random_nonce()
+            kck = derive_ptk(pmk, bssid_mac, our_mac, m1_pkt.nonce, snonce, KCK_LEN)
+            m2 = build_eapol_m2(bssid_mac, our_mac, snonce, kck, replay=replay, rsn_ie=trailer)
+            logger.info("[%s] -> Sending EAPOL M2 (replay %d) with derived KCK MIC to %s", ssid, replay, ap.bssid)
+            if not await iface.send_until_ack(m2, max_retries=_M2_RESENDS):
+                logger.warning("[%s] AP %s never ACKed EAPOL M2", ssid, ap.bssid)
+                return VerifyResult(
+                    VerifyStatus.ERROR,
+                    f"Unable to verify with {ssid}",
+                    "Error: AP never ACKed EAPOL M2",
+                )
+            previous_replay = replay
+            reply = await array.next_frame(
+                lambda p: (
+                    isinstance(p, EapolPacket)
+                    and p.dest == our_mac_str
+                    and p.bssid == ap.bssid.lower()
+                    and (p.msg_num == 3
+                         or (p.msg_num == 1 and p.nonce is not None and _replay_counter(p) > previous_replay))
+                ),
+                timeout=_EAPOL_REPLY_TIMEOUT,
             )
+            if reply is None:
+                logger.warning("[%s] No EAPOL M1 or M3 from %s after M2", ssid, ap.bssid)
+                return VerifyResult(
+                    VerifyStatus.ERROR,
+                    f"Unable to verify with {ssid}",
+                    "Error: no reply from the AP after EAPOL M2",
+                )
+            if reply.msg_num == 3:
+                logger.info("[%s] <- Received EAPOL M3 from %s: PSK is correct!", ssid, ap.bssid)
+                return VerifyResult(
+                    VerifyStatus.SUCCESS,
+                    f"{noun} verified for {ssid}",
+                    f'{val_name} "{psk}" still works',
+                )
+            m1_pkt, replay = reply, _replay_counter(reply)
+            logger.info("[%s] <- AP %s re-sent EAPOL M1 (replay %d): it rejected our M2", ssid, ap.bssid, replay)
 
-        logger.warning("[%s] No EAPOL M3 received from %s (timeout/deauth): PSK is incorrect", ssid, ap.bssid)
+        logger.warning("[%s] AP %s re-sent EAPOL M1 after %d M2s: PSK is incorrect", ssid, ap.bssid, _M2_ATTEMPTS)
         return VerifyResult(
             VerifyStatus.INCORRECT,
             f"{noun} incorrect for {ssid}",
-            f'{val_name} "{psk}" is incorrect (no M3)',
+            f'{val_name} "{psk}" is incorrect (the AP re-sent M1)',
         )
 
     async def _verify_wps_pin(
