@@ -62,7 +62,7 @@ from ... import focus_model as fm
 from ...capture_events import (
     CAPTURE_TOAST_TITLES, DECLOAK_METHOD_LABELS, CaptureEvent, CaptureEventDetector, CaptureKind,
 )
-from ...capture_log import saved_psk_markup, short_sta
+from ...capture_log import saved_psk_chip, short_sta
 from ...eapol_aggregate import EapolAggregator
 from ... import pmkid_log
 from ...encryption_format import wep_key_hex_and_ascii
@@ -788,8 +788,9 @@ class FocusViewV2(Screen):
             elif ev.kind == CaptureKind.HANDSHAKE:
                 # Save instantly
                 result = self.app.vault.save_handshake(ap, ev.client_mac)
-                hint = _save_line(result) + saved_psk_markup(result.matches_saved_psk) if result is not None else None
-                self._emit_lines(self._eapol_agg.on_handshake(ev, now, save_hint=hint))
+                hint = _save_line(result) if result is not None else None
+                chip = saved_psk_chip(result.matches_saved_psk) if result is not None else None
+                self._emit_lines(self._eapol_agg.on_handshake(ev, now, save_hint=hint, psk_chip=chip))
             else:
                 self._log_capture_event(ev, ap)
         # Flush any per-client bursts that have gone quiet; label real-but-uncrackable ones.
@@ -813,7 +814,10 @@ class FocusViewV2(Screen):
             )
             result = self.app.vault.save_pmkid(ap, ev.client_mac)
             if result is not None:
-                self._log(treelog.leaf(_save_line(result) + saved_psk_markup(result.matches_saved_psk)))
+                chip = saved_psk_chip(result.matches_saved_psk)
+                if chip:
+                    self._log(treelog.branch(chip))
+                self._log(treelog.leaf(_save_line(result)))
         elif ev.kind == CaptureKind.DECLOAK:
             if Config.remember_decloak(ev.bssid, ev.ssid or ""):
                 self.app.persist_config()
@@ -1186,8 +1190,9 @@ class FocusViewV2(Screen):
         """Handle a completed harvest."""
         if camp.pmkid:
             result = self.app.vault.save_pmkid(camp.target, camp.client_mac)
-            hint = _save_line(result) + saved_psk_markup(result.matches_saved_psk) if result is not None else None
-            self._emit_lines(pmkid_log.verdict_success(hint))
+            hint = _save_line(result) if result is not None else None
+            chip = saved_psk_chip(result.matches_saved_psk) if result is not None else None
+            self._emit_lines(pmkid_log.verdict_success(hint, chip))
             # Detector skips forged MACs, so toast the active-harvest win here too.
             name = camp.target.ssid or camp.target.bssid
             body = (f"[bold]{escape(name)}[/bold] on channel [bold]{camp.target.channel}[/bold] "
@@ -1285,7 +1290,10 @@ class FocusViewV2(Screen):
         for client_mac in list(twin.handshakes) if twin else ():
             result = self.app.vault.save_handshake(twin, client_mac)
             if result is not None:
-                self._log(treelog.leaf(_save_line(result) + saved_psk_markup(result.matches_saved_psk)))
+                chip = saved_psk_chip(result.matches_saved_psk)
+                if chip:
+                    self._log(treelog.branch(chip))
+                self._log(treelog.leaf(_save_line(result)))
 
     # ----- WEP: Generate IVs (Replay) + Chop ---------------------------------
 

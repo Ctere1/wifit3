@@ -50,3 +50,12 @@ def saved_psk_markup(matches_saved_psk: Optional[bool]) -> str:
     if matches_saved_psk:
         return " [green]✓ saved PSK matches[/green]"
     return f" [{PASSWORD_MISMATCH_COLOR}]✗ saved PSK doesn't match[/]"
+
+
+def saved_psk_chip(matches_saved_psk: Optional[bool]) -> Optional[str]:
+    if matches_saved_psk is None:
+        return None
+    if matches_saved_psk:
+        return "[black bold on cyan] Saved PSK Still Works [/black bold on cyan] [dim](see vault)[/dim]"
+    return (f"[black bold on {PASSWORD_MISMATCH_COLOR}] No Saved PSKs Work [/] "
+            f"[dim](password changed)[/dim]")

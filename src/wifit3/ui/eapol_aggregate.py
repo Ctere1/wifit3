@@ -74,7 +74,8 @@ def _msg_label(msg_num: int, count: int) -> str:
 
 
 def _render_tree(client_mac: str, burst: _Burst, hs_ev, instance: int,
-                 save_hint: str | None = None, uncrackable: str | None = None) -> list[str]:
+                 save_hint: str | None = None, uncrackable: str | None = None,
+                 psk_chip: str | None = None) -> list[str]:
     """A burst (+ optional completion event + save note) as treelog markup lines.
 
     ``save_hint`` (the screen's short 'saved: captures/…' string) closes the tree
@@ -99,6 +100,8 @@ def _render_tree(client_mac: str, burst: _Burst, hs_ev, instance: int,
         lines += [treelog.branch(b) for b in bodies]       # every Mx a branch …
         if save_hint:                                      # … verdict branches too,
             lines.append(treelog.branch(verdict))          #     the save note closes
+            if psk_chip:
+                lines.append(treelog.branch(psk_chip))
             lines.append(treelog.leaf(save_hint))
         else:
             lines.append(treelog.leaf(verdict))            # … else verdict closes it
@@ -147,7 +150,7 @@ class EapolAggregator:
         self._bursts.setdefault(ev.client_mac, _Burst()).add(ev, now)
 
     def on_handshake(self, ev: CaptureEvent, now: float,
-                     save_hint: str | None = None) -> list[str]:
+                     save_hint: str | None = None, psk_chip: str | None = None) -> list[str]:
         """A crackable pair completed (one HANDSHAKE per instance). First time for
         a client → flush its buffered tree with the verdict (and the screen's
         ``save_hint`` as the closing leaf); afterwards → a compact ``×N``
@@ -157,7 +160,7 @@ class EapolAggregator:
         if ev.client_mac not in self._captured:
             self._captured.add(ev.client_mac)
             burst = self._bursts.pop(ev.client_mac, _Burst())
-            return _render_tree(ev.client_mac, burst, ev, n, save_hint)
+            return _render_tree(ev.client_mac, burst, ev, n, save_hint, psk_chip=psk_chip)
         return _render_reannounce(ev.client_mac, ev, n)
 
     def tick(self, now: float, label_for=None) -> list[list[str]]:

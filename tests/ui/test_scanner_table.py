@@ -558,7 +558,7 @@ async def test_clicking_a_header_re_sorts_and_persists(scanner_host):
 
 
 @pytest.mark.parametrize("reverse", [False, True])
-def test_chipset_sort_keeps_blank_rows_last(reverse):
+async def test_chipset_sort_keeps_blank_rows_last(reverse):
     column = COLUMNS[COLUMN_KEYS.index("chipset")]
     rows = [_row(0, chipset=""), _row(1, chipset="Broadcom"), _row(2, chipset="MediaTek")]
     ordered = sorted(rows, key=lambda row: column.sort_key(row, reverse), reverse=reverse)
