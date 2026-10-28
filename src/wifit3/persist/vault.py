@@ -191,8 +191,9 @@ class Vault:
                 logger.warning(f"Could not save hashline dates for {state.bssid}", exc_info=True)
 
     def ssid(self, bssid: str) -> Optional[str]:
-        """The AP's SSID; a .pcap only knows the filename-safe form, so any other capture wins."""
-        captures = self.persisted(bssid)
+        """The AP's SSID from its newest capture. A PSK is saved under the SSID it cracked, whenever
+        it cracked, so PSK files come last; a .pcap only knows the filename-safe form."""
+        captures = sorted(self.persisted(bssid), key=lambda c: c.type == CaptureType.WPA_PSK)
         return next((c.ssid for c in captures if c.ssid and not c.path.endswith(".pcap")),
                     next((c.ssid for c in captures if c.ssid), None))
 

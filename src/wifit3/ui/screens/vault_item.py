@@ -674,9 +674,7 @@ class VaultItemView(Vertical):
         return expanded, frozenset(self.unticked_hashline_ids), self.verifying
 
     def _set_title(self) -> None:
-        name = self._ssid or "‹hidden›"
-        title = Content.from_markup(f"[$background bold on $primary] {escape(name)} [/]")
-        self.border_title = title.append(Content.from_text(f" ({self._bssid}) "))
+        self.border_title = Content.from_text(f" {self._ssid or '‹hidden›'} ({self._bssid}) ")
 
     def compose(self) -> ComposeResult:
         if self._state is None:

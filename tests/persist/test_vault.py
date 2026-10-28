@@ -5,6 +5,7 @@ Config.captures_dir is pointed at tmp_path by the autouse fixture in
 tests/conftest.py, so Vault() and the save_* functions both land there."""
 from __future__ import annotations
 
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -834,6 +835,16 @@ def test_ssid_prefers_a_capture_holding_the_real_ssid_over_a_newer_pcap(tmp_path
     assert v.persisted("02:00:00:00:00:50")[0].path.endswith(".pcap")
     assert v.ssid("02:00:00:00:00:50") == "Café"
     assert v.ssid("02:00:00:00:00:99") is None
+
+
+def test_ssid_ignores_a_psk_cracked_later_under_an_older_ssid(tmp_path):
+    for ssid, captured in (("Old", 1_700_000_001), ("New", 1_700_000_005)):
+        _write_pmkid_line(tmp_path, ssid, "02:00:00:00:00:50", derive_pmk("pw", ssid.encode()))
+        os.utime(tmp_path / f"{ssid}_02-00-00-00-00-50.hc22000", (captured, captured))
+    _write_wpa_psk(tmp_path, "02-00-00-00-00-50", ssid="Old", epoch=1_700_000_009, psk="pw")
+    v = Vault()
+    assert v.persisted("02:00:00:00:00:50")[0].type == CaptureType.WPA_PSK
+    assert v.ssid("02:00:00:00:00:50") == "New"
 
 
 @pytest.mark.parametrize(("kind", "save"), [
