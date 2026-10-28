@@ -34,6 +34,12 @@ class CaptureType(StrEnum):
     WPA_PSK = "WPA_PSK"           # passphrase recovered from a handshake/PMKID (e.g. hashcat)
 
 
+WPS_CAPTURE_TYPES = frozenset({CaptureType.WPS_PIN, CaptureType.WPS_PBC})
+PSK_CAPTURE_TYPES = frozenset({CaptureType.WPA_PSK, *WPS_CAPTURE_TYPES})    # value is a WPA PSK
+# A WEP key cracked from the AP's IVs, or WPS credentials the AP sent.
+AP_RECOVERED_CAPTURE_TYPES = frozenset({CaptureType.WEP, *WPS_CAPTURE_TYPES})
+
+
 @dataclass
 class PersistedCapture:
     """One previously-saved capture artifact found under captures/."""
@@ -44,7 +50,6 @@ class PersistedCapture:
     value: Optional[str] = None     # WEP key (hex) / WPS PSK; None for HS/PMKID
     ssid: Optional[str] = None      # parsed from the filename, for display (VAULT)
     pin: Optional[str] = None       # WPS PIN (WPS_PIN captures only)
-    record_count: int = 1           # hashcat-22000 records in the file; 0 for raw .pcap
 
 
 @dataclass

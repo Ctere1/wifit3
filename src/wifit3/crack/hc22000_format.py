@@ -1,6 +1,6 @@
 """Hashcat ``-m 22000`` hashline FORMAT (WPA-PBKDF2-PMKID+EAPOL).
 
-The disk writer is ``persist.save`` (``HcFiles``).
+The disk writer is ``persist.save`` (``HcFiles``); ``read_hc22000`` reads a file back.
 
 The PMKID (``WPA*01`` / FT ``WPA*03``) line is built here; the EAPOL (``WPA*02`` / FT
 ``WPA*04``) lines and the crackability decision both live in ``crack.handshake``, the
@@ -25,6 +25,8 @@ References:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+from pathlib import Path
 import re
 from typing import List, Optional
 
@@ -35,6 +37,7 @@ from wifit3.dot11.rsn import AKM_FT_PSK, AKM_PSK_SHA256
 
 PMKID_SHA256_MESSAGE_PAIR_BIT = 0x02
 _PMKID_SHA256_MESSAGE_PAIR = "03"
+_EAPOL_PAIR_LABELS = {0: "M1+M2", 1: "M1+M4", 2: "M2+M3", 3: "M2+M3", 4: "M3+M4", 5: "M3+M4"}
 
 
 def pmkid_hashline(ssid: str, hs: Handshake) -> Optional[str]:
@@ -84,6 +87,42 @@ class Hc22000Line:
     r0khid: str = ""    # field 10 (FT only)
     r1khid: str = ""    # field 11 (FT only)
 
+    @property
+    def is_pmkid(self) -> bool:
+        return self.kind in ("01", "03")
+
+    @property
+    def ssid(self) -> str:
+        """The ESSID field decoded as UTF-8, undecodable bytes replaced."""
+        return bytes.fromhex(self.essid).decode("utf-8", errors="replace")
+
+    @property
+    def bssid(self) -> str:
+        """``mac_ap`` in colon form, ``aa:bb:cc:dd:ee:ff``."""
+        return ":".join(self.mac_ap[i:i + 2] for i in range(0, len(self.mac_ap), 2))
+
+    @property
+    def message_pair_bits(self) -> int:
+        return int(self.message_pair, 16) if self.message_pair else 0
+
+    @property
+    def eapol_message_pair(self) -> Optional[int]:
+        """Bits 0-2 of an EAPOL line's message-pair field (0 = M1+M2); None for a PMKID."""
+        return None if self.is_pmkid else self.message_pair_bits & 0x07
+
+    @property
+    def pair_label(self) -> str:
+        """``PMKID``, or the EAPOL messages the line pairs, e.g. ``M2+M3``."""
+        if self.is_pmkid:
+            return "PMKID"
+        return _EAPOL_PAIR_LABELS.get(self.eapol_message_pair, "M??")
+
+    @property
+    def authorized(self) -> bool:
+        """A PMKID, or an EAPOL pair the AP answered (M3/M4): either holds the AP's password.
+        An M1+M2 pair may hold a client's wrong password."""
+        return self.is_pmkid or self.eapol_message_pair != 0
+
 
 def _is_hex(value: str, *, exact: int | None = None, maximum: int | None = None) -> bool:
     if len(value) % 2 or not re.fullmatch(r"[0-9a-fA-F]*", value):
@@ -128,3 +167,17 @@ def parse_hc22000(line: str) -> Optional[Hc22000Line]:
         r0khid=parts[10].lower() if is_ft else "",
         r1khid=parts[11].lower() if is_ft else "",
     )
+
+
+def read_hc22000(path: str | Path) -> list[tuple[str, Hc22000Line]]:
+    """``(raw line stripped, parsed)`` for each valid line of a .hc22000 file; [] if unreadable."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [(raw.strip(), line) for raw in text.splitlines() if (line := parse_hc22000(raw))]
+
+
+def hashline_id(line: str) -> str:
+    """16 hex digits identifying a hashline, ignoring case and surrounding whitespace."""
+    return hashlib.sha256(line.strip().lower().encode()).hexdigest()[:16]

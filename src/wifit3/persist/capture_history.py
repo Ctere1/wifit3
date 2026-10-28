@@ -10,8 +10,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List
 
-from wifit3.crack.hc22000_format import parse_hc22000
-from wifit3.models import CaptureType, PersistedCapture
+from wifit3.crack.hc22000_format import Hc22000Line, read_hc22000
+from wifit3.models import PSK_CAPTURE_TYPES, CaptureType, PersistedCapture
 from wifit3.persist.common import (
     AGGREGATED_HC22000_RE,
     LEGACY_CAPTURE_RE,
@@ -48,11 +48,6 @@ def _read_wps_psk(text: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def _count_hashlines(text: str, prefixes: tuple[str, ...]) -> int:
-    """Number of records starting with one of ``prefixes`` in a .hc22000 body."""
-    return sum(1 for ln in text.splitlines() if ln.strip().startswith(prefixes))
-
-
 def _ssid_naming_file(ssid: str, filename_ssid: str) -> str:
     return ssid if ssid and safe_ssid(ssid) == filename_ssid else filename_ssid
 
@@ -62,41 +57,31 @@ def _body_ssid(text: str, filename_ssid: str) -> str:
     return _ssid_naming_file(m.group(1) if m else "", filename_ssid)
 
 
-def _essid(text: str, filename_ssid: str) -> str:
-    line = next((parsed for parsed in map(parse_hc22000, text.splitlines()) if parsed), None)
-    if line is None:
+def _essid(lines: list[tuple[str, Hc22000Line]], filename_ssid: str) -> str:
+    if not lines:
         return filename_ssid
     try:
-        essid = bytes.fromhex(line.essid).decode("utf-8")
+        essid = bytes.fromhex(lines[0][1].essid).decode("utf-8")
     except UnicodeDecodeError:
         return filename_ssid
     return _ssid_naming_file(essid, filename_ssid)
 
 
 def _parse_aggregate_hc(path: Path, bssid: str) -> List[PersistedCapture]:
-    text = _read_text(path)
-    if text is None:
-        return []
+    lines = read_hc22000(path)
     try:
         mtime = int(path.stat().st_mtime)
     except OSError:
         mtime = 0
     m = AGGREGATED_HC22000_RE.match(path.name)
-    ssid = _essid(text, m.group("ssid")) if m else None
-    pmkid = hs = 0
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith(("WPA*01*", "WPA*03*")):
-            pmkid += 1
-        elif line.startswith(("WPA*02*", "WPA*04*")):
-            hs += 1
+    ssid = _essid(lines, m.group("ssid")) if m else None
     out: List[PersistedCapture] = []
-    if pmkid:
+    if any(line.is_pmkid for _, line in lines):
         out.append(PersistedCapture(type=CaptureType.PMKID, timestamp=mtime, path=str(path),
-                                    bssid=bssid, ssid=ssid, record_count=pmkid))
-    if hs:
+                                    bssid=bssid, ssid=ssid))
+    if any(not line.is_pmkid for _, line in lines):
         out.append(PersistedCapture(type=CaptureType.HS, timestamp=mtime, path=str(path),
-                                    bssid=bssid, ssid=ssid, record_count=hs))
+                                    bssid=bssid, ssid=ssid))
     return out
 
 
@@ -111,9 +96,10 @@ def _parse_file(path: Path, bssid: str) -> List[PersistedCapture]:
     epoch = int(m.group("epoch"))
     kind = m.group("kind")
     ext = m.group("ext")
-    text = "" if ext == "pcap" else _read_text(path) or ""
+    text = _read_text(path) or "" if ext == "txt" else ""
+    lines = read_hc22000(path) if ext == "hc22000" else []
     if ext == "hc22000":
-        ssid = _essid(text, m.group("ssid"))
+        ssid = _essid(lines, m.group("ssid"))
     elif ext == "txt":
         ssid = _body_ssid(text, m.group("ssid"))
     else:
@@ -139,13 +125,11 @@ def _parse_file(path: Path, bssid: str) -> List[PersistedCapture]:
         return [PersistedCapture(type=CaptureType.WPA_PSK, timestamp=epoch, path=str(path),
                                  bssid=bssid, value=psk, ssid=ssid)]
     if kind == "handshake" and ext in ("hc22000", "pcap"):
-        count = _count_hashlines(text, ("WPA*02*", "WPA*04*"))
         return [PersistedCapture(type=CaptureType.HS, timestamp=epoch, path=str(path),
-                                 bssid=bssid, ssid=ssid, record_count=count)]
+                                 bssid=bssid, ssid=ssid)]
     if kind == "pmkid" and ext in ("hc22000", "pcap"):
-        count = _count_hashlines(text, ("WPA*01*", "WPA*03*"))
         return [PersistedCapture(type=CaptureType.PMKID, timestamp=epoch, path=str(path),
-                                 bssid=bssid, ssid=ssid, record_count=count)]
+                                 bssid=bssid, ssid=ssid)]
     return []
 
 
@@ -180,6 +164,5 @@ def summarize(index: Dict[str, List[PersistedCapture]]) -> tuple[int, int, int, 
         hs += CaptureType.HS in types
         pmkid += CaptureType.PMKID in types
         wep += CaptureType.WEP in types
-        psk += any(c.type in (CaptureType.WPS_PIN, CaptureType.WPS_PBC, CaptureType.WPA_PSK)
-                   and c.value for c in caps)
+        psk += any(c.type in PSK_CAPTURE_TYPES and c.value for c in caps)
     return hs, pmkid, wep, psk

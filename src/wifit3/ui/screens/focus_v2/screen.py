@@ -55,16 +55,17 @@ from wifit3.crack.handshake import handshake_uncrackable_label
 from wifit3.ui.encryption_format import psk_capture_supported
 from wifit3.models import AccessPoint, IdSource
 from wifit3.persist.config import Config
+from wifit3.persist.save import SaveResult
 from wifit3.ui.vault.global_tracker import GlobalJobTracker
 
 from ... import focus_model as fm
 from ...capture_events import (
     CAPTURE_TOAST_TITLES, DECLOAK_METHOD_LABELS, CaptureEvent, CaptureEventDetector, CaptureKind,
 )
-from ...capture_log import short_sta
+from ...capture_log import saved_psk_markup, short_sta
 from ...eapol_aggregate import EapolAggregator
 from ... import pmkid_log
-from ...encryption_format import wep_key_ascii
+from ...encryption_format import wep_key_hex_and_ascii
 from .card_endpoint import CardEndpoint
 from .tx_picker import TxDevicePicker
 from .clients_list import ClientsList, ClientWidget, FingerprintModal
@@ -120,7 +121,7 @@ _BUTTON_TIPS = {
 _FILENAME_MIDDLE = re.compile(r"_[0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5}_\d+_")
 
 
-def _save_line(result) -> str:
+def _save_line(result: SaveResult) -> str:
     """Short, dim 'saved/exists: captures/<essid>_…_<kind>.<ext>' line for a save result."""
     verb = "saved" if result.was_new else "exists"
     name = result.path.name
@@ -133,7 +134,7 @@ def _wep_key_chip(key_hex) -> str:
     """Black-bold-on-cyan WEP key chip (bare hex for non-printable keys)."""
     if not key_hex:
         return "[dim]?[/dim]"
-    return f"[black bold on cyan] {wep_key_ascii(key_hex)} [/black bold on cyan]"
+    return f"[black bold on cyan] {wep_key_hex_and_ascii(key_hex)} [/black bold on cyan]"
 
 
 class FocusViewV2(Screen):
@@ -787,7 +788,7 @@ class FocusViewV2(Screen):
             elif ev.kind == CaptureKind.HANDSHAKE:
                 # Save instantly
                 result = self.app.vault.save_handshake(ap, ev.client_mac)
-                hint = _save_line(result) if result is not None else None
+                hint = _save_line(result) + saved_psk_markup(result.matches_saved_psk) if result is not None else None
                 self._emit_lines(self._eapol_agg.on_handshake(ev, now, save_hint=hint))
             else:
                 self._log_capture_event(ev, ap)
@@ -812,7 +813,7 @@ class FocusViewV2(Screen):
             )
             result = self.app.vault.save_pmkid(ap, ev.client_mac)
             if result is not None:
-                self._log(treelog.leaf(_save_line(result)))
+                self._log(treelog.leaf(_save_line(result) + saved_psk_markup(result.matches_saved_psk)))
         elif ev.kind == CaptureKind.DECLOAK:
             if Config.remember_decloak(ev.bssid, ev.ssid or ""):
                 self.app.persist_config()
@@ -1185,7 +1186,7 @@ class FocusViewV2(Screen):
         """Handle a completed harvest."""
         if camp.pmkid:
             result = self.app.vault.save_pmkid(camp.target, camp.client_mac)
-            hint = _save_line(result) if result is not None else None
+            hint = _save_line(result) + saved_psk_markup(result.matches_saved_psk) if result is not None else None
             self._emit_lines(pmkid_log.verdict_success(hint))
             # Detector skips forged MACs, so toast the active-harvest win here too.
             name = camp.target.ssid or camp.target.bssid
@@ -1284,7 +1285,7 @@ class FocusViewV2(Screen):
         for client_mac in list(twin.handshakes) if twin else ():
             result = self.app.vault.save_handshake(twin, client_mac)
             if result is not None:
-                self._log(treelog.leaf(_save_line(result)))
+                self._log(treelog.leaf(_save_line(result) + saved_psk_markup(result.matches_saved_psk)))
 
     # ----- WEP: Generate IVs (Replay) + Chop ---------------------------------
 

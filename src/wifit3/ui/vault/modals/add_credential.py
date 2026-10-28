@@ -10,10 +10,10 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select
 
 from wifit3.crack.passwords import is_valid_psk
+from wifit3.crack.wpa_psk import RAW_PMK_RE
 from wifit3.models import CaptureType
 
 _BSSID_RE = re.compile(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}")
-_PSK_HEX_RE = re.compile(r"[0-9a-fA-F]{64}")
 _WPS_PIN_RE = re.compile(r"[0-9]{4}|[0-9]{8}")
 _WEP_HEX_RE = re.compile(r"[0-9a-fA-F]{10}|[0-9a-fA-F]{26}")
 
@@ -40,7 +40,7 @@ def credential_error(ssid: str, bssid: str, kind: CaptureType, value: str) -> Op
     if not _BSSID_RE.fullmatch(bssid):
         return "Enter a colon-separated BSSID"
     if kind == CaptureType.WPA_PSK:
-        if not (is_valid_psk(value) or _PSK_HEX_RE.fullmatch(value)):
+        if not (is_valid_psk(value) or RAW_PMK_RE.fullmatch(value)):
             return "WPA PSK must be 8-63 bytes or 64 hex digits"
     elif kind == CaptureType.WPS_PIN:
         if not _WPS_PIN_RE.fullmatch(value):

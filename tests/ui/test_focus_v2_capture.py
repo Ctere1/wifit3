@@ -77,14 +77,13 @@ def test_save_line_joins_natively_instead_of_gluing_a_slash(monkeypatch):
     save directory was absolute."""
     import os
     from pathlib import Path
-    from types import SimpleNamespace
+    from wifit3.persist.save import SaveResult
 
     from wifit3.persist.config import Config
     from wifit3.ui.screens.focus_v2.screen import _save_line
 
-    result = SimpleNamespace(
-        was_new=True,
-        path=Path("ignored/AP_30-85-a9-a9-a9-a9_1700000000_pmkid.hc22000"))
+    result = SaveResult(path=Path("ignored/AP_30-85-a9-a9-a9-a9_1700000000_pmkid.hc22000"),
+                        was_new=True)
 
     monkeypatch.setattr(Config, "captures_dir", str(Path("/tmp/loot").resolve()))
     line = _save_line(result)

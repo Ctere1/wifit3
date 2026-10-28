@@ -8,7 +8,8 @@ from typing import Optional, TYPE_CHECKING
 from rich.markup import escape
 from wifit3.wlan.array import WlanArray
 
-from .encryption_format import format_encryption_markup, wep_key_ascii
+from .colors import PASSWORD_MISMATCH_COLOR
+from .encryption_format import format_encryption_markup, wep_key_hex_and_ascii
 from ..campaigns.campaign import Campaign
 from ..campaigns.pmkid import PmkidHarvestAttack
 from ..campaigns.wep import WepCampaign
@@ -20,6 +21,7 @@ from wifit3.dot11.rsn import SAE_AKM_SUITES
 from wifit3.models import CaptureType, IdKey, IdSource
 from wifit3.models.access_point import eap_only, no_passphrase
 from wifit3.ui.encryption_format import psk_capture_supported
+from wifit3.persist.ap_state import ApState, PasswordStatus
 from wifit3.persist.config import Config
 from ..campaigns.pin import WpsCampaign
 from ..campaigns.deauth import DeauthCampaign
@@ -268,6 +270,18 @@ def status_under_card() -> str:
     return ""
 
 
+def _psk_chip(psk: Optional[str], state: ApState) -> Optional[str]:
+    key = state.status_key
+    if psk is None:
+        if state.status is not PasswordStatus.STALE or key is None or key.type != CaptureType.WPA_PSK:
+            return None
+        return (f"[black bold on {PASSWORD_MISMATCH_COLOR}] PSK: {escape(key.value)} [/] "
+                f"[bold {PASSWORD_MISMATCH_COLOR}]{state.status.value}[/]")
+    if state.status is PasswordStatus.NOT_VERIFIED and key is not None and key.value == psk:
+        return f"[black bold on yellow] PSK: {escape(psk)} [/black bold on yellow] [bold yellow]NOT VERIFIED[/bold yellow]"
+    return f"[black bold on green] ✓ PSK: {escape(psk)} [/black bold on green]"
+
+
 def status_headlines(ap: AccessPoint, array: WlanArray, vault: Vault) -> list[str]:
     """The Campaign headline: up to 3 markup lines of current activity (reads the active campaign)."""
     active = Campaign.active
@@ -300,13 +314,13 @@ def status_headlines(ap: AccessPoint, array: WlanArray, vault: Vault) -> list[st
                    else next((c.value for c in vault.persisted(ap.bssid)
                               if c.type == CaptureType.WEP and c.value), None))
     if wep_key_hex:
-        return [f"[black bold on green] ✓ WEP key: {escape(wep_key_ascii(wep_key_hex))} [/black bold on green]",
+        return [f"[black bold on green] ✓ WEP key: {escape(wep_key_hex_and_ascii(wep_key_hex))} [/black bold on green]",
                 "[dim]● Listening for WEP IVs[/dim]"]
-    psk = vault.known_psk(ap)
-    if psk:
+    psk_chip = _psk_chip(vault.known_psk(ap), vault.ap_state(ap.bssid))
+    if psk_chip:
         tail = ("[dim]● Not yet supported: no crack path for this AKM[/dim]"
                 if unsupported else "[dim]● Listening for handshake + PMKID[/dim]")
-        return [f"[black bold on green] ✓ PSK: {escape(psk)} [/black bold on green]", tail]
+        return [psk_chip, tail]
 
     if Config.is_silenced(ap.bssid):
         return ["[dim]● Silenced[/dim]",

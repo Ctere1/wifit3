@@ -4,6 +4,7 @@ from wifit3.crack.hc22000_format import (
     eapol_hashlines,
     parse_hc22000,
     pmkid_hashline,
+    read_hc22000,
 )
 from wifit3.models import HandshakeMessage, Handshake
 
@@ -196,3 +197,29 @@ def test_parse_hc22000_malformed():
     assert parse_hc22000("") is None
     assert parse_hc22000("NOTWPA*01*abc*def") is None
     assert parse_hc22000("WPA*01*short") is None
+
+
+def test_eapol_message_pair_and_authorized_read_bits_0_to_2():
+    def eapol(pair: str):
+        return parse_hc22000(f"WPA*02*{_COMMON}*{'22' * 32}*01020304*{pair}")
+    assert [eapol(p).eapol_message_pair for p in ("00", "80", "a2", "05")] == [0, 0, 2, 5]
+    assert [eapol(p).authorized for p in ("00", "80", "a2", "01")] == [False, False, True, True]
+    assert [eapol(p).pair_label for p in ("80", "01", "a2", "05", "07")] == [
+        "M1+M2", "M1+M4", "M2+M3", "M3+M4", "M??"]
+    pmkid = parse_hc22000(f"WPA*01*{_COMMON}***03")
+    assert pmkid.is_pmkid and pmkid.authorized and pmkid.pair_label == "PMKID"
+    assert pmkid.eapol_message_pair is None and pmkid.message_pair_bits == 3
+
+
+def test_read_hc22000_keeps_valid_lines_stripped(tmp_path):
+    line = f"WPA*01*{_COMMON}***"
+    path = tmp_path / "x.hc22000"
+    path.write_text(f"  {line}  \nnot a hashline\n\n", encoding="utf-8")
+    assert [(raw, parsed.kind) for raw, parsed in read_hc22000(path)] == [(line, "01")]
+    assert read_hc22000(tmp_path / "missing.hc22000") == []
+
+
+def test_ssid_decodes_the_essid_field():
+    assert parse_hc22000(f"WPA*01*{_COMMON}***").ssid == "Home"
+    not_utf8 = _COMMON.replace("486f6d65", "48ff")
+    assert parse_hc22000(f"WPA*01*{not_utf8}***").ssid == "H�"

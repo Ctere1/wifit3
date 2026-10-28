@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from wifit3.crack.hc22000_format import Hc22000Line, eapol_hashlines, parse_hc22000, pmkid_hashline
+from wifit3.crack.hc22000_format import eapol_hashlines, parse_hc22000, pmkid_hashline, read_hc22000
 from wifit3.models import AccessPoint
 from wifit3.persist.common import (
     LEGACY_CAPTURE_RE,
@@ -81,29 +81,11 @@ def _pcap_records_for(ap: AccessPoint, client_mac: str) -> list[tuple[bytes, flo
 
 
 def _read_anonces(path: Path) -> set[str]:
-    out: set[str] = set()
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return out
-    for line in text.splitlines():
-        entry = parse_hc22000(line)
-        if entry and entry.kind in {"02", "04"} and entry.anonce:
-            out.add(entry.anonce)
-    return out
+    return {line.anonce for _, line in read_hc22000(path) if not line.is_pmkid and line.anonce}
 
 
 def _read_pmkids(path: Path) -> set[str]:
-    out: set[str] = set()
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return out
-    for line in text.splitlines():
-        entry = parse_hc22000(line)
-        if entry and entry.kind in {"01", "03"} and entry.pmkid_or_mic:
-            out.add(entry.pmkid_or_mic)
-    return out
+    return {line.pmkid_or_mic for _, line in read_hc22000(path) if line.is_pmkid and line.pmkid_or_mic}
 
 
 class HcFiles:
@@ -114,14 +96,6 @@ class HcFiles:
         self.ssid = ssid or ""
         self.bssid = bssid
         self.agg_path = captures_dir / f"{safe_ssid(self.ssid)}_{bssid_to_dashed(bssid)}.hc22000"
-
-    def lines(self) -> list[Hc22000Line]:
-        """Every parseable line of the AP's aggregate .hc22000 file (empty if none)."""
-        try:
-            text = self.agg_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return []
-        return [entry for ln in text.splitlines() if (entry := parse_hc22000(ln))]
 
     def find_existing_anonce(self, anonce: str) -> Path | None:
         """Find if ANonce already exists in either the aggregate file or any split file."""
@@ -186,9 +160,9 @@ class HcFiles:
                         continue
                     e = parse_hc22000(ln)
                     if e:
-                        if e.kind in {"01", "03"} and e.pmkid_or_mic:
+                        if e.is_pmkid and e.pmkid_or_mic:
                             seen_pmkids.add(e.pmkid_or_mic)
-                        elif e.kind in {"02", "04"} and e.anonce:
+                        elif not e.is_pmkid and e.anonce:
                             seen_anonces.add(e.anonce)
                     merged_lines.append(ln)
             except OSError:
@@ -207,11 +181,11 @@ class HcFiles:
                     continue
                 e = parse_hc22000(ln)
                 if e:
-                    if e.kind in {"01", "03"} and e.pmkid_or_mic:
+                    if e.is_pmkid and e.pmkid_or_mic:
                         if e.pmkid_or_mic in seen_pmkids:
                             continue
                         seen_pmkids.add(e.pmkid_or_mic)
-                    elif e.kind in {"02", "04"} and e.anonce:
+                    elif not e.is_pmkid and e.anonce:
                         if e.anonce in seen_anonces:
                             continue
                         seen_anonces.add(e.anonce)

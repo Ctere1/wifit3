@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from wifit3.persist.common import wps_run_state_name
 from wifit3.persist.config import Config
 
 from .campaign import Campaign
@@ -64,7 +65,7 @@ EMPTY_PIN_LABEL = "<empty>"   # a recovered zero-length device password has no d
 
 
 def _state_path(state_dir, bssid: str) -> Path:
-    return Path(state_dir) / f"wps_{bssid.lower().replace(':', '-')}.run"
+    return Path(state_dir) / wps_run_state_name(bssid)
 
 
 def load_run_state(state_dir, bssid: str) -> Optional[CampaignState]:

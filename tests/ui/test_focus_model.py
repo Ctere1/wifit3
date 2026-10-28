@@ -6,6 +6,7 @@ campaign off ``Campaign.active``. The button-matrix cases drive the real
 ``FocusViewV2.refresh_buttons`` against a headless screen, since button assembly
 moved onto the screen (there is no ``derive_buttons`` any more)."""
 import types
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -26,6 +27,10 @@ from tests.wlan.mocks import build_ap
 from wifit3.ui.screens.focus_v2 import FocusViewV2
 from wifit3.persist.config import Config
 from wifit3.persist.vault import Vault
+from wifit3.crack import wpa_psk
+from wifit3.dot11.wpa import derive_pmk
+from wifit3.ui.colors import PASSWORD_MISMATCH_COLOR
+from tests.hashline_dates import write_hashline_dates
 
 
 @pytest.fixture(autouse=True)
@@ -323,19 +328,45 @@ def test_headline_unsupported_akm_partial_handshake_is_not_capturing():
     assert "Not yet supported" in joined
 
 
+def _write_saved_psk(kind: str, psk: str) -> None:
+    """A saved ``wpa_psk`` (cracked) or ``wps_pbc`` (from the AP) file for build_ap's AP."""
+    (Path(Config.captures_dir) / f"TESTNET_aa-bb-cc-dd-ee-01_1700000000_{kind}.txt").write_text(
+        f"SSID: TESTNET\nBSSID: aa:bb:cc:dd:ee:01\nPSK: {psk}\n", encoding="utf-8")
+
+
 def test_headline_unsupported_akm_with_saved_psk_shows_psk_without_listening():
-    class _VaultWithPSK:
-        def persisted(self, bssid):
-            return []
-
-        def known_psk(self, ap):
-            return "sha384-pass"
-
+    _write_saved_psk("wpa_psk", "sha384-pass")
     ap = build_ap(encryption="WPA2", akms=["PSK-SHA384"], akm_suites=[20])
-    joined = " ".join(fm.status_headlines(ap, None, _VaultWithPSK()))
+    joined = " ".join(fm.status_headlines(ap, None, Vault()))
     assert "PSK: sha384-pass" in joined
     assert "Listening for handshake" not in joined
     assert "Not yet supported" in joined
+
+
+def test_a_psk_the_ap_gave_up_is_a_green_tick():
+    _write_saved_psk("wps_pbc", "from-the-ap")
+    assert fm.status_headlines(build_ap(akms=["PSK"], akm_suites=[2]), None, Vault())[0] == (
+        "[black bold on green] ✓ PSK: from-the-ap [/black bold on green]")
+
+
+def test_a_psk_nothing_confirms_reads_not_verified():
+    _write_saved_psk("wpa_psk", "cracked")
+    headline = fm.status_headlines(build_ap(akms=["PSK"], akm_suites=[2]), None, Vault())[0]
+    assert "✓" not in headline and "PSK: cracked" in headline and "NOT VERIFIED" in headline
+
+
+def test_a_psk_a_newer_capture_refutes_reads_stale_in_orange():
+    _write_saved_psk("wps_pbc", "old-pass")
+    pmkid = wpa_psk.pmkid(derive_pmk("new-pass", b"TESTNET"), bytes.fromhex("aabbccddee01"),
+                          bytes.fromhex("021122334455"))
+    line = f"WPA*01*{pmkid.hex()}*aabbccddee01*021122334455*{b'TESTNET'.hex()}***"
+    (Path(Config.captures_dir) / "TESTNET_aa-bb-cc-dd-ee-01.hc22000").write_text(line + "\n", encoding="utf-8")
+    write_hashline_dates("TESTNET", "aa:bb:cc:dd:ee:01", {line: 1700000500})
+
+    headline = fm.status_headlines(build_ap(akms=["PSK"], akm_suites=[2]), None, Vault())[0]
+
+    assert headline == (f"[black bold on {PASSWORD_MISMATCH_COLOR}] PSK: old-pass [/] "
+                        f"[bold {PASSWORD_MISMATCH_COLOR}]STALE PASSWORD[/]")
 
 
 def test_headline_live_pbc_outranks_listening():

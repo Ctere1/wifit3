@@ -9,19 +9,26 @@ import pytest
 
 from wifit3.crack.passwords import DEFAULT_PASSWORDS_PATH, ssid_passwords, ssid_variants
 from wifit3.persist.config import Config
-from wifit3.vault.exhaustion import SSID_VARIANTS_IDENTITY, wordlist_identity
+from wifit3.persist.exhaustion import SSID_VARIANTS_IDENTITY, wordlist_identity
 from wifit3.vault.tools.hashcat import (
     HashcatTool, _TERMINATE_WAIT_SECONDS, _read_log_tail, _split_args,
 )
 from wifit3.models import PersistedCapture
 from wifit3.models.access_point import CaptureType
 from wifit3.models.jobs import JobAction, JobState, ToolStatus
+from wifit3.vault.tools.base import job_file
+
+
+_PMKID_LINE = f"WPA*01*{'aa' * 16}*aabbccddeeff*001122334455*41535553***"
+_JOB_ID = "hashcat-test"
 
 
 def _job(**fields) -> JobState:
-    """A RUNNING hashcat job carrying only the fields a test cares about."""
-    return JobState(job_id="hashcat-test", tool_name="hashcat",
-                    capture_path=fields.pop("capture_path", ""),
+    """A RUNNING hashcat job carrying only the fields a test cares about; it cracks its own
+    hashlines file in the jobs dir."""
+    return JobState(job_id=fields.pop("job_id", _JOB_ID), tool_name="hashcat",
+                    capture_path=fields.pop("capture_path", str(Path(Config.captures_dir) / "a.hc22000")),
+                    hashlines_path=fields.pop("hashlines_path", str(job_file(_JOB_ID, ".hc22000"))),
                     status=ToolStatus.RUNNING, progress_msg="", **fields)
 
 
@@ -30,13 +37,23 @@ def _cap(tmp_path):
                             path=str(tmp_path / "a.hc22000"), bssid="00:11:22:33:44:55")
 
 
-def _queued_job(tmp_path, wordlists, args=None):
-    """A job ready for launch: a real capture file and a hashcat_exe that exists."""
-    (tmp_path / "a.hc22000").write_text("WPA*01*deadbeef\n")
+def _write_hashlines(tmp_path, line: str, job_id: str = _JOB_ID) -> Path:
+    """The capture ``a.hc22000`` and the job's own hashlines file, each holding ``line``."""
+    (tmp_path / "a.hc22000").write_text(f"{line}\n")
+    hashlines = job_file(job_id, ".hc22000")
+    hashlines.parent.mkdir(parents=True, exist_ok=True)
+    hashlines.write_text(f"{line}\n")
+    return hashlines
+
+
+def _queued_job(tmp_path, wordlists, args=None, job_id=_JOB_ID):
+    """A job ready for launch: a real capture, its hashlines file and a hashcat_exe that exists."""
+    hashlines = _write_hashlines(tmp_path, _PMKID_LINE, job_id)
     config = {"hashcat_exe": sys.executable, "wordlists": [str(w) for w in wordlists]}
     if args is not None:
         config["hashcat_args"] = args
-    return _job(capture_path=str(tmp_path / "a.hc22000"), config=config)
+    return _job(job_id=job_id, capture_path=str(tmp_path / "a.hc22000"),
+                hashlines_path=str(hashlines), config=config)
 
 
 def _fake_spawn(mocker, pid=4242, alive=True, stdin_path=""):
@@ -75,24 +92,38 @@ def _append(log_path, text):
 def test_poll_status_reports_key_from_potfile(tmp_path):
     """A recovered key is read straight from the potfile (no `--show` subprocess), even for an
     unknown/hung pid, so a hashcat that hangs after cracking still resolves to SUCCESS."""
-    cap = tmp_path / "ASUS.hc22000"
-    cap.write_text("WPA*01*deadbeef*aabbccddeeff*001122334455*41535553***\n")
-    (tmp_path / "ASUS.potfile").write_text(
+    potfile = tmp_path / "jobs" / f"{_JOB_ID}.potfile"
+    potfile.parent.mkdir()
+    potfile.write_text(
         "13b42a8a0ec63a94b4d25ae450e5aa4b4d00ee971eb82a4d631ca62b79309510*41535553:0xdeadbeef\n"
     )
-    res = HashcatTool().poll_status(_job(capture_path=str(cap), pid=999999))
+    res = HashcatTool().poll_status(_job(pid=999999, tool_state={"potfile_path": str(potfile)}))
     assert res.status == ToolStatus.SUCCESS
     assert res.key == "0xdeadbeef"
 
 
+def test_an_adopted_job_from_before_potfiles_were_recorded_reads_the_capture_potfile(tmp_path):
+    """Such a job's hashcat was started with the potfile beside its capture."""
+    cap = tmp_path / "ASUS.hc22000"
+    cap.write_text(f"{_PMKID_LINE}\n")
+    cap.with_suffix(".potfile").write_text("hash:recovered-key\n")
+    job = JobState.from_dict({"job_id": "j1", "tool_name": "hashcat", "capture_path": str(cap),
+                              "status": "RUNNING", "progress_msg": "", "pid": 999999,
+                              "tool_state": {"wordlists": ["a.txt"]}})
+
+    res = HashcatTool().poll_status(job)
+
+    assert (res.status, res.key) == (ToolStatus.SUCCESS, "recovered-key")
+
+
 def test_poll_status_prefers_a_recovered_key_over_a_stop_request(tmp_path):
     """Stopping a job that already found the key still reports the key."""
-    cap = tmp_path / "test.hc22000"
-    cap.write_text("WPA*01*deadbeef\n")
-    cap.with_suffix(".potfile").write_text("hash:recovered-key\n")
+    potfile = tmp_path / "jobs" / f"{_JOB_ID}.potfile"
+    potfile.parent.mkdir()
+    potfile.write_text("hash:recovered-key\n")
 
     res = HashcatTool().poll_status(
-        _job(capture_path=str(cap), tool_state={"stopped": True}), assume_dead=True)
+        _job(tool_state={"stopped": True, "potfile_path": str(potfile)}), assume_dead=True)
 
     assert res.status == ToolStatus.SUCCESS
     assert res.key == "recovered-key"
@@ -212,7 +243,7 @@ def test_launch_runs_hashcat_against_the_first_wordlist_only(tmp_path, mocker):
     HashcatTool().launch(job, _cap(tmp_path))
 
     command = spawn.call_args.args[0]
-    assert command[-2:] == [str((tmp_path / "a.hc22000").resolve()), str(first.resolve())]
+    assert command[-2:] == [str(job_file(_JOB_ID, ".hc22000").resolve()), str(first.resolve())]
     assert job.pid == 4242
     assert job.tool_state["wordlists"] == [str(first.resolve()), str(second.resolve())]
     assert job.tool_state["index"] == 0
@@ -222,13 +253,13 @@ def test_launch_runs_hashcat_against_the_first_wordlist_only(tmp_path, mocker):
 def test_launch_records_where_to_send_keypresses_to_the_running_hashcat(tmp_path, mocker):
     wordlist = tmp_path / "a.txt"
     wordlist.write_text("one\n")
-    spawn = _fake_spawn(mocker, stdin_path="/tmp/a.hashcat.log.keys")
+    spawn = _fake_spawn(mocker, stdin_path="/tmp/a.log.keys")
     job = _queued_job(tmp_path, [wordlist])
 
     HashcatTool().launch(job, _cap(tmp_path))
 
     assert spawn.call_args.kwargs["log_path"] == job.log_path
-    assert job.tool_state["stdin_path"] == "/tmp/a.hashcat.log.keys"
+    assert job.tool_state["stdin_path"] == "/tmp/a.log.keys"
 
 
 def test_poll_status_advances_to_the_next_wordlist_when_one_is_exhausted(tmp_path, mocker):
@@ -293,7 +324,7 @@ _SHORT_ESSID_LINE = "WPA*01*00000000000000000000000000000000*020000000001*020000
 
 
 def _sources_job(tmp_path, wordlists, **sources) -> JobState:
-    (tmp_path / "a.hc22000").write_text(f"{_SHORT_ESSID_LINE}\n")
+    _write_hashlines(tmp_path, _SHORT_ESSID_LINE)
     return _job(capture_path=str(tmp_path / "a.hc22000"),
                 config={"hashcat_exe": sys.executable, "wordlists": [str(w) for w in wordlists],
                         **sources})
@@ -356,7 +387,7 @@ def test_auto_crack_config_needs_a_path_and_a_wordlist_or_password_source():
 
 
 def _pidfile_job(tmp_path, exe: Path, wordlist: Path) -> JobState:
-    (tmp_path / "a.hc22000").write_text("WPA*01*deadbeef\n")
+    _write_hashlines(tmp_path, _PMKID_LINE)
     exe.write_text("")
     wordlist.write_text("one\n")
     return _job(capture_path=str(tmp_path / "a.hc22000"),
@@ -591,7 +622,7 @@ def test_launch_clears_a_potfile_from_an_earlier_job(tmp_path, mocker):
     wordlist.write_text("one\n")
     _fake_spawn(mocker)
     job = _queued_job(tmp_path, [wordlist])
-    potfile = tmp_path / "a.potfile"
+    potfile = job_file(_JOB_ID, ".potfile")
     potfile.write_text("hash:stale-key\n")
 
     HashcatTool().launch(job, _cap(tmp_path))
@@ -604,12 +635,60 @@ def test_launch_truncates_the_log_so_one_job_owns_one_log(tmp_path, mocker):
     wordlist.write_text("one\n")
     _fake_spawn(mocker)
     job = _queued_job(tmp_path, [wordlist])
-    log = tmp_path / "a.hashcat.log"
-    log.write_text("output from a previous job\n")
+    job_file(_JOB_ID, ".log").write_text("output from a previous job\n")
 
     HashcatTool().launch(job, _cap(tmp_path))
 
     assert "previous job" not in Path(job.log_path).read_text(encoding="utf-8")
+
+
+def test_two_jobs_on_one_capture_get_their_own_potfile_and_log(tmp_path, mocker):
+    wordlist = tmp_path / "a.txt"
+    wordlist.write_text("one\n")
+    spawn = _fake_spawn(mocker)
+    jobs_dir = tmp_path / "jobs"
+    launched = []
+    for job_id in ("first", "second"):
+        job = _queued_job(tmp_path, [wordlist], job_id=job_id)
+        HashcatTool().launch(job, _cap(tmp_path))
+        command = spawn.call_args.args[0]
+        launched.append((command[command.index("--potfile-path") + 1], job.log_path))
+
+    assert launched == [(str((jobs_dir / f"{job_id}.potfile").resolve()),
+                         str((jobs_dir / f"{job_id}.log").resolve())) for job_id in ("first", "second")]
+
+
+def test_a_queued_job_from_an_older_jobs_json_writes_its_potfile_and_log_in_the_jobs_dir(
+        tmp_path, mocker):
+    """It cracks its capture, but its new files never land beside the capture."""
+    wordlist = tmp_path / "a.txt"
+    wordlist.write_text("one\n")
+    spawn = _fake_spawn(mocker)
+    cap = tmp_path / "a.hc22000"
+    cap.write_text(f"{_PMKID_LINE}\n")
+    job = JobState.from_dict({"job_id": "j1", "tool_name": "hashcat", "capture_path": str(cap),
+                              "status": "QUEUED", "progress_msg": "",
+                              "config": {"hashcat_exe": sys.executable, "wordlists": [str(wordlist)]}})
+
+    HashcatTool().launch(job, _cap(tmp_path))
+
+    command = spawn.call_args.args[0]
+    assert command[command.index("--potfile-path") + 1] == str((tmp_path / "jobs" / "j1.potfile").resolve())
+    assert job.log_path == str((tmp_path / "jobs" / "j1.log").resolve())
+    assert command[-2] == str(cap.resolve())
+
+
+@pytest.mark.parametrize("content", [None, "", "not a hashline\n"])
+def test_launch_fails_on_a_missing_or_empty_hashlines_file(tmp_path, content):
+    hashlines = tmp_path / "a.hc22000"
+    if content is not None:
+        hashlines.write_text(content)
+    wordlist = tmp_path / "a.txt"
+    wordlist.write_text("one\n")
+    job = _job(hashlines_path=str(hashlines),
+               config={"hashcat_exe": sys.executable, "wordlists": [str(wordlist)]})
+    with pytest.raises(ValueError, match="No hashlines in"):
+        HashcatTool().launch(job, _cap(tmp_path))
 
 
 def test_launch_requires_wordlists(tmp_path):
@@ -639,7 +718,7 @@ def test_launch_puts_user_args_before_the_capture_and_wordlist(tmp_path, mocker,
     with caplog.at_level(logging.INFO):
         tool.launch(job, _cap(tmp_path))
     launched = next(r.message for r in caplog.records if r.message.startswith("Launching "))
-    assert launched.index("-w 3") < launched.index("a.hc22000")
+    assert launched.index("-w 3") < launched.index(f"{_JOB_ID}.hc22000")
 
 
 # ----- log reading ----------------------------------------------------------

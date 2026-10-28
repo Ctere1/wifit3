@@ -15,7 +15,9 @@ from wifit3.persist.meta import update_meta
 from wifit3.ui.vault.modals.cpu_crack import CpuCrackConfigModal
 from wifit3.ui.vault.modals.hashcat import HashcatConfigModal, _default_hashcat_path
 from wifit3.ui.vault.modals.wordlists import _RemoveButton, _UseCheckbox, _exhausted_tooltip
-from wifit3.vault.exhaustion import Exhaustion, hashline_id, wordlist_identity
+from wifit3.crack.hc22000_format import hashline_id, parse_hc22000
+from wifit3.persist.ap_state import DatedHashline
+from wifit3.persist.exhaustion import Exhaustion, wordlist_identity
 from tests.ui.wait_until import wait_until
 
 
@@ -335,21 +337,26 @@ async def test_remove_and_clear_shrink_below_the_global_button_width_in_both_mod
             assert app.screen.query_one("#wordlist-clear", Button).size.width == 7
 
 
-async def test_password_source_labels_count_the_capture_or_one_ssid_and_the_probed(tmp_path):
+def _dated(raw: str) -> DatedHashline:
+    return DatedHashline(hashline_id(raw), raw, parse_hc22000(raw), ())
+
+
+async def test_password_source_labels_count_the_chosen_hashlines_ssids_or_one_ssid_and_the_probed(tmp_path):
+    chosen = f"WPA*01*{'00' * 16}*020000000001*020000000002*6162***"
     capture = tmp_path / "ab_02-00-00-00-00-01.hc22000"
-    capture.write_text(f"WPA*01*{'00' * 16}*020000000001*020000000002*6162***\n"
-                       f"WPA*01*{'00' * 16}*020000000001*020000000003*6162***\n", encoding="utf-8")
+    capture.write_text(f"{chosen}\n"
+                       f"WPA*01*{'00' * 16}*020000000001*020000000003*6364***\n", encoding="utf-8")
     persisted = PersistedCapture(type=CaptureType.PMKID, timestamp=0, path=str(capture),
                                  bssid="02:00:00:00:00:01")
     default_count = sum(1 for _ in read_passwords(DEFAULT_PASSWORDS_PATH))
     app = _Host()
     async with app.run_test() as pilot:
         for modal, ssid_label in (
-                (CpuCrackConfigModal(capture=persisted, probed_ssids=["CafeGuest"]),
+                (CpuCrackConfigModal(bssid=persisted.bssid, probed_ssids=["CafeGuest"], hashlines=[_dated(chosen)]),
                  f"This AP's SSID variants ({len(ssid_variants('ab'))})"),
                 (HashcatConfigModal(confirm_label="Save", probed_ssids=["CafeGuest"]),
                  f"This AP's SSID variants (about {len(ssid_variants('HomeWifi')):,} per SSID)")):
-            app.push_screen(modal)
+            await app.push_screen(modal)
             await app.workers.wait_for_complete()
             await pilot.pause()
             labels = [str(checkbox.label) for checkbox in modal.query(Checkbox)
@@ -377,8 +384,8 @@ async def test_exhausted_wordlists_and_sources_are_marked_with_when_and_on_how_m
     date = datetime.fromtimestamp(when).strftime("%Y-%m-%d")
     app = _Host()
     async with app.run_test() as pilot:
-        modal = CpuCrackConfigModal(capture=persisted)
-        app.push_screen(modal)
+        modal = CpuCrackConfigModal(bssid=persisted.bssid, hashlines=[_dated(line) for line in lines])
+        await app.push_screen(modal)
         await app.workers.wait_for_complete()
         await pilot.pause()
         exhausted_row, fresh_row = modal.query(".wordlist-row")
@@ -405,8 +412,8 @@ async def test_exhausted_rows_start_unchecked_and_one_click_restores_them(tmp_pa
         wordlist_identity(exhausted_list): {hashline_id(line): int(time.time())}})
     app = _Host()
     async with app.run_test() as pilot:
-        modal = CpuCrackConfigModal(capture=persisted)
-        app.push_screen(modal)
+        modal = CpuCrackConfigModal(bssid=persisted.bssid, hashlines=[_dated(line)])
+        await app.push_screen(modal)
         await app.workers.wait_for_complete()
         await pilot.pause()
         exhausted_box, fresh_box = modal.query(_UseCheckbox)
@@ -424,7 +431,7 @@ async def test_deselecting_a_wordlist_skips_it_in_the_launch_but_keeps_it_saved(
     app = _Host()
     async with app.run_test() as pilot:
         modal = CpuCrackConfigModal()
-        app.push_screen(modal)
+        await app.push_screen(modal)
         await pilot.pause()
         modal.query(_UseCheckbox).first().value = False
         await pilot.pause()
@@ -435,5 +442,5 @@ async def test_deselecting_a_wordlist_skips_it_in_the_launch_but_keeps_it_saved(
 
 
 def test_exhausted_today_is_not_zero_days_ago():
-    tooltip = _exhausted_tooltip(Exhaustion(1, 2, int(time.time()) - 60))
+    tooltip = _exhausted_tooltip(Exhaustion("9:100", ("a.txt",), 1, 2, int(time.time()) - 60))
     assert "(today)" in tooltip and "days ago" not in tooltip

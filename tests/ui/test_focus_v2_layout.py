@@ -253,7 +253,7 @@ async def test_visible_job_tracker_does_not_make_focus_scrollable():
         screen = app.screen
         tracker = screen.query_one(GlobalJobTracker)
         app.active_jobs = [JobState(
-            job_id="hashcat-test", tool_name="hashcat", capture_path="test.hc22000",
+            job_id="hashcat-test", tool_name="hashcat", capture_path="test.hc22000", hashlines_path="test.hc22000",
             status=ToolStatus.RUNNING, progress_msg="Running (1%)",
         )]
         await pilot.pause(0)

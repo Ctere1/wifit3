@@ -2,37 +2,21 @@ import logging
 from abc import abstractmethod
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Generic, Optional, Self, TypeVar
+from typing import Generic, Optional, Self, Sequence, TypeVar
 
-from wifit3.crack.hc22000_format import parse_hc22000
-from wifit3.crack.passwords import ssid_variants
-from wifit3.models import PersistedCapture, ToolResult, ToolStatus
+from wifit3.crack.hc22000_format import Hc22000Line, read_hc22000
+from wifit3.crack.passwords import all_ssid_variants
+from wifit3.models import ToolResult, ToolStatus
 from wifit3.models.jobs import JobAction, JobState
-from wifit3.vault.exhaustion import record_exhausted
+from wifit3.persist.exhaustion import SSID_VARIANTS_IDENTITY, SSID_VARIANTS_NAME, record_exhausted
 from wifit3.vault.tools.base import VaultTool
 
 logger = logging.getLogger(__name__)
 
 
-def expand_wordlists(wordlist_paths: list[str]) -> list[str]:
-    """The existing files among ``wordlist_paths``; a directory contributes the files inside it."""
-    expanded: list[str] = []
-    for raw in wordlist_paths:
-        path = Path(raw).expanduser()
-        if path.is_dir():
-            children = sorted(child.resolve() for child in path.iterdir() if child.is_file())
-            expanded.extend(str(child) for child in children)
-        elif path.is_file():
-            expanded.append(str(path.resolve()))
-    return expanded
-
-
 def capture_ssid_variants(capture_path: str) -> list[str]:
     """``ssid_variants`` of every ESSID in the capture's hashlines, deduped."""
-    text = Path(capture_path).read_text(encoding="utf-8", errors="replace")
-    essids = dict.fromkeys(bytes.fromhex(line.essid).decode("utf-8", errors="replace")
-                           for line in map(parse_hc22000, text.splitlines()) if line is not None)
-    return list(dict.fromkeys(psk for essid in essids for psk in ssid_variants(essid)))
+    return all_ssid_variants(line.ssid for _, line in read_hc22000(capture_path))
 
 
 @dataclass
@@ -115,8 +99,8 @@ class CrackerTool(VaultTool, Generic[QueueT]):
     def _running_actions(self, queue: QueueT, progress_msg: str) -> JobAction:
         """What the running job accepts, given its latest progress."""
 
-    def can_crack(self, capture: PersistedCapture) -> bool:
-        return capture.path.endswith(".hc22000")
+    def can_crack(self, lines: Sequence[Hc22000Line]) -> bool:
+        return bool(lines)
 
     def apply(self, action: JobAction, job: JobState) -> bool:
         queue = self.queue_type.from_job(job)
@@ -163,8 +147,9 @@ class CrackerTool(VaultTool, Generic[QueueT]):
     @staticmethod
     def _record_exhausted(queue: WordlistQueue) -> None:
         for identity in filter(None, queue.identities[queue.index:queue.index + 1]):
+            name = SSID_VARIANTS_NAME if identity == SSID_VARIANTS_IDENTITY else queue.current_name
             try:
-                record_exhausted(queue.ssid or None, queue.bssid, identity, queue.hashline_ids)
+                record_exhausted(queue.ssid or None, queue.bssid, identity, name, queue.hashline_ids)
             except OSError:
                 logger.warning(f"Could not record {identity} as exhausted", exc_info=True)
 

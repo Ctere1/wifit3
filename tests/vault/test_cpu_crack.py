@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from wifit3.crack import wpa_psk
-from wifit3.crack.hc22000_format import pmkid_hashline
+from wifit3.crack.hc22000_format import parse_hc22000, pmkid_hashline
 from wifit3.crack.passwords import ssid_passwords, ssid_variants
 from wifit3.dot11 import wpa
 from wifit3.dot11.eapol import eapol_key
@@ -20,7 +20,9 @@ from wifit3.models import Handshake, PersistedCapture, ToolResult, ToolStatus
 from wifit3.models.access_point import CaptureType
 from wifit3.models.jobs import JobAction, JobState
 from wifit3.persist.config import Config
-from wifit3.vault.exhaustion import SSID_VARIANTS_IDENTITY, capture_exhaustion, wordlist_identity
+from wifit3.persist.meta import read_bssid_metas
+from wifit3.persist.exhaustion import (SSID_VARIANTS_IDENTITY, capture_hashline_ids, read_exhaustion,
+                                       wordlist_identity)
 from wifit3.vault.tools.cpu_crack import CpuCrackTool
 
 # hashcat wiki example_hashes, mode 22000 (password "hashcat!", essid "hashcat-essid").
@@ -54,7 +56,7 @@ def _launch(tool: CpuCrackTool, tmp_path: Path, hashlines: list[str],
     config: dict = {"wordlists": paths, "ap_ssid_passwords": ap_ssid_passwords}
     if extra_passwords is not None:
         config["extra_passwords"] = extra_passwords
-    job = JobState(job_id=job_id, tool_name="cpu_crack", capture_path=capture_path,
+    job = JobState(job_id=job_id, tool_name="cpu_crack", capture_path=capture_path, hashlines_path=capture_path,
                    status=ToolStatus.RUNNING, progress_msg="", config=config)
     tool.launch(job, PersistedCapture(type=CaptureType.PMKID, timestamp=0, path=capture_path,
                                       bssid="fc:69:0c:15:82:64"))
@@ -86,11 +88,9 @@ def _gate_pmk(mocker) -> tuple[threading.Event, threading.Event]:
     return entered, release
 
 
-def test_cpu_crack_can_crack_only_hc22000(tool):
-    assert tool.can_crack(PersistedCapture(type=CaptureType.PMKID, timestamp=0, path="a.hc22000",
-                                           bssid="fc:69:0c:15:82:64"))
-    assert not tool.can_crack(PersistedCapture(type=CaptureType.HS, timestamp=0, path="a.pcap",
-                                               bssid="fc:69:0c:15:82:64"))
+def test_cpu_crack_can_crack_any_hashlines_but_not_none(tool):
+    assert tool.can_crack([parse_hc22000(_HASHCAT_PMKID_LINE)])
+    assert not tool.can_crack([])
 
 
 @pytest.mark.parametrize("key_descriptor_version", [1, 2, 3])
@@ -289,7 +289,7 @@ def test_auto_crack_config_is_none_without_a_wordlist_or_password_source():
 
 def _launch_with(tool: CpuCrackTool, tmp_path: Path, hashlines: list[str], **config) -> JobState:
     capture_path = _write(tmp_path / "sources.hc22000", hashlines)
-    job = JobState(job_id="sources", tool_name="cpu_crack", capture_path=capture_path,
+    job = JobState(job_id="sources", tool_name="cpu_crack", capture_path=capture_path, hashlines_path=capture_path,
                    status=ToolStatus.RUNNING, progress_msg="", config={"wordlists": [], **config})
     tool.launch(job, PersistedCapture(type=CaptureType.PMKID, timestamp=0, path=capture_path,
                                       bssid="fc:69:0c:15:82:64"))
@@ -339,9 +339,7 @@ def test_a_job_with_no_password_source_refuses_to_launch(tool, tmp_path):
 
 
 def _capture_exhaustion(job: JobState) -> set[str]:
-    return set(capture_exhaustion(PersistedCapture(type=CaptureType.PMKID, timestamp=0,
-                                                   path=job.capture_path,
-                                                   bssid="fc:69:0c:15:82:64")))
+    return set(read_exhaustion(read_bssid_metas("fc:69:0c:15:82:64"), capture_hashline_ids(job.capture_path)))
 
 
 def test_each_password_source_is_its_own_queue_entry_recorded_once_exhausted(tool, tmp_path,

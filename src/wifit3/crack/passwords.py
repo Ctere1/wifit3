@@ -71,6 +71,11 @@ def ssid_variants(ssid: str) -> list[str]:
     return [psk for psk in dict.fromkeys(candidates) if is_valid_psk(psk)]
 
 
+def all_ssid_variants(ssids: Iterable[str]) -> list[str]:
+    """``ssid_variants`` of every SSID, deduped."""
+    return list(dict.fromkeys(psk for ssid in dict.fromkeys(ssids) for psk in ssid_variants(ssid)))
+
+
 def ssid_passwords(ssids: Iterable[str]) -> list[str]:
     """Every SSID as-is, then its cases and _SSID_SUFFIXES; deduped, stopping at
     _MAX_SSID_PASSWORDS."""
@@ -97,3 +102,16 @@ def read_passwords(path: Path) -> Iterator[str]:
             psk = line.rstrip("\r\n")
             if is_valid_psk(psk):
                 yield psk
+
+
+def expand_wordlists(wordlist_paths: list[str]) -> list[str]:
+    """The existing files among ``wordlist_paths``; a directory contributes the files inside it."""
+    expanded: list[str] = []
+    for raw in wordlist_paths:
+        path = Path(raw).expanduser()
+        if path.is_dir():
+            children = sorted(child.resolve() for child in path.iterdir() if child.is_file())
+            expanded.extend(str(child) for child in children)
+        elif path.is_file():
+            expanded.append(str(path.resolve()))
+    return expanded

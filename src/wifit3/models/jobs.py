@@ -33,9 +33,10 @@ class ToolStatus(str, Enum):
 @dataclass
 class JobState:
     """Schema for jobs.json persistence."""
-    job_id: str                 # Unique ID (tool_name + capture_path + timestamp)
+    job_id: str                 # tool name, capture file stem, submit time; also names the job's files
     tool_name: str
-    capture_path: str
+    capture_path: str           # the AP's capture the job was submitted for
+    hashlines_path: str         # the .hc22000 the tool cracks
     status: ToolStatus
     progress_msg: str           # e.g., "12% (ETA: 1h)" or error reason
     display_name: str = "Unknown Job"           # Human-readable name (e.g. "Hashcat (ASUS)")
@@ -64,6 +65,7 @@ class JobState:
         kwargs = {k: v for k, v in data.items() if k in known}
         if "automatic" in data:
             kwargs.setdefault("auto_crack", data["automatic"])
+        kwargs.setdefault("hashlines_path", data["capture_path"])     # older jobs cracked the capture
         kwargs["status"] = ToolStatus(data["status"])
         for name in ("config", "tool_state"):
             if kwargs.get(name) is None:

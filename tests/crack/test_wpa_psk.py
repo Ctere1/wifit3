@@ -63,7 +63,7 @@ _HASHCAT_EAPOL_LINE = (
 def _matches(psk: str, line: str) -> bool:
     parsed = parse_hc22000(line)
     assert parsed is not None
-    return wpa_psk.psk_matches(derive_pmk(psk, bytes.fromhex(parsed.essid)), parsed)
+    return wpa_psk.psk_matches(psk, parsed)
 
 
 def test_psk_matches_hashcat_pmkid_example():
@@ -74,6 +74,13 @@ def test_psk_matches_hashcat_pmkid_example():
 def test_psk_matches_hashcat_eapol_example():
     assert _matches("hashcat!", _HASHCAT_EAPOL_LINE)
     assert not _matches("hashcat?", _HASHCAT_EAPOL_LINE)
+
+
+def test_psk_matches_a_64_hex_raw_pmk():
+    parsed = parse_hc22000(_HASHCAT_EAPOL_LINE)
+    raw_pmk = derive_pmk("hashcat!", bytes.fromhex(parsed.essid)).hex()
+    assert wpa_psk.psk_matches(raw_pmk, parsed)
+    assert not wpa_psk.psk_matches("0" * 64, parsed)
 
 
 _SSID = bytes.fromhex("5468697349734153534944")
@@ -91,12 +98,12 @@ def _eapol_line(mic: bytes, eapol: bytes) -> Hc22000Line:
                        essid=_SSID.hex(), anonce=_ANONCE.hex(), eapol=eapol.hex(), message_pair="00")
 
 
-def test_psk_matches_key_descriptor_version_1():
+def test_pmk_matches_key_descriptor_version_1():
     eapol = eapol_key(key_info=0x0109, key_len=0, replay=1, nonce=_SNONCE, key_data=_RSN_IE)
     kck = derive_ptk(_PMK, _AA, _SPA, _ANONCE, _SNONCE, KCK_LEN)
     line = _eapol_line(eapol_mic_hmac_md5(kck, eapol), eapol)
-    assert wpa_psk.psk_matches(_PMK, line)
-    assert not wpa_psk.psk_matches(_WRONG_PMK, line)
+    assert wpa_psk.pmk_matches(_PMK, line)
+    assert not wpa_psk.pmk_matches(_WRONG_PMK, line)
 
 
 def _stored_anonce(last: bytes) -> bytes:
@@ -133,37 +140,37 @@ def test_nonce_correction_accepts_both_router_byte_orders_for_all_key_versions(
         return _eapol_line_with_anonce(
             true, stored, pair, key_descriptor_version=key_descriptor_version)
 
-    assert wpa_psk.psk_matches(_PMK, line(le_router, "80"))
-    assert wpa_psk.psk_matches(_PMK, line(be_router, "80"))
-    assert wpa_psk.psk_matches(_PMK, line(true, "80"))
-    assert not wpa_psk.psk_matches(_PMK, line(far, "80"))
-    assert not wpa_psk.psk_matches(_PMK, line(le_router, "00"))
-    assert not wpa_psk.psk_matches(_PMK, line(le_router, "90"))
+    assert wpa_psk.pmk_matches(_PMK, line(le_router, "80"))
+    assert wpa_psk.pmk_matches(_PMK, line(be_router, "80"))
+    assert wpa_psk.pmk_matches(_PMK, line(true, "80"))
+    assert not wpa_psk.pmk_matches(_PMK, line(far, "80"))
+    assert not wpa_psk.pmk_matches(_PMK, line(le_router, "00"))
+    assert not wpa_psk.pmk_matches(_PMK, line(le_router, "90"))
 
 
 def test_nonce_correction_bit_selects_one_router_byte_order():
     true = _stored_anonce((1000).to_bytes(4, "big"))
     le_router = _stored_anonce((1001).to_bytes(4, "big"))
     be_router = _stored_anonce((int.from_bytes(true[-4:], "little") + 1).to_bytes(4, "little"))
-    assert wpa_psk.psk_matches(_PMK, _eapol_line_with_anonce(true, le_router, "a0"))
-    assert not wpa_psk.psk_matches(_PMK, _eapol_line_with_anonce(true, be_router, "a0"))
-    assert wpa_psk.psk_matches(_PMK, _eapol_line_with_anonce(true, be_router, "c0"))
-    assert not wpa_psk.psk_matches(_PMK, _eapol_line_with_anonce(true, le_router, "c0"))
+    assert wpa_psk.pmk_matches(_PMK, _eapol_line_with_anonce(true, le_router, "a0"))
+    assert not wpa_psk.pmk_matches(_PMK, _eapol_line_with_anonce(true, be_router, "a0"))
+    assert wpa_psk.pmk_matches(_PMK, _eapol_line_with_anonce(true, be_router, "c0"))
+    assert not wpa_psk.pmk_matches(_PMK, _eapol_line_with_anonce(true, le_router, "c0"))
 
 
 def test_nonce_correction_wraps_the_counter():
     zero = _stored_anonce((0).to_bytes(4, "big"))
     maximum = _stored_anonce((0xFFFFFFFF).to_bytes(4, "big"))
-    assert wpa_psk.psk_matches(_PMK, _eapol_line_with_anonce(zero, maximum, "a0"))
-    assert wpa_psk.psk_matches(_PMK, _eapol_line_with_anonce(maximum, zero, "a0"))
+    assert wpa_psk.pmk_matches(_PMK, _eapol_line_with_anonce(zero, maximum, "a0"))
+    assert wpa_psk.pmk_matches(_PMK, _eapol_line_with_anonce(maximum, zero, "a0"))
 
 
-def test_psk_matches_key_descriptor_version_3():
+def test_pmk_matches_key_descriptor_version_3():
     eapol = eapol_key(key_info=0x010B, key_len=0, replay=1, nonce=_SNONCE, key_data=_RSN_IE)
     kck = derive_ptk_sha256(_PMK, _AA, _SPA, _ANONCE, _SNONCE, KCK_LEN)
     line = _eapol_line(eapol_mic_aes_cmac(kck, eapol), eapol)
-    assert wpa_psk.psk_matches(_PMK, line)
-    assert not wpa_psk.psk_matches(_WRONG_PMK, line)
+    assert wpa_psk.pmk_matches(_PMK, line)
+    assert not wpa_psk.pmk_matches(_WRONG_PMK, line)
 
 
 def test_ptk_sha256_kdf_layout():
@@ -177,17 +184,17 @@ def test_ptk_sha256_kdf_layout():
     assert derive_ptk_sha256(_PMK, _SPA, _AA, _SNONCE, _ANONCE, KCK_LEN) == block1[:KCK_LEN]
 
 
-def test_psk_matches_sha256_pmkid_when_message_pair_bit_set():
+def test_pmk_matches_sha256_pmkid_when_message_pair_bit_set():
     digest = hmac.new(_PMK, b"PMK Name" + _AA + _SPA, hashlib.sha256).digest()[:16]
     assert wpa_psk.sha256_pmkid(_PMK, _AA, _SPA) == digest
     for message_pair in ("03", "02"):
         line = Hc22000Line(kind="01", pmkid_or_mic=digest.hex(), mac_ap=_AA.hex(), mac_sta=_SPA.hex(),
                            essid=_SSID.hex(), message_pair=message_pair)
-        assert wpa_psk.psk_matches(_PMK, line)
-        assert not wpa_psk.psk_matches(_WRONG_PMK, line)
+        assert wpa_psk.pmk_matches(_PMK, line)
+        assert not wpa_psk.pmk_matches(_WRONG_PMK, line)
     unflagged = Hc22000Line(kind="01", pmkid_or_mic=digest.hex(), mac_ap=_AA.hex(),
                             mac_sta=_SPA.hex(), essid=_SSID.hex())
-    assert not wpa_psk.psk_matches(_PMK, unflagged)
+    assert not wpa_psk.pmk_matches(_PMK, unflagged)
     assert wpa_psk.pmkid(_PMK, _AA, _SPA) != digest
 
 
@@ -267,3 +274,27 @@ def test_psk_matches_ft_eapol_corrects_frame_anonce_for_message_pairs_three_and_
             _FT_EAPOL_PAIR3_DRIFT_LINE, message_pair))
     assert not _matches("correct horse battery", _ft_line_with_message_pair(
         _FT_EAPOL_PAIR3_DRIFT_LINE, "93"))
+
+
+_CHALLENGE_LINE = _HASHCAT_EAPOL_LINE[:-2] + "80"                                   # M1+M2
+_UNMATCHED_AUTHORIZED_LINE = _HASHCAT_EAPOL_LINE.replace("024022795224bffca545276c3762686f", "f" * 32)
+
+
+def _verdict(psks: list[str], *lines: str) -> bool | None:
+    return wpa_psk.psk_verdict(psks, [parse_hc22000(line) for line in lines])
+
+
+def test_psk_verdict_judges_on_authorized_lines_when_there_are_any():
+    assert _verdict(["hashcat!"], _HASHCAT_EAPOL_LINE) is True
+    assert _verdict(["hashcat?"], _HASHCAT_EAPOL_LINE) is False
+    assert _verdict(["hashcat!"], _CHALLENGE_LINE, _UNMATCHED_AUTHORIZED_LINE) is False
+
+
+def test_psk_verdict_on_only_m1m2_lines_matches_or_cannot_tell():
+    assert _verdict(["hashcat!"], _CHALLENGE_LINE) is True
+    assert _verdict(["hashcat?"], _CHALLENGE_LINE) is None
+
+
+def test_psk_verdict_without_lines_or_psks_cannot_tell():
+    assert _verdict(["hashcat!"]) is None
+    assert _verdict([], _HASHCAT_EAPOL_LINE) is None

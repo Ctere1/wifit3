@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 from textual import events, work
 from textual.app import App
 from textual.binding import Binding
@@ -30,7 +31,6 @@ from .screens.focus_v2 import FocusViewV2
 from .screens.error_modals import FatalErrorModal, RecoverableErrorModal
 from .screens.new_device import NewDeviceDialog
 from .screens.vault_drawer import VaultDrawer
-from .screens.vault_table import VaultTable
 from .clipboard import copy_copyq_text, copy_macos_text, copy_windows_text
 from .pref import PreferencesModal
 from .themes import register_app_themes
@@ -161,7 +161,10 @@ class WifiteApp(App):
                                         on_fatal=self._on_usb_fatal)
         self.target_ap: Optional[AccessPoint] = None
         self.vault = Vault()
-        self.vault.subscribe(lambda: self.call_later(self._refresh_vault_table))   # any thread
+        self._vault_notices_lock = threading.Lock()
+        self._vault_refresh_pending = False     # a table refresh is scheduled for the notices so far
+        self._vault_full_refresh = False        # one of them was a full refresh (BSSID None)
+        self.vault.subscribe(self._vault_changed)
         self.vault.set_probed_ssids_source(self._probed_ssids)
         self._job_status: dict[str, ToolStatus] = {}
         self.pbc_enabled: bool = Config.wps_auto_pbc
@@ -256,11 +259,26 @@ class WifiteApp(App):
         live = {job.job_id for job in self.active_jobs}
         self._job_status = {k: v for k, v in self._job_status.items() if k in live}
 
+    def _vault_changed(self, bssid: Optional[str]) -> None:
+        """Any thread: one table refresh per tick, however many notices the Vault sends."""
+        with self._vault_notices_lock:
+            self._vault_full_refresh |= bssid is None
+            if self._vault_refresh_pending:
+                return
+            self._vault_refresh_pending = True
+        if threading.current_thread() is threading.main_thread():    # the app runs on the main thread
+            self.call_later(self._refresh_vault_table)
+        else:
+            self.call_from_thread(self.call_later, self._refresh_vault_table)
+
     def _refresh_vault_table(self) -> None:
         """Reload the vault table if its drawer is open."""
+        with self._vault_notices_lock:
+            full_refresh, self._vault_full_refresh = self._vault_full_refresh, False
+            self._vault_refresh_pending = False
         if isinstance(self.screen, VaultDrawer):
             try:
-                self.screen.query_one("#vault-table", VaultTable).reload_table()
+                self.screen.vault_changed(full_refresh)
             except Exception:
                 logger.debug("Vault table refresh skipped", exc_info=True)
 

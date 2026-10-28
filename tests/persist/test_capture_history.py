@@ -9,8 +9,9 @@ _BSSID_DASH = "aa-bb-cc-dd-ee-ff"
 _BSSID_COLON = "aa:bb:cc:dd:ee:ff"
 
 
-# Minimal hashlines: only the WPA*TYPE* prefix is inspected.
-_HS_LINE = "WPA*02*" + "0" * 32 + "*aabbccddeeff*112233445566*5465737431***2\n"
+# Valid hashlines: a malformed line is not counted.
+_HS_LINE = ("WPA*02*" + "0" * 32 + "*aabbccddeeff*112233445566*5465737431*" + "a" * 64 + "*"
+            + "00" * 99 + "*02\n")
 _PMKID_LINE = "WPA*01*" + "0" * 32 + "*aabbccddeeff*112233445566*5465737431***\n"
 _WEPKEY_TXT = (
     "SSID:  TestNet\n"
@@ -114,15 +115,13 @@ class TestLoadCaptureIndex:
         _write(tmp_path, f"TestNet_{_BSSID_DASH}_1700000000_handshake.hc22000", _HS_LINE)
         assert load_capture_index()[_BSSID_COLON][0].bssid == _BSSID_COLON
 
-    def test_aggregate_counts_hashline_records(self, tmp_path):
+    def test_aggregate_lists_one_entry_per_record_kind(self, tmp_path):
         _write(tmp_path, f"TestNet_{_BSSID_DASH}.hc22000", _HS_LINE + _PMKID_LINE + _PMKID_LINE)
-        by_type = {c.type: c for c in load_capture_index()[_BSSID_COLON]}
-        assert by_type[CaptureType.HS].record_count == 1
-        assert by_type[CaptureType.PMKID].record_count == 2
+        assert sorted(c.type for c in load_capture_index()[_BSSID_COLON]) == [CaptureType.HS, CaptureType.PMKID]
 
-    def test_pcap_record_count_is_zero(self, tmp_path):
-        _write(tmp_path, f"TestNet_{_BSSID_DASH}_1700000030_handshake.pcap", "binary-ish")
-        assert load_capture_index()[_BSSID_COLON][0].record_count == 0
+    def test_malformed_hashlines_make_no_entry(self, tmp_path):
+        _write(tmp_path, f"TestNet_{_BSSID_DASH}.hc22000", _HS_LINE + "WPA*01*truncated\nWPA*02*x\n")
+        assert [c.type for c in load_capture_index()[_BSSID_COLON]] == [CaptureType.HS]
 
     def test_ssid_with_underscores_parses(self, tmp_path):
         _write(tmp_path, f"Beach_2_4_{_BSSID_DASH}_1700000008_handshake.hc22000", _HS_LINE)

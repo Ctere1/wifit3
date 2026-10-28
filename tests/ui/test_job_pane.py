@@ -14,6 +14,7 @@ def _job(status=ToolStatus.RUNNING, actions=JobAction.NONE, progress_msg="Runnin
         job_id="hashcat-test",
         tool_name="hashcat",
         capture_path="test.hc22000",
+        hashlines_path="test.hc22000",
         status=status,
         progress_msg=progress_msg,
         percent=percent,

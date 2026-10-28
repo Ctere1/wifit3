@@ -17,14 +17,13 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Checkbox, Label
 
-from wifit3.crack.passwords import (DEFAULT_PASSWORDS_PATH, read_passwords, ssid_passwords,
-                                    ssid_variants)
-from wifit3.models import PersistedCapture
+from wifit3.crack.passwords import (DEFAULT_PASSWORDS_PATH, all_ssid_variants, read_passwords,
+                                    ssid_passwords, ssid_variants)
+from wifit3.persist.ap_state import DatedHashline
 from wifit3.persist.config import Config, ConfigError, CpuCrackSettings, HashcatSettings
 from wifit3.ui.path_picker import BROWSE_GLYPH, PathPickerModal
-from wifit3.vault.exhaustion import (SSID_VARIANTS_IDENTITY, Exhaustion, capture_exhaustion,
-                                     wordlist_identity)
-from wifit3.vault.tools.cracker import capture_ssid_variants
+from wifit3.persist.exhaustion import SSID_VARIANTS_IDENTITY, Exhaustion, read_exhaustion, wordlist_identity
+from wifit3.persist.meta import read_bssid_metas
 
 _EXAMPLE_SSID = "HomeWifi"
 
@@ -37,26 +36,13 @@ def _ssid_variants_per_ssid() -> int:
 @dataclass
 class _PasswordSourceCounts:
     default_passwords: int
-    ap_ssid_passwords: Optional[int]        # None without a capture: shown per SSID
+    ap_ssid_passwords: Optional[int]        # None without hashlines: shown per SSID
 
 
-def _count_password_sources(capture: Optional[PersistedCapture]) -> _PasswordSourceCounts:
-    ap_ssid_passwords = None
-    if capture is not None:
-        try:
-            ap_ssid_passwords = len(capture_ssid_variants(capture.path))
-        except OSError:
-            ap_ssid_passwords = 0
+def _count_password_sources(hashlines: Sequence[DatedHashline]) -> _PasswordSourceCounts:
     return _PasswordSourceCounts(
         default_passwords=sum(1 for _ in read_passwords(DEFAULT_PASSWORDS_PATH)),
-        ap_ssid_passwords=ap_ssid_passwords)
-
-
-def _read_exhaustion(capture: PersistedCapture) -> dict[str, Exhaustion]:
-    try:
-        return capture_exhaustion(capture)
-    except OSError:
-        return {}
+        ap_ssid_passwords=len(all_ssid_variants(h.line.ssid for h in hashlines)) if hashlines else None)
 
 
 def _file_identity(path: str | Path) -> Optional[str]:
@@ -99,13 +85,14 @@ class WordlistConfigModal(ModalScreen[dict]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, confirm_label: str = "Launch", capture: Optional[PersistedCapture] = None,
-                 probed_ssids: Sequence[str] = ()) -> None:
+    def __init__(self, confirm_label: str = "Launch", bssid: Optional[str] = None,
+                 probed_ssids: Sequence[str] = (), hashlines: Sequence[DatedHashline] = ()) -> None:
         """``confirm_label`` "Save" configures the tool without the caller launching a job;
-        ``capture`` is the one a launch cracks, for its SSID variant count."""
+        ``hashlines``, of AP ``bssid``, are what a launch cracks."""
         super().__init__()
         self._confirm_label = confirm_label
-        self._capture = capture
+        self._bssid = bssid
+        self._hashlines = list(hashlines)
         self._probed_ssid_passwords = len(ssid_passwords(probed_ssids))
         self._exhaustion: dict[str, Exhaustion] = {}
         self._wordlists: list[str] = list(self._settings().wordlists)
@@ -222,7 +209,7 @@ class WordlistConfigModal(ModalScreen[dict]):
 
     @work
     async def _show_counts_and_exhaustion(self) -> None:
-        counts = await asyncio.to_thread(_count_password_sources, self._capture)
+        counts = await asyncio.to_thread(_count_password_sources, self._hashlines)
         try:
             default = self.query_one("#default-passwords", Checkbox)
         except NoMatches:   # dismissed while counting
@@ -233,8 +220,9 @@ class WordlistConfigModal(ModalScreen[dict]):
                    else f"about {_ssid_variants_per_ssid():,} per SSID")
         self.query_one("#ap-ssid-passwords", Checkbox).label = (
             f"This AP's SSID variants [dim]({ap_ssid})[/dim]")
-        if self._capture is not None:
-            self._exhaustion = await asyncio.to_thread(_read_exhaustion, self._capture)
+        if self._bssid is not None and self._hashlines:
+            metas = await asyncio.to_thread(read_bssid_metas, self._bssid)
+            self._exhaustion = read_exhaustion(metas, [h.id for h in self._hashlines])
             self._mark_exhausted()
 
     def _mark_exhausted(self) -> None:

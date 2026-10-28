@@ -36,48 +36,24 @@ Open items:
 - Opt-**in** only: This uploads the user's captured traffic to a third party.
 - Dedupe: Don't re-submit a capture already submitted, and survive a restart.
 
-### Vault: PSKs in `.meta` (verified vs unverified)
+### Vault: keys in `.meta`, every cracked PSK saved
 
-An M1+M2-only EAPOL line ("challenge") holds whatever the client typed, so cracking it can yield a
-wrong password. A PMKID (computed by the AP) or an EAPOL line with M3/M4 ("authorized") can only
-crack to the AP's real PSK.
+The Vault pane already judges keys (CURRENT / NOT VERIFIED / STALE) and cracks only uncracked
+hashlines. Left:
 
-- Store recovered PSKs / PINs / WEP keys in the AP's `.meta`: key, date found, the hashline ids it
-  cracks, and verified (matches a PMKID or M3/M4 line, or the live `Verify` succeeded) vs unverified.
-  Keep reading the old `_*.txt` files forever; stop writing them.
-- After any crack, check the key against every hashline in the capture (1 PBKDF2 per ESSID) to set
-  verified. Today hashcat is killed at the first potfile line and CPU Crack stops at the first
-  matching line, so only the first PSK found is saved.
-- Crackers run only on uncracked hashlines (temp file); nothing left to crack -> cracker disabled.
+- Store recovered PSKs / PINs / WEP keys in the AP's `.meta` instead of `_*.txt` files. Keep
+  reading the old `_*.txt` files forever; stop writing them.
+- Save every PSK a job cracks. Hashcat is killed at the first potfile line and CPU Crack stops at
+  the first matching line, so a job over lines holding two different passwords saves only one.
 - Exhaustion (`.meta` `exhausted`) is only recorded when a wordlist runs to the end, so a crack
-  records nothing. Once every hashline is cracked, there's nothing left to try against them anyway;
-  record the wordlist that cracked them as exhausted only if the hint needs it.
-- Vault: one `CRACKED` entry per unique PSK, each labeled verified / unverified, with `Verify` in
-  the `.hc22000` pane. Old PSKs stay (passwords get reused).
-- Label captures with no PMKID and no M3/M4 "Unverified by AP (no M3/M4)", in the Vault and dim
-  after `HANDSHAKE CAPTURED` in the scanner / focus logs.
-
-### Auto-crack vs known PSKs (needs design)
-
-Auto-crack skips every new capture once an AP has a saved PSK (`Vault._auto_crack`, `has_psk`).
-Seen live: a wrong password (M1+M2) was cracked first, then the correct M2+M3 capture was never
-tried.
-
-- New capture for an AP with saved PSKs: try each saved PSK against the new hashlines first. A
-  match -> no crack. No match -> a new PSK is in the capture -> auto-crack and log it ("different
-  password").
-- M1+M2-only: still captured and logged as unverified; a non-match may just be a client's typo.
+  records nothing. Record the wordlist that cracked them as exhausted only if the hint needs it.
+- Dim "challenge (no M3/M4)" after `HANDSHAKE CAPTURED` in the scanner / focus logs.
 
 ### Show probed SSIDs
 
 The CPU Crack / Hashcat launch modals show `Probed SSIDs (152)` but never which ones. A small
 `Show` button beside it opens a modal with a read-only multi-line box of this session's probed
 SSIDs (not their variants), with `Copy` and a primary `Close`.
-
-### Vault: Delete AP
-
-- `D`: "Delete {ssid}? X captures, Y PINs, Z keys" (zero counts left out). Deletes every file for
-  the AP, including `.meta` and `wps_*.run`, instead of one confirmation per file.
 
 ------------
 

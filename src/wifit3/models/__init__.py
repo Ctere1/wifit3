@@ -2,13 +2,24 @@
 across the parser, attacks, persistence, and UI.
 """
 from .handshake import HandshakeMessage, Handshake
-from .access_point import WepStats, CaptureType, PersistedCapture, AccessPoint
+from .access_point import (
+    AP_RECOVERED_CAPTURE_TYPES,
+    PSK_CAPTURE_TYPES,
+    WPS_CAPTURE_TYPES,
+    AccessPoint,
+    CaptureType,
+    PersistedCapture,
+    WepStats,
+)
 from .client import Client
 from .device_id import DeviceID
 from .identity import ApIdentity, IdKey, IdSource
 from .jobs import JobAction, ToolCapability, ToolName, ToolStatus, JobState, ToolResult
 
 __all__ = [
+    "AP_RECOVERED_CAPTURE_TYPES",
+    "PSK_CAPTURE_TYPES",
+    "WPS_CAPTURE_TYPES",
     "ApIdentity",
     "HandshakeMessage",
     "Handshake",

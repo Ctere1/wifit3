@@ -28,7 +28,8 @@ from wifit3.ui.vault.global_tracker import GlobalJobTracker
 from ..capture_events import (
     CAPTURE_TOAST_TITLES, DECLOAK_METHOD_LABELS, CaptureEvent, CaptureEventDetector, CaptureKind,
 )
-from ..encryption_format import EncryptionSummary, wep_key_ascii
+from ..capture_log import saved_psk_markup
+from ..encryption_format import EncryptionSummary, wep_key_hex_and_ascii
 from wifit3.wlan.channels import band_ranges
 
 from .channel_filter import ChannelFilterDialog
@@ -445,7 +446,7 @@ class ScannerView(Screen):
             return
         elif ev.kind == CaptureKind.WEP_KEY:
             msg = (f"[bold green]✓ WEP KEY[/bold green] on "
-                   f"[bold cyan]{ap_label}[/bold cyan] = {escape(wep_key_ascii(ev.value or ''))}")
+                   f"[bold cyan]{ap_label}[/bold cyan] = {escape(wep_key_hex_and_ascii(ev.value or ''))}")
         elif ev.kind == CaptureKind.WPS_PIN:
             msg = (f"[bold green]✓ WPS PIN[/bold green] on "
                    f"[bold cyan]{ap_label}[/bold cyan] = {escape(ev.value or EMPTY_PIN_LABEL)}")
@@ -462,12 +463,13 @@ class ScannerView(Screen):
         if save_result is not None:
             verb = "saved" if save_result.was_new else "already saved as"
             self._write_log(Text.from_markup(treelog.leaf(
-                f"[dim]({verb} {escape(save_result.path.name)})[/dim]"), emoji=False))
+                f"[dim]({verb} {escape(save_result.path.name)})[/dim]"
+                f"{saved_psk_markup(save_result.matches_saved_psk)}"), emoji=False))
         title = CAPTURE_TOAST_TITLES.get(ev.kind)
         if title:
             name = ev.ssid or ev.bssid
             if ev.kind == CaptureKind.WEP_KEY:
-                self.notify(f"{name}: {wep_key_ascii(ev.value or '')}", title=title, timeout=6)
+                self.notify(f"{name}: {wep_key_hex_and_ascii(ev.value or '')}", title=title, timeout=6)
             else:
                 pair = ev.pair_label or ("M1" if ev.kind == CaptureKind.PMKID else None)
                 full_title = f"{title} ({pair})" if pair else title

@@ -39,7 +39,7 @@ def test_a_keypress_is_refused_when_nothing_is_reading_the_pipe(tmp_path):
 def test_spawn_gives_hashcat_a_named_pipe_beside_its_log(tmp_path, mocker):
     popen = mocker.patch("wifit3.vault.tools.hashcat_keypress.subprocess.Popen")
     popen.return_value.pid = 99
-    log = tmp_path / "job.hashcat.log"
+    log = tmp_path / "job.log"
 
     proc, pid, stdin_path = hashcat_keypress.spawn(["/bin/true"], cwd=str(tmp_path),
                                                    log_path=str(log))
@@ -59,7 +59,7 @@ def test_spawn_without_a_named_pipe_still_runs_hashcat(tmp_path, mocker):
     mocker.patch("wifit3.vault.tools.hashcat_keypress.os.mkfifo", side_effect=OSError(1, "nope"))
 
     proc, pid, stdin_path = hashcat_keypress.spawn(
-        ["/bin/true"], cwd=str(tmp_path), log_path=str(tmp_path / "job.hashcat.log"))
+        ["/bin/true"], cwd=str(tmp_path), log_path=str(tmp_path / "job.log"))
 
     assert (pid, stdin_path) == (99, "")
     assert popen.call_args.kwargs["stdin"] is subprocess.DEVNULL
@@ -69,7 +69,7 @@ def test_spawn_without_a_named_pipe_still_runs_hashcat(tmp_path, mocker):
 def test_spawn_returns_the_pid_hashcat_console_printed(tmp_path, mocker):
     run = mocker.patch("wifit3.vault.tools.hashcat_keypress.subprocess.run",
                        return_value=subprocess.CompletedProcess([], 0, stdout="777\n", stderr=""))
-    log = tmp_path / "job.hashcat.log"
+    log = tmp_path / "job.log"
 
     proc, pid, stdin_path = hashcat_keypress.spawn(["hashcat.exe", "-m", "22000"],
                                                    cwd=str(tmp_path), log_path=str(log))
@@ -90,7 +90,7 @@ def test_spawn_without_a_console_input_buffer_still_runs_hashcat(tmp_path, mocke
     popen.return_value.pid = 99
 
     proc, pid, stdin_path = hashcat_keypress.spawn(
-        ["hashcat.exe"], cwd=str(tmp_path), log_path=str(tmp_path / "job.hashcat.log"))
+        ["hashcat.exe"], cwd=str(tmp_path), log_path=str(tmp_path / "job.log"))
 
     assert (proc, pid, stdin_path) == (popen.return_value, 99, "")
     assert popen.call_args.kwargs["stdin"] is subprocess.DEVNULL

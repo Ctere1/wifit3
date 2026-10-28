@@ -7,11 +7,11 @@ hashcat_console = pytest.importorskip("wifit3.vault.tools.hashcat_console",
 def test_launch_prints_the_pid_of_the_process_it_started(mocker, capsys):
     launch = mocker.patch.object(hashcat_console, "launch", return_value=4242)
 
-    code = hashcat_console.main(["launch", "C:/hashcat", "C:/job.hashcat.log",
+    code = hashcat_console.main(["launch", "C:/hashcat", "C:/job.log",
                                  "hashcat.exe", "-m", "22000"])
 
     assert (code, capsys.readouterr().out.strip()) == (0, "4242")
-    assert launch.call_args.args == ("C:/hashcat", "C:/job.hashcat.log",
+    assert launch.call_args.args == ("C:/hashcat", "C:/job.log",
                                      ["hashcat.exe", "-m", "22000"])
 
 

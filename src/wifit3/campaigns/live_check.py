@@ -24,7 +24,7 @@ from wifit3.dot11.packet import EapolPacket, WepDataPacket
 from wifit3.dot11.wep.crypto import arp_request_plaintext, wep_encrypt
 from wifit3.dot11.wpa import KCK_LEN, build_eapol_m2, derive_pmk, derive_ptk, random_nonce
 from wifit3.dot11.wsc.assoc_ie import WPS_REQ_REGISTRAR, wps_assoc_ie
-from wifit3.models import AccessPoint, PersistedCapture, CaptureType
+from wifit3.models import WPS_CAPTURE_TYPES, AccessPoint, CaptureType, PersistedCapture
 
 if TYPE_CHECKING:
     from wifit3.wlan.array import WlanArray
@@ -117,7 +117,7 @@ class LiveKeyVerifier:
                 mode = target_type or capture.type
                 if mode in (CaptureType.WPA_PSK, CaptureType.WPS_PBC):
                     psk = capture.value or ""
-                    is_wps_psk = capture.type in (CaptureType.WPS_PIN, CaptureType.WPS_PBC)
+                    is_wps_psk = capture.type in WPS_CAPTURE_TYPES
                     return await self._verify_wpa_psk(iface, array, ap, psk, our_mac, our_mac_str, is_wps=is_wps_psk)
                 if mode == CaptureType.WPS_PIN:
                     if capture.pin is None:

@@ -1,47 +1,59 @@
-from datetime import datetime
+import time
 
-from wifit3.ui.screens.vault_item import relative_time
+from wifit3.crack.hc22000_format import hashline_id, parse_hc22000
+from wifit3.models import CaptureType, PersistedCapture
+from wifit3.persist.ap_state import ApState, DatedHashline, Key, PasswordStatus
+from wifit3.ui.screens.vault_item import _KeyRow, date_text, hashline_groups, key_text
 
-
-def test_relative_time_singular_minute():
-    now = int(datetime.now().timestamp())
-    assert relative_time(now - 60) == "1 minute ago"
-
-
-def test_relative_time_plural_minutes():
-    now = int(datetime.now().timestamp())
-    assert relative_time(now - 300) == "5 minutes ago"
+_LINE = "WPA*02*{mic}*aabbccddeeff*{sta}*486f6d65*" + "a" * 64 + "*" + "00" * 99 + "*{pair}"
 
 
-def test_capture_panel_cancel_verification():
-    from unittest.mock import MagicMock
-    from wifit3.ui.screens.vault_item import _CapturePanel
-    from wifit3.models import CaptureType, PersistedCapture
-
-    cap = PersistedCapture(
-        type=CaptureType.WPA_PSK,
-        timestamp=1000,
-        path="/tmp/test.cap",
-        bssid="00:11:22:33:44:55",
-        value="secret",
-    )
-    panel = _CapturePanel("WPA PSKs", [cap])
-    mock_task = MagicMock()
-    mock_task.done.return_value = False
-    panel._verify_task = mock_task
-
-    panel.cancel_verification()
-    mock_task.cancel.assert_called_once()
-    assert panel._verify_task is None
+def _hashline(captured: int, sta: str = "112233445566", pair: str = "02") -> DatedHashline:
+    raw = _LINE.format(mic=f"{captured:032x}", sta=sta, pair=pair)
+    return DatedHashline(hashline_id(raw), raw, parse_hc22000(raw), (captured,))
 
 
-def test_vault_item_view_cancel_verification():
-    from unittest.mock import MagicMock
-    from wifit3.ui.screens.vault_item import VaultItemView
+def _key(capture_type: CaptureType, value: str) -> Key:
+    capture = PersistedCapture(type=CaptureType.WPA_PSK, timestamp=1, path="x.txt",
+                               bssid="aa:bb:cc:dd:ee:ff", value=value)
+    return Key(capture_type, value, (capture,), frozenset(), ())
 
-    view = VaultItemView()
-    mock_panel = MagicMock()
-    view.query = MagicMock(return_value=[mock_panel])
 
-    view.cancel_verification()
-    mock_panel.cancel_verification.assert_called_once()
+def test_date_text_says_today_and_drops_the_time_for_another_year():
+    now = int(time.time())
+    assert date_text(now).startswith("today ")
+    assert date_text(None) == "no date"
+    assert date_text(now - 2 * 366 * 86400)[-4:].isdigit()
+
+
+def test_key_text_shows_a_printable_wep_key_as_ascii_and_an_empty_pin_by_label():
+    assert key_text(_key(CaptureType.WEP, "6162636465")) == "abcde"
+    assert key_text(_key(CaptureType.WEP, "00ff00ff00")) == "00ff00ff00"
+    assert key_text(_key(CaptureType.WPS_PIN, "")) != ""
+    assert key_text(_key(CaptureType.WPA_PSK, "hunter22")) == "hunter22"
+
+
+def test_hashline_groups_join_runs_from_one_minute_pair_and_client():
+    base = 1_700_000_040
+    lines = (_hashline(base + 10), _hashline(base + 5), _hashline(base, sta="112233445577"),
+             _hashline(base, pair="00"))
+    assert [len(group) for group in hashline_groups(lines)] == [2, 1, 1]
+
+
+def _row(key: Key, state: ApState) -> _KeyRow:
+    return _KeyRow(key, state, show_client=False, show_ssid=False, expanded=False, verifying=None)
+
+
+def test_key_row_takes_its_keys_status_and_tags_only_a_not_verified_psk_unverified():
+    hashlines = (_hashline(1_700_000_000),)
+    current = Key(CaptureType.WPA_PSK, "hunter22", (PersistedCapture(type=CaptureType.WPS_PBC, timestamp=1,
+                                                                      path="x.txt", bssid="aa:bb:cc:dd:ee:ff",
+                                                                      value="hunter22"),), frozenset(), ())
+    guess = _key(CaptureType.WPA_PSK, "guess")
+    state = ApState("aa:bb:cc:dd:ee:ff", (), hashlines, (current, guess), PasswordStatus.CURRENT, current,
+                    {current.id: PasswordStatus.CURRENT, guess.id: PasswordStatus.NOT_VERIFIED}, None, hashlines, (), ())
+    current_row, guess_row = _row(current, state), _row(guess, state)
+
+    assert current_row.has_class("-current") and guess_row.has_class("-not-verified")
+    assert "unverified" not in current_row._summary_markup()
+    assert "unverified" in guess_row._summary_markup()

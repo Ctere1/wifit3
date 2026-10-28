@@ -4,15 +4,18 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from rich.markup import escape
 from rich.text import Text
-from textual import on
+from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widgets import DataTable, Input, Tabs, Tab
 from textual.widget import Widget
+from textual.worker import get_current_worker
 
-from wifit3.models import CaptureType, PersistedCapture
+from wifit3.models import PSK_CAPTURE_TYPES, CaptureType, PersistedCapture
+from wifit3.persist.ap_state import PasswordStatus
 from wifit3.persist.meta import meta_path, read_meta
+from wifit3.ui.colors import PASSWORD_MISMATCH_COLOR
 from textual.message import Message
 
 
@@ -87,7 +90,7 @@ class VaultTable(Widget):
         super().__init__(id=id)
         self._aps: Dict[str, Tuple[Optional[str], List[PersistedCapture]]] = {}
         self._nicknames: Dict[str, str] = {}
-        self._nickname_revision = -1
+        self._nicknames_stale = True
         self._current_tab = "tab-all"
         self._search_query = ""
         self._is_reloading = False
@@ -112,18 +115,18 @@ class VaultTable(Widget):
                 for bssid, caps in captures_by_bssid.items()}
 
     def reload_table(self) -> None:
-        if self._is_reloading:
+        if self._is_reloading or not self.is_attached:
             return
         self._is_reloading = True
         try:
             self._aps = self._group_aps()
-            if self._nickname_revision != self.app.vault.revision:
+            if self._nicknames_stale:
                 self._nicknames = {}
                 for bssid, (ssid, _) in self._aps.items():
                     nickname = read_meta(meta_path(ssid, bssid)).get("nickname")
                     if isinstance(nickname, str) and nickname:
                         self._nicknames[bssid] = nickname
-                self._nickname_revision = self.app.vault.revision
+                self._nicknames_stale = False
             table = self.query_one("#vault-aps", DataTable)
             selected_bssid = self._current_row_key(table)
             table.clear()
@@ -136,7 +139,7 @@ class VaultTable(Widget):
             has_pmk = False
             
             for _, caps in self._aps.values():
-                if any(c.type in (CaptureType.WPS_PIN, CaptureType.WPS_PBC, CaptureType.WPA_PSK) and c.value for c in caps):
+                if any(c.type in PSK_CAPTURE_TYPES and c.value for c in caps):
                     has_psk = True
                 if any(c.type == CaptureType.WEP for c in caps):
                     has_wep = True
@@ -180,6 +183,7 @@ class VaultTable(Widget):
             rows = sorted(self._aps.items(), key=lambda kv: ((kv[1][0] or "").lower(), kv[0]))
             
             # Populate current tab
+            unjudged_psk_bssids: List[str] = []
             for bssid, (ssid, caps) in rows:
                 if self._search_query and not matches_search(
                         self._search_query,
@@ -187,7 +191,7 @@ class VaultTable(Widget):
                          *(Path(c.path).name for c in caps)]):
                     continue
                 # Check filter
-                if self._current_tab == "tab-psk" and not any(c.type in (CaptureType.WPS_PIN, CaptureType.WPS_PBC, CaptureType.WPA_PSK) and c.value for c in caps): continue
+                if self._current_tab == "tab-psk" and not any(c.type in PSK_CAPTURE_TYPES and c.value for c in caps): continue
                 if self._current_tab == "tab-wep" and not any(c.type == CaptureType.WEP for c in caps): continue
                 if self._current_tab == "tab-pin" and not any(c.type == CaptureType.WPS_PIN and c.pin is not None for c in caps): continue
                 if self._current_tab == "tab-hs" and not any(c.type == CaptureType.HS for c in caps): continue
@@ -198,8 +202,12 @@ class VaultTable(Widget):
                 bssid_suffix = f" [dim]{bssid}[/dim]" if ssid_counts.get(ssid or "", 0) > 1 else ""
                 
                 badges = []
-                if any(c.type in (CaptureType.WPS_PIN, CaptureType.WPS_PBC, CaptureType.WPA_PSK) and c.value for c in caps):
-                    badges.append("[bold green]✓PSK[/]")
+                if any(c.type in PSK_CAPTURE_TYPES and c.value for c in caps):
+                    state = self.app.vault.cached_ap_state(bssid)
+                    if state is None:
+                        unjudged_psk_bssids.append(bssid)
+                    stale = state is not None and state.status is PasswordStatus.STALE
+                    badges.append(f"[bold {PASSWORD_MISMATCH_COLOR if stale else 'green'}]✓PSK[/]")
                 if any(c.type == CaptureType.WPS_PIN and c.pin is not None for c in caps):
                     badges.append("[bold green]✓PIN[/]")
                 if any(c.type == CaptureType.WEP for c in caps):
@@ -222,8 +230,20 @@ class VaultTable(Widget):
 
             self.border_title = f"VAULT ({len(self._aps)} APs)"
             self.post_message(self.TableReloaded())
+            if unjudged_psk_bssids:
+                self._judge_psks(unjudged_psk_bssids)
         finally:
             self._is_reloading = False
+
+    @work(thread=True, exclusive=True, group="judge-psks")
+    def _judge_psks(self, bssids: List[str]) -> None:
+        worker = get_current_worker()
+        for bssid in bssids:
+            if worker.is_cancelled:
+                return
+            self.app.vault.ap_state(bssid)
+        if not worker.is_cancelled:
+            self.app.call_from_thread(self.reload_table)
 
     def display_name(self, bssid: str, ssid: Optional[str]) -> str:
         """``nickname (SSID)`` when the AP has a nickname, else the SSID."""
@@ -233,7 +253,7 @@ class VaultTable(Widget):
 
     def reload_nicknames(self) -> None:
         """Re-read every nickname from its .meta, then reload the rows."""
-        self._nickname_revision = -1
+        self._nicknames_stale = True
         self.reload_table()
 
     def _current_row_key(self, table: DataTable) -> Optional[str]:
