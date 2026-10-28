@@ -16,6 +16,7 @@ from wifit3.ui.vault.modals.cpu_crack import CpuCrackConfigModal
 from wifit3.ui.vault.modals.hashcat import HashcatConfigModal, _default_hashcat_path
 from wifit3.ui.vault.modals.wordlists import _RemoveButton, _UseCheckbox, _exhausted_tooltip
 from wifit3.vault.exhaustion import Exhaustion, hashline_id, wordlist_identity
+from tests.ui.wait_until import wait_until
 
 
 @pytest.fixture(autouse=True)
@@ -410,9 +411,9 @@ async def test_exhausted_rows_start_unchecked_and_one_click_restores_them(tmp_pa
         await pilot.pause()
         exhausted_box, fresh_box = modal.query(_UseCheckbox)
         assert (exhausted_box.value, fresh_box.value) == (False, True)
-        assert modal._launch_config()["wordlists"] == [str(fresh_list)]
+        await wait_until(pilot, lambda: modal._launch_config()["wordlists"] == [str(fresh_list)])
         exhausted_box.value = True
-        await pilot.pause()
+        await wait_until(pilot, lambda: len(modal._launch_config()["wordlists"]) == 2)
         await modal._show_wordlists()
         assert modal.query(_UseCheckbox).first().value is True
         assert modal._launch_config()["wordlists"] == [str(exhausted_list), str(fresh_list)]
