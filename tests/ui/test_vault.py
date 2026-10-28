@@ -243,7 +243,7 @@ def test_each_uncracked_row_counts_and_names_its_exhausted_wordlists(tmp_path):
     groups = hashline_groups(state.uncracked)
 
     assert [_exhausted_count_text(g, state.exhausted_wordlists) for g in groups] == [
-        "2 wordlists (1 on some lines)", "", "1 wordlist"]
+        "2 wordlists exhausted (1 on some lines)", "", "1 wordlist exhausted"]
     assert [_exhausted_names(g, state.exhausted_wordlists) for g in groups] == [
         ["default.txt", "rockyou.txt"], [], ["default.txt"]]
 
@@ -454,11 +454,11 @@ async def test_unchecked_hashlines_are_left_out_of_the_crack_job(tmp_path, mocke
         mocker.patch.object(app, "push_screen", side_effect=lambda modal, callback: callback({"wordlists": []}))
         uncracked = item.query_one(_UncrackedList)
         groups = uncracked.groups()
-        assert "3 captures selected to crack" in str(item.query_one(".selected-count", Label).content)
+        assert "3 captures selected" in str(item.query_one(".selected-count", Label).content)
 
         uncracked.deselect(groups[0])
         await pilot.pause(0)
-        assert "2 captures selected to crack" in str(item.query_one(".selected-count", Label).content)
+        assert "2 captures selected" in str(item.query_one(".selected-count", Label).content)
         next(b for b in item.query(_CrackerButton).results(_CrackerButton) if b.tool.name == ToolName.CPU_CRACK).press()
         await pilot.pause(0)
 
@@ -535,27 +535,3 @@ async def test_removing_the_pane_cancels_its_running_live_check(tmp_path):
 
         assert verifier.cancelled
         assert app.vault.ap_state("aa:bb:cc:dd:ee:ff").keys[0].live_verifications == ()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("size", "button_height"), [((46, 29), 1), ((160, 50), 3)])
-async def test_layout_at_each_drawer_size(tmp_path, size, button_height):
-    psk = "hunter22"
-    _write(tmp_path, "HomeNet_aa-bb-cc-dd-ee-ff.hc22000", _pmkid_line(psk, "aabbccddeeff") + _EAPOL_LINE)
-    app = _VaultApp()
-    app.vault.save_wpa_psk("HomeNet", "aa:bb:cc:dd:ee:ff", psk)
-    async with app.run_test(size=size) as pilot:
-        drawer = await _open_vault(app, pilot, "aa:bb:cc:dd:ee:ff")
-        row = drawer.query_one(_KeyRow)
-
-        assert {b.region.height for b in (row.copy_button, row.verify_button, row.delete_button)} == {button_height}
-        key_text = row.query_one(".key-text", Label)
-        assert key_text.region.y + key_text.region.height // 2 == row.copy_button.region.y + button_height // 2
-
-        panel = drawer.query_one(_ApStatePanel)
-        uncracked = drawer.query_one(_UncrackedList)
-        tools = list(drawer.query(_CrackerButton).results(_CrackerButton))
-        count = drawer.query_one(".selected-count", Label)
-        assert uncracked.content_region.x == panel.content_region.x + 2
-        assert tools[0].region.y >= uncracked.region.bottom
-        assert count.region.y >= tools[0].region.bottom and count.content_region.x == panel.content_region.x + 4

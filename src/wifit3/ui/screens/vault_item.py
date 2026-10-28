@@ -12,7 +12,7 @@ from textual import on, work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalGroup, VerticalScroll
 from textual.content import Content
-from textual.events import Resize
+from textual.events import MouseMove, Resize
 from textual.message import Message
 from textual.reactive import reactive, var
 from textual.widget import Widget
@@ -51,8 +51,8 @@ _KEY_CHIP_STYLE = {
     PasswordStatus.NOT_VERIFIED: "black bold on $warning",
     PasswordStatus.STALE: f"black bold on {PASSWORD_MISMATCH_COLOR}",
 }
-_AUTHORIZED_TOOLTIP = "PMKID or M3/M4: the AP accepted this password"
-_CHALLENGE_TOOLTIP = "No M3/M4: could be a wrong password"
+_AUTHORIZED_TOOLTIP = "[$text-success]authorized:[/] PMKID or M3/M4 (the AP accepted this password)"
+_CHALLENGE_TOOLTIP = "[$text-warning]challenge:[/] No M3/M4 (could be a wrong password)"
 _EXPAND_LABEL, _COLLAPSE_LABEL = "▶", "▼"
 _EXPAND_TOOLTIP, _COLLAPSE_TOOLTIP = "Show captures and verifications", "Hide captures and verifications"
 _VERIFY_TOOLTIP = "Connect to the live AP and verify this key"
@@ -75,7 +75,6 @@ _TOGGLE_WIDTH = 3
 _BADGE_WIDTH = max(len(kind.badge) for kind in _KEY_KINDS.values())
 _VALUE_COLUMN = _TOGGLE_WIDTH + _BADGE_WIDTH + 2       # a space after the badge, then the chip's own space
 _LIST_INDENT = 2                                        # the UNCRACKED rows under their header
-_CHECKBOX_WIDTH = 4                                     # SelectionList's ``▐X▌ ``
 
 _VerifyingKey = tuple[str, tuple[CaptureType, str]]    # BSSID, Key.id
 _HashlineGroup = tuple[DatedHashline, ...]
@@ -141,7 +140,7 @@ def _no_crackable_text(files: tuple[PersistedCapture, ...]) -> str:
 
 
 def _selected_count_text(count: int) -> str:
-    return f"{count} capture{'' if count == 1 else 's'} selected to crack"
+    return f"{count} capture{'' if count == 1 else 's'} selected"
 
 
 def _wordlists_text(count: int) -> str:
@@ -150,13 +149,13 @@ def _wordlists_text(count: int) -> str:
 
 def _exhausted_count_text(group: _HashlineGroup,
                           exhausted: Mapping[str, frozenset[ExhaustedWordlist]]) -> str:
-    """``2 wordlists (1 on some lines)``: the wordlists that ran out on the group's lines."""
+    """``2 wordlists exhausted (1 on some lines)``: the wordlists that ran out on the group's lines."""
     per_line = [exhausted.get(h.id, frozenset()) for h in group]
     on_any = frozenset.union(*per_line)
     on_some = on_any - frozenset.intersection(*per_line)
     if not on_any:
         return ""
-    return _wordlists_text(len(on_any)) + (f" ({len(on_some)} on some lines)" if on_some else "")
+    return f"{_wordlists_text(len(on_any))} exhausted" + (f" ({len(on_some)} on some lines)" if on_some else "")
 
 
 def _exhausted_names(group: _HashlineGroup, exhausted: Mapping[str, frozenset[ExhaustedWordlist]]) -> list[str]:
@@ -166,6 +165,14 @@ def _exhausted_names(group: _HashlineGroup, exhausted: Mapping[str, frozenset[Ex
 
 def _verdict_tooltip(hashline: DatedHashline) -> str:
     return _AUTHORIZED_TOOLTIP if hashline.line.authorized else _CHALLENGE_TOOLTIP
+
+
+def _hashline_tooltip(group: _HashlineGroup, exhausted: Mapping[str, frozenset[ExhaustedWordlist]]) -> str:
+    tooltip = _verdict_tooltip(group[0])
+    names = _exhausted_names(group, exhausted)
+    if names:
+        tooltip += f"\n\n[$text-warning]Exhausted {_wordlists_text(len(names))}:[/]\n" + "\n".join(f"- {escape(n)}" for n in names)
+    return tooltip
 
 
 def _row_content(epoch: Optional[int], pair: str, client: str, verdict: tuple[str, str], show_client: bool,
@@ -369,6 +376,17 @@ class _CrackerButton(Button):
 class _UncrackedList(SelectionList[_HashlineGroup]):
     """The uncracked hashline groups, each ticked to crack or not."""
 
+    def __init__(self, *selections: Selection[_HashlineGroup],
+                 exhausted: Mapping[str, frozenset[ExhaustedWordlist]], classes: str) -> None:
+        super().__init__(*selections, classes=classes)
+        self._exhausted = exhausted
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        index = event.style.meta.get("option")
+        tooltip = None if index is None else _hashline_tooltip(self.get_option_at_index(index).value, self._exhausted)
+        if tooltip != self.tooltip:
+            self.tooltip = tooltip
+
     def groups(self) -> list[_HashlineGroup]:
         return [self.get_option_at_index(i).value for i in range(self.option_count)]
 
@@ -392,11 +410,8 @@ class _ApStatePanel(VerticalGroup):
     _ApStatePanel .ssid {{ width: 1fr; text-wrap: nowrap; text-overflow: ellipsis; }}
     _ApStatePanel .dates {{ width: auto; color: $text-muted; margin-left: 1; }}
     _ApStatePanel .none-yet {{ color: $text-muted; padding-left: 2; }}
-    _ApStatePanel .tools {{ height: auto; }}
+    _ApStatePanel .tools {{ height: auto; align-horizontal: center; }}
     _ApStatePanel .selected-count {{ color: $text-muted; padding-left: {2 * _LIST_INDENT}; }}
-    _ApStatePanel .exhausted-names {{
-        padding-left: {_LIST_INDENT + _CHECKBOX_WIDTH}; text-wrap: nowrap; text-overflow: ellipsis;
-    }}
     _ApStatePanel .uncracked {{
         height: auto; max-height: 8; margin-top: 1; padding: 0 0 0 {_LIST_INDENT}; border: none;
         background: transparent; scrollbar-size-vertical: 1; text-wrap: nowrap; text-overflow: ellipsis;
@@ -421,7 +436,6 @@ class _ApStatePanel(VerticalGroup):
 
     add_key_button: Button
     _selected_count_label: Label
-    _exhausted_names_line: Optional[Static] = None
     _uncracked_list: Optional[_UncrackedList] = None
 
     def __init__(self, state: ApState, expanded_key_ids: frozenset[tuple[CaptureType, str]],
@@ -502,7 +516,6 @@ class _ApStatePanel(VerticalGroup):
         if state.handshake_and_pmkid_files and not state.hashlines:
             yield Label(_no_crackable_text(state.handshake_and_pmkid_files), classes="none-yet")
         self._uncracked_list = None
-        self._exhausted_names_line = None
         if state.uncracked:
             yield Rule(classes="uncracked-rule")
             yield from self._compose_uncracked(show_client, show_ssid)
@@ -545,20 +558,17 @@ class _ApStatePanel(VerticalGroup):
         self._uncracked_list = _UncrackedList(
             *(Selection(_hashline_prompt(group, show_client, show_ssid, count, exhausted_width), group, is_ticked)
               for group, count, is_ticked in zip(groups, exhausted_counts, ticked)),
-            classes="uncracked")
+            exhausted=exhausted, classes="uncracked")
         yield self._uncracked_list
-        if exhausted:
-            self._exhausted_names_line = Static("", classes="exhausted-names")
-            yield self._exhausted_names_line
         selected = [h.line for group, is_ticked in zip(groups, ticked) if is_ticked for h in group]
+        self._selected_count_label = Label(_selected_count_text(len(selected)), classes="selected-count")
+        yield self._selected_count_label
         capture = state.hashline_capture
         with Horizontal(classes="tools"):
             if capture is not None:
                 for tool in self.app.vault.manager.tools.values():
                     if tool.can_crack([h.line for h in uncracked]):
                         yield _CrackerButton(tool, capture, disabled=not tool.can_crack(selected))
-        self._selected_count_label = Label(_selected_count_text(len(selected)), classes="selected-count")
-        yield self._selected_count_label
 
     def _selected_hashlines(self) -> list[DatedHashline]:
         if self._uncracked_list is None:
@@ -573,19 +583,6 @@ class _ApStatePanel(VerticalGroup):
         self._selected_count_label.update(_selected_count_text(len(selected)))
         for button in self.query(_CrackerButton).results(_CrackerButton):
             button.disabled = not button.tool.can_crack(selected)
-
-    @on(SelectionList.SelectionHighlighted)
-    def _hashline_highlighted(self, event: SelectionList.SelectionHighlighted) -> None:
-        if event.selection_list is not self._uncracked_list:
-            return
-        event.selection_list.tooltip = _verdict_tooltip(event.selection.value[0])
-        if self._exhausted_names_line is None:
-            return
-        names = _exhausted_names(event.selection.value, self._state.exhausted_wordlists)
-        self._exhausted_names_line.update(
-            Content.assemble(("exhausted: ", "$foreground-muted"),
-                             Content(", ").join(Content.styled(n, "italic $text-accent") for n in names))
-            if names else "")
 
     @on(Button.Pressed)
     def _button_pressed(self, event: Button.Pressed) -> None:
