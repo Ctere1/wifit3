@@ -94,15 +94,15 @@ live in each chip's `<CHIP>.md` (linked under its table).
 
 | Capability | Status | Date | Notes |
 |---|:--:|---|---|
-| **Grade** | **90% (A)** | 2026-07-25 | Kernel-parity RX + full 2.4 attack suite. |
-| RX | ✅ | 2026-07-09 | (DKMS) beacon rate matches Linux 7.7 vs 7.29/s, breadth 102 vs 91 (≥ linux); RSSI −0.6 dB. |
-| Port | ✅ | 2026-07-09 | (DKMS) Matches Linux 98% total beacons (6570 vs 6693), breadth 102 ≥ 91, RSSI −0.6 dB. |
-| Handshake | ✅ | 2026-07-25 | Deauth → 4-way. |
-| PMKID | ✅ | 2026-07-25 | Active extract. |
-| WEP | ✅ | 2026-07-25 | ChopChop + ARP replay ~170 IVs/s. |
-| WPS | ✅ | 2026-07-25 | PIN → M7 (5/5); PBC (~20 EAPOL). |
-| ACKs | ✅ | 2026-07-25 | Auto-ACK forged MAC via active monitor (Addr2-keyed). |
-| Stress | ✅ | 2026-07-30 | 30-min soak, flat (trend 0.97); mainline degrades/collapses. |
+| **Grade** | **88% (A)** | 2026-10-27 | Linux-parity RX + full 2.4 attack suite. |
+| RX | ✅ | 2026-10-27 | 7.1 bcn/s = linux; breadth 94 vs 95; RSSI 0.0 dB. |
+| Port | ✅ | 2026-10-27 | Byte-exact vs 4 vendor cold boots (A- and I-cut). |
+| Handshake | ✅ | 2026-10-27 | Deauth → 4-way. |
+| PMKID | ✅ | 2026-10-27 | Passive + active. |
+| WEP | ✅ | 2026-10-27 | ChopChop + ARP replay ~150 IVs/s. |
+| WPS | ✅ | 2026-10-27 | PIN; PBC. |
+| ACKs | ✅ | 2026-10-27 | Auto-ACK forged MAC via active monitor (Addr2-keyed). |
+| Stress | ✅ | 2026-10-27 | 30-min soak, flat (trend 1.00). |
 
 → [RTL8188EUS_DKMS.md](../src/wifit3/chips/rtl8188eus_dkms/RTL8188EUS_DKMS.md) (default) · [RTL8188EUS.md](../src/wifit3/chips/rtl8188eus/RTL8188EUS.md) (mainline)
 
