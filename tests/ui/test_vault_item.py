@@ -44,7 +44,7 @@ def _row(key: Key, state: ApState) -> _KeyRow:
     return _KeyRow(key, state, show_client=False, show_ssid=False, expanded=False, verifying=None)
 
 
-def test_key_row_takes_its_keys_status_and_tags_only_a_not_verified_psk_unverified():
+def test_key_row_takes_its_keys_status_and_says_why():
     hashlines = (_hashline(1_700_000_000),)
     current = Key(CaptureType.WPA_PSK, "hunter22", (PersistedCapture(type=CaptureType.WPS_PBC, timestamp=1,
                                                                       path="x.txt", bssid="aa:bb:cc:dd:ee:ff",
@@ -55,5 +55,5 @@ def test_key_row_takes_its_keys_status_and_tags_only_a_not_verified_psk_unverifi
     current_row, guess_row = _row(current, state), _row(guess, state)
 
     assert current_row.has_class("-current") and guess_row.has_class("-not-verified")
-    assert "unverified" not in current_row._summary_markup()
-    assert "unverified" in guess_row._summary_markup()
+    assert "(0/1 captures, verified)" in current_row._summary_markup()
+    assert "(0/1 captures, not verified yet)" in guess_row._summary_markup()

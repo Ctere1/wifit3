@@ -86,6 +86,16 @@ def key_description(key: Key) -> str:
     return f"{_KEY_KINDS[key.type].name} {key_text(key)}"
 
 
+def _status_reason(key: Key, status: PasswordStatus) -> str:
+    if status is PasswordStatus.CURRENT:
+        return "verified"
+    if status is PasswordStatus.STALE:
+        return "stale"
+    if key.manual_capture_names:
+        return "manually added, not verified yet"
+    return "not verified yet"
+
+
 def key_text(key: Key) -> str:
     """The key as the user types it: a WEP key in ASCII when printable, else hex."""
     if key.type == CaptureType.WEP:
@@ -263,7 +273,9 @@ class _KeyRow(VerticalGroup):
     def compose(self) -> ComposeResult:
         with Horizontal(classes="key-line"):
             yield self.toggle_button if self._has_history else Label("", classes="no-toggle")
-            yield Label(Content.from_markup(self._summary_markup()), classes="key-text")
+            summary = Label(Content.from_markup(self._summary_markup()), classes="key-text")
+            summary.tooltip = self._details()
+            yield summary
             yield self.copy_button
             yield self.verify_button
             yield self.delete_button
@@ -287,12 +299,14 @@ class _KeyRow(VerticalGroup):
         kind = _KEY_KINDS[key.type]
         markup = (f"[bold {kind.badge_color}]{kind.badge.ljust(_BADGE_WIDTH)}[/] "
                   f"[{_KEY_CHIP_STYLE[self.status]}] {escape(key_text(key))} [/]")
+        return f"{markup} [dim]({self._details()})[/dim]"
+
+    def _details(self) -> str:
+        details = [_status_reason(self.key, self.status)]
         total = len(self._state.hashlines)
-        if key.type == CaptureType.WPA_PSK and total:
-            markup += f" {_captures_count_markup(len(key.hashline_ids), total)}"
-            if self.status is PasswordStatus.NOT_VERIFIED:
-                markup += " [$text-warning]unverified[/]"
-        return markup
+        if self.key.type == CaptureType.WPA_PSK and total:
+            details.insert(0, f"{len(self.key.hashline_ids)}/{total} captures")
+        return ", ".join(details)
 
     def _show_expansion(self, expanded: bool) -> None:
         self.set_class(expanded, "-expanded")
