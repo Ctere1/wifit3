@@ -282,6 +282,19 @@ def _psk_chip(psk: Optional[str], state: ApState) -> Optional[str]:
     return f"[black bold on green] ✓ PSK: {escape(psk)} [/black bold on green]"
 
 
+def _wep_chip(recovered: Optional[bytes], state: ApState) -> Optional[str]:
+    key = state.status_key
+    if recovered is None and (key is None or key.type != CaptureType.WEP):
+        return None
+    text = escape(wep_key_hex_and_ascii(recovered.hex() if recovered is not None else key.value))
+    if recovered is not None or state.status is PasswordStatus.CURRENT:
+        return f"[black bold on green] ✓ WEP key: {text} [/black bold on green]"
+    if state.status is PasswordStatus.NOT_VERIFIED:
+        return f"[black bold on yellow] WEP key: {text} [/black bold on yellow] [bold yellow]NOT VERIFIED[/bold yellow]"
+    return (f"[black bold on {PASSWORD_MISMATCH_COLOR}] WEP key: {text} [/] "
+            f"[bold {PASSWORD_MISMATCH_COLOR}]{state.status.value}[/]")
+
+
 def status_headlines(ap: AccessPoint, array: WlanArray, vault: Vault) -> list[str]:
     """The Campaign headline: up to 3 markup lines of current activity (reads the active campaign)."""
     active = Campaign.active
@@ -310,13 +323,11 @@ def status_headlines(ap: AccessPoint, array: WlanArray, vault: Vault) -> list[st
     unsupported = bool(ap.akm_suites) and psk_capture_supported(ap) is False
 
     # 4. Recovered credentials, when idle: WEP key / PSK (WPS- or handshake-derived).
-    wep_key_hex = (ap.wep_key.hex() if ap.wep_key is not None
-                   else next((c.value for c in vault.persisted(ap.bssid)
-                              if c.type == CaptureType.WEP and c.value), None))
-    if wep_key_hex:
-        return [f"[black bold on green] ✓ WEP key: {escape(wep_key_hex_and_ascii(wep_key_hex))} [/black bold on green]",
-                "[dim]● Listening for WEP IVs[/dim]"]
-    psk_chip = _psk_chip(vault.known_psk(ap), vault.ap_state(ap.bssid))
+    state = vault.ap_state(ap.bssid)
+    wep_chip = _wep_chip(ap.wep_key, state)
+    if wep_chip:
+        return [wep_chip, "[dim]● Listening for WEP IVs[/dim]"]
+    psk_chip = _psk_chip(vault.known_psk(ap), state)
     if psk_chip:
         tail = ("[dim]● Not yet supported: no crack path for this AKM[/dim]"
                 if unsupported else "[dim]● Listening for handshake + PMKID[/dim]")
