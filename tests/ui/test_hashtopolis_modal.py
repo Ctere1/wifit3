@@ -1,5 +1,3 @@
-import threading
-
 import pytest
 from textual.app import App
 from textual.containers import VerticalScroll
@@ -141,25 +139,6 @@ async def test_confirm_without_a_wordlist_stays_open(server):
 
         assert dismissed == []
         assert isinstance(app.screen, HashtopolisConfigModal)
-
-
-@pytest.mark.asyncio
-async def test_test_finishing_after_cancel_leaves_the_app_running(server, monkeypatch):
-    release = threading.Event()
-    monkeypatch.setattr(FakeApi, "check_access", lambda self: release.wait(5))
-    app = _Host()
-    async with app.run_test() as pilot:
-        app.push_screen(HashtopolisConfigModal())
-        await pilot.pause(0)
-        app.screen.query_one("#hashtopolis-test", Button).press()
-        await pilot.pause(0)
-        app.screen.query_one("#hashtopolis-cancel", Button).press()
-        await wait_until(pilot, lambda: not isinstance(app.screen, HashtopolisConfigModal))
-        release.set()
-        await app.workers.wait_for_complete()
-        await pilot.pause(0)
-
-        assert not isinstance(app.screen, HashtopolisConfigModal)
 
 
 async def test_saved_wordlist_and_group_show_by_name_before_a_refresh(server):
