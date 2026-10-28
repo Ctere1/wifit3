@@ -219,7 +219,7 @@ class ScannerView(Screen):
         rows: List[str] = []
         summary = self.app.vault.summary()
         if summary:
-            rows.append(f"Existing [bold]{Config.captures_dir}/[/bold]: {summary}")
+            rows.append(f"Existing [bold]{Path(Config.captures_dir).as_posix()}/[/bold]: {summary}")
         if array:
             device_line = device_scan_summary(array.members)
             if device_line:

@@ -54,6 +54,7 @@ def credential_error(ssid: str, bssid: str, kind: CaptureType, value: str) -> Op
 class AddCredentialModal(ModalScreen[Optional[ManualCredential]]):
     """Type in a WPA PSK, WPS PIN or WEP key for an AP; dismisses with it, or None."""
 
+    AUTO_FOCUS = "#value"
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
     DEFAULT_CSS = """
@@ -62,7 +63,7 @@ class AddCredentialModal(ModalScreen[Optional[ManualCredential]]):
         width: 58; height: auto; max-height: 90%;
         border: thick $primary; background: $surface; padding: 1 2;
     }
-    AddCredentialModal #title { width: 100%; text-align: center; text-style: bold; }
+    AddCredentialModal #title { width: 100%; text-align: center; text-style: bold; color: $accent; }
     AddCredentialModal .field-label { margin-top: 1; color: $text-muted; }
     AddCredentialModal #status { height: auto; min-height: 1; color: $error; margin-top: 1; }
     AddCredentialModal #buttons { height: auto; align: right middle; }

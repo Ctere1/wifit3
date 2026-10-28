@@ -18,7 +18,7 @@ from wifit3.ui.colors import PASSWORD_MISMATCH_COLOR
 from textual.message import Message
 
 
-def _search_forms(value: str) -> tuple[str, str]:
+def _filter_forms(value: str) -> tuple[str, str]:
     normalized = unicodedata.normalize("NFKC", value).casefold()
     ascii_form = "".join(
         character
@@ -28,29 +28,38 @@ def _search_forms(value: str) -> tuple[str, str]:
     return normalized, ascii_form
 
 
-def matches_search(query: str, fields: Iterable[str]) -> bool:
+def matches_filter(query: str, fields: Iterable[str]) -> bool:
     """True when ``query`` is in any field, ignoring case, width and accents."""
-    query_form, ascii_query = _search_forms(query)
+    query_form, ascii_query = _filter_forms(query)
     for field in fields:
-        normalized, ascii_form = _search_forms(field)
+        normalized, ascii_form = _filter_forms(field)
         if query_form in normalized or ascii_query and ascii_query in ascii_form:
             return True
     return False
 
 
-class VaultSearchBar(Horizontal):
-    """The Vault's search input; Esc and Enter return focus to the AP list."""
+class VaultFilterBar(Horizontal):
+    """The Vault's filter input; Esc and Enter return focus to the AP list."""
 
     BINDINGS = [Binding("escape", "leave", "", show=False)]
 
     def compose(self) -> ComposeResult:
-        yield Input(placeholder="SSID, BSSID, or filename", id="vault-search", compact=True)
+        yield Input(placeholder="SSID, BSSID, or filename", id="vault-filter", compact=True)
 
     def action_leave(self) -> None:
         self.screen.query_one("#vault-aps", DataTable).focus()
 
     def on_input_submitted(self) -> None:
         self.action_leave()
+
+
+class VaultApsTable(DataTable):
+    BINDINGS = [
+        Binding("k", "cursor_up", show=False),
+        Binding("j", "cursor_down", show=False),
+        Binding("home,g", "scroll_top", show=False),
+        Binding("end,G", "scroll_bottom", show=False),
+    ]
 
 
 class VaultTable(Widget):
@@ -67,14 +76,14 @@ class VaultTable(Widget):
         border-title-color: $primary;
         border-title-style: bold;
     }
-    VaultTable #vault-search-bar {
+    VaultTable #vault-filter-bar {
         height: auto;
         padding: 0 1;
         border: round $primary;
         border-title-color: $primary;
         border-title-style: bold;
     }
-    VaultTable #vault-search {
+    VaultTable #vault-filter {
         width: 1fr;
     }
     VaultTable Tabs {
@@ -91,15 +100,15 @@ class VaultTable(Widget):
         self._nicknames: Dict[str, str] = {}
         self._nicknames_stale = True
         self._current_tab = "tab-all"
-        self._search_query = ""
+        self._filter_text = ""
         self._is_reloading = False
 
     def compose(self) -> ComposeResult:
-        search_bar = VaultSearchBar(id="vault-search-bar")
-        search_bar.border_title = "SEARCH"
-        yield search_bar
+        filter_bar = VaultFilterBar(id="vault-filter-bar")
+        filter_bar.border_title = "[u]F[/u]ILTER"
+        yield filter_bar
         yield Tabs(id="vault-tabs")
-        yield DataTable(id="vault-aps", show_header=False, cursor_type="row")
+        yield VaultApsTable(id="vault-aps", show_header=False, cursor_type="row")
 
     def on_mount(self) -> None:
         table = self.query_one("#vault-aps", DataTable)
@@ -183,8 +192,8 @@ class VaultTable(Widget):
             
             # Populate current tab
             for bssid, (ssid, caps) in rows:
-                if self._search_query and not matches_search(
-                        self._search_query,
+                if self._filter_text and not matches_filter(
+                        self._filter_text,
                         [ssid or "", bssid, self._nicknames.get(bssid, ""),
                          *(Path(c.path).name for c in caps)]):
                     continue
@@ -207,10 +216,6 @@ class VaultTable(Widget):
                     badges.append("[bold green]✓PIN[/]")
                 if any(c.type == CaptureType.WEP for c in caps):
                     badges.append("[bold green]✓WEP[/]")
-                if any(c.type == CaptureType.HS for c in caps):
-                    badges.append("[bold cyan]✓HS[/]")
-                if any(c.type == CaptureType.PMKID for c in caps):
-                    badges.append("[bold cyan]✓PMK[/]")
                 
                 badges_str = " ".join(badges)
                 markup = f"{name} {badges_str}{bssid_suffix}".strip()
@@ -248,11 +253,11 @@ class VaultTable(Widget):
         except Exception:
             return None
 
-    @on(Input.Changed, "#vault-search")
-    def _on_search_changed(self, event: Input.Changed) -> None:
+    @on(Input.Changed, "#vault-filter")
+    def _on_filter_changed(self, event: Input.Changed) -> None:
         query = event.value.strip()
-        if query != self._search_query:
-            self._search_query = query
+        if query != self._filter_text:
+            self._filter_text = query
             self.reload_table()
 
     @on(Tabs.TabActivated, "#vault-tabs")

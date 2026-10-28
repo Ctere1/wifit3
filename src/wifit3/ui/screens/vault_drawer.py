@@ -39,13 +39,13 @@ class VaultDrawer(ModalScreen):
     BINDINGS = [
         Binding("v", "dismiss_drawer", "Close", show=False),
         Binding("escape", "dismiss_drawer", "Close", show=True),
-        Binding("f", "focus_search", "Search", show=True),
-        Binding("/", "focus_search", "Search", show=False),
-        Binding("a", "add_credential", "Add", show=True),
+        Binding("f", "focus_filter", "Filter", show=False),
+        Binding("/", "focus_filter", "Filter", show=False),
         Binding("n", "set_nickname", "Nickname", show=True),
-        Binding("d", "delete_ap", "Del", show=True),
-        Binding("z", "export_zip", "Export Zip", show=True),
-        Binding("o", "show_directory", "Show Dir", show=True),
+        Binding("a", "add_credential", "Add Key", show=True),
+        Binding("o", "show_directory", "Open Dir", show=True),
+        Binding("z", "export_zip", "Export .zip", show=True),
+        Binding("d", "delete_ap", "Delete AP", show=True),
         Binding("q", "app.quit", "Quit", show=True),
     ]
 
@@ -124,8 +124,8 @@ class VaultDrawer(ModalScreen):
         except Exception:
             pass
 
-    def action_focus_search(self) -> None:
-        self.query_one("#vault-search", Input).focus()
+    def action_focus_filter(self) -> None:
+        self.query_one("#vault-filter", Input).focus()
 
     def action_dismiss_drawer(self) -> None:
         self._cancel_pending_selection()
